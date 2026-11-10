@@ -117,7 +117,8 @@ pub enum Command {
     Click,
     /// `rub 거리`: 머리를 그만큼(px) 문지른다.
     Rub(f64),
-    /// `do stretch|yawn|jump|sleep|sit`: 가끔 하는 행동을 바로 시킨다.
+    /// `do stretch|yawn|jump|sleep|sit|climb|hop`: 가끔 하는 행동을 바로 시킨다.
+    /// climb은 가까운 창 윗변으로 뛰어오르고, hop은 올라서 있던 창에서 뛰어내린다.
     Do(Whim),
     /// `away on|off`: 사용자가 자리를 비운 것으로, 또는 돌아온 것으로 친다.
     /// 한 번 쓰면 그 뒤로는 진짜 입력 시각을 보지 않는다.
@@ -180,6 +181,8 @@ pub fn parse_script(text: &str) -> Result<Vec<Step>, String> {
                 "jump" => Whim::Jump,
                 "sleep" => Whim::Sleep,
                 "sit" => Whim::Sit,
+                "climb" => Whim::Climb,
+                "hop" => Whim::Hop,
                 _ => return Err(bad()),
             }),
             (Some("away"), 3) if words[2] == "on" || words[2] == "off" => Command::Away(words[2] == "on"),

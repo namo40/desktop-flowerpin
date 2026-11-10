@@ -32,7 +32,7 @@ impl Monitor {
     ///
     /// `margin`은 벽에서 떨어져 설 거리(몸이 화면 밖으로 나가지 않게), `headroom`은 발바닥에서
     /// 화면 위 끝까지 남겨 둘 거리(들어 올려도 머리가 화면 위로 나가지 않게)다.
-    pub fn surroundings(&self, margin: f64, headroom: f64) -> Surroundings {
+    pub fn surroundings(&self, margin: f64, headroom: f64) -> Surroundings<'static> {
         let (left, right) = (self.work.x as f64 + margin, self.work.right() as f64 - margin);
         let floor = self.work.bottom() as f64;
         Surroundings {
@@ -43,6 +43,8 @@ impl Monitor {
             top: (self.area.y as f64 + headroom).min(floor),
             // 작업 영역 아래에 작업표시줄이 있으면 그 윗변이 걸터앉을 수 있는 단이다.
             ledge: self.work.bottom() < self.area.bottom(),
+            // 다른 창의 윗변은 꽃핀마다 몸 크기가 달라서 꽃핀 쪽에서 넣는다.
+            perches: &[],
         }
     }
 

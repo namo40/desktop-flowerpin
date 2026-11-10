@@ -12,8 +12,13 @@
 //! 가끔 혼자: stretch | yawn → idle2,  jump → (떠 있으면 fall) → land → …
 //! 잠:       sleep_in → sleep_loop(6~12초, 자리를 비웠으면 돌아올 때까지) → sleep_out → idle2
 //! 걸터앉기: 단 위에서 edge_in → edge_loop(3~6바퀴) → edge_out → idle2
+//! 창 위로:  가까운 창 윗변으로 jump(높이에 맞춰 한 번에) → land → 그 위에서 쉬고 걷는다
+//! 창에서:   jump로 뛰어내려 fall → 바닥에 land
 //! 사라지기: idle2가 첫 장으로 돌아올 때 despawn → 없어짐
 //! ```
+//!
+//! 다른 창의 윗변([`Perch`])은 바닥보다 높이 있는 또 하나의 바닥이다. 올라서면 그 윗변의 양 끝이 벽이 되고,
+//! 창이 움직이면 따라간다. 창이 없어지거나 선 자리가 가려지면 바닥까지 떨어진다.
 //!
 //! 한 번짜리 동작이 끝나면 팩에 적힌 "다음 동작"으로 넘어간다. 어떤 동작이 어떤 상태인지는
 //! [`mode_of`]가 정한다. 규칙과 값은 원본 데모에서 가져왔다.
@@ -22,6 +27,7 @@
 //! 길이와 빠르기 상수는 그림 1배 크기 기준이라, 쓸 때 표시 배율을 곱한다.
 
 use crate::motions::{MotionId, Motions};
+use crate::perch::Perch;
 
 /// 떨어지는 가속도(px/s²).
 const GRAVITY: f64 = 1500.0;
@@ -64,6 +70,24 @@ const WHIMS: [(Whim, f64); 4] = [(Whim::Stretch, 0.10), (Whim::Yawn, 0.10), (Whi
 const SIT_CHANCE: f64 = 0.10;
 /// 걸터앉아 다리를 흔드는 횟수.
 const SIT_LOOPS: (u32, u32) = (3, 6);
+/// 창 윗변으로 뛰어오를 때 떠 있는 시간(초). 제자리 점프와 같게 해서 점프 그림과 맞춘다.
+/// 높이 뛸수록 더 세게 박차고 더 빨리 내려온다.
+const LEAP_AIR: f64 = 2.0 * JUMP_SPEED / JUMP_GRAVITY;
+/// 뛰어오를 때 내려앉을 곳보다 이만큼(px) 더 높이 떴다가 내려앉는다.
+const LEAP_CLEAR: f64 = 28.0;
+/// 가로로 이만큼(px) 안에 있는 윗변으로만 뛰어오른다.
+const LEAP_REACH: f64 = 320.0;
+/// 쉬기를 마쳤을 때 가까운 창 윗변으로 뛰어오를 확률과, 창 위에서 뛰어내릴 확률.
+const CLIMB_CHANCE: f64 = 0.10;
+const HOP_CHANCE: f64 = 0.08;
+/// 창 윗변의 끝까지 걸어갔을 때 돌아서지 않고 뛰어내릴 확률.
+const HOP_AT_END: f64 = 0.35;
+/// 끝에서 뛰어내릴 때 바깥쪽으로 가는 빠르기(px/s).
+const HOP_SPEED: f64 = 110.0;
+/// 놓았을 때 발바닥이 윗변에서 이만큼(px) 안에 있으면 그 윗변에 올려놓은 것으로 친다.
+const PERCH_SNAP: f64 = 24.0;
+/// 올라선 창이 움직이면 이만큼(초) 동안 자리를 자주 고친다. 창을 끌고 다닐 때 뒤처져 보이지 않게 한다.
+const RIDE_SMOOTH: f64 = 0.3;
 /// 머리를 문지른 거리가 이만큼(px) 쌓이면 쓰다듬은 것으로 친다. 이 시간(초) 동안 문지르지 않으면 쌓인 거리를 버린다.
 const PAT_DISTANCE: f64 = 200.0;
 const PAT_KEEP: f64 = 0.7;
@@ -124,6 +148,28 @@ pub enum Whim {
     Sleep,
     /// 단의 앞 가장자리에 걸터앉기. 단 위에 있을 때만 고른다.
     Sit,
+    /// 가까운 창의 윗변으로 뛰어오르기. 뛰어오를 곳이 있을 때만 고른다.
+    Climb,
+    /// 올라서 있던 창에서 뛰어내리기. 창 위에 있을 때만 고른다.
+    Hop,
+}
+
+/// 창 윗변으로 뛰어오르는 길.
+///
+/// 떠 있는 시간([`LEAP_AIR`])이 정해져 있어서, 박찬 뒤 흐른 시간만으로 자리가 정해진다. 걸음마다 조금씩
+/// 더해 가지 않으므로, 걸음이 크든 작든 정한 자리에 꼭 내려앉는다.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Leap {
+    /// 내려앉을 창.
+    window: isize,
+    /// 박찬 자리. 박찰 때 적는다.
+    from: (f64, f64),
+    /// 옆으로 가는 빠르기와 박차는 빠르기(px/s), 중력(px/s²). 화면 px 기준이다.
+    vx: f64,
+    speed: f64,
+    gravity: f64,
+    /// 박찬 뒤 흐른 시간(초).
+    t: f64,
 }
 
 /// 꽃핀의 버릇.
@@ -141,9 +187,9 @@ impl Default for Habits {
     }
 }
 
-/// 꽃핀 둘레의 상황. 꽃핀이 있는 모니터에서 나온다.
+/// 꽃핀 둘레의 상황. 꽃핀이 있는 모니터와, 그 모니터에 떠 있는 다른 창들에서 나온다.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Surroundings {
+pub struct Surroundings<'a> {
     /// 바닥선의 y. 발바닥이 여기에 놓인다.
     pub floor: f64,
     /// 걸어갈 수 있는 x의 범위(벽). 꽃핀은 이 사이를 끝에서 끝까지 돌아다닌다.
@@ -154,6 +200,8 @@ pub struct Surroundings {
     /// 바닥이 단의 윗변이다(작업표시줄 위에 서 있다). 그러면 앞 가장자리에 걸터앉을 수 있다.
     /// 바닥이 화면의 아래 끝이면 걸터앉은 다리가 화면 밖으로 나가므로 앉지 않는다.
     pub ledge: bool,
+    /// 올라설 수 있는 다른 창의 윗변들.
+    pub perches: &'a [Perch],
 }
 
 /// 작고 빠른 난수. 쉬는 시간과 걷는 방향을 고르는 데 쓴다.
@@ -217,6 +265,18 @@ pub struct Actor {
     y: f64,
     /// 아래로 떨어지는 빠르기(px/s). 위로 뜰 때는 음수다.
     vy: f64,
+    /// 떠 있는 동안 옆으로 가는 빠르기(px/s). 창으로 뛰어오르거나 창 끝에서 뛰어내릴 때만 0이 아니다.
+    vx: f64,
+    /// 올라서 있는 창과, 마지막으로 봤을 때 그 창의 왼쪽 끝. 바닥에 있거나 떠 있으면 `None`이다.
+    on: Option<(isize, f64)>,
+    /// 떨어지는 동안 창 윗변을 지나쳐 바닥까지 간다. 스스로 뛰어내렸거나 딛고 있던 윗변이 없어졌을 때다.
+    through: bool,
+    /// 창 윗변으로 뛰어오르는 길. 뛰어오르는 동안에만 있다.
+    leap: Option<Leap>,
+    /// 뛰어내릴 방향. 없으면 제자리에서 뛰어 앞으로 내려온다.
+    hop_dir: Option<Dir>,
+    /// 올라선 창이 방금 움직였다. 이 시간(초) 동안 자리를 자주 고친다.
+    riding: f64,
     /// 표시 배율. 길이와 빠르기 상수에 곱한다.
     scale: f64,
     /// 마지막으로 내려앉은 곳.
@@ -274,6 +334,12 @@ impl Actor {
             x,
             y,
             vy: 0.0,
+            vx: 0.0,
+            on: None,
+            through: false,
+            leap: None,
+            hop_dir: None,
+            riding: 0.0,
             scale,
             home: x,
             walk: None,
@@ -316,6 +382,26 @@ impl Actor {
     /// 마지막으로 내려앉은 곳. 다시 켰을 때 나타날 자리로 쓴다.
     pub fn home(&self) -> f64 {
         self.home
+    }
+
+    /// 올라서 있는 창. 바닥에 있거나 떠 있으면 `None`이다.
+    pub fn support(&self) -> Option<isize> {
+        self.on.map(|(window, _)| window)
+    }
+
+    /// 공중에 있어서 어디에 내려앉을지 알아야 하는가.
+    pub fn is_airborne(&self) -> bool {
+        matches!(self.mode, Mode::Release | Mode::Fall | Mode::Emerge | Mode::Spawn)
+            || (self.mode == Mode::Jump && self.launched)
+    }
+
+    /// 발밑에 있는 바닥의 y. 창 위에 있거나 창 윗변으로 내려앉는 중이면 그 윗변이다. 그림자가 여기에 진다.
+    pub fn ground_below(&self, around: &Surroundings) -> f64 {
+        if self.through {
+            return around.floor;
+        }
+        let below = around.perches.iter().filter(|perch| perch.y >= self.y - 0.5 && perch.holds(self.x));
+        below.map(|perch| perch.y).fold(around.floor, f64::min)
     }
 
     /// 끌려가는 목표. 잡혀 있을 때만 뜻이 있다.
@@ -414,6 +500,100 @@ impl Actor {
                 let (least, most) = SIT_LOOPS;
                 self.sit_left = least + (self.rng.unit() * (most - least + 1) as f64) as u32;
             }
+            // 둘레를 봐야 시작할 수 있다. 다음에 바닥에서 걸음을 밟을 때 시작한다.
+            Whim::Climb | Whim::Hop => {
+                if self.mode == Mode::Ground {
+                    self.walk = None;
+                    self.turn_to = None;
+                    self.hop_dir = None;
+                    self.pending = Some(whim);
+                }
+            }
+        }
+    }
+
+    /// 뛰어오를 창 윗변을 고른다. 가로로 가장 가까운 것이고, 너무 멀면 고르지 않는다.
+    fn climb_target(&self, around: &Surroundings) -> Option<Perch> {
+        let reach = LEAP_REACH * self.scale;
+        // 지금 딛고 있는 토막은 뺀다.
+        let here = |perch: &Perch| self.on.is_some() && (perch.y - self.y).abs() < 0.5 && perch.holds(self.x);
+        let near = around.perches.iter().filter(|perch| !here(perch) && perch.gap(self.x) <= reach);
+        near.min_by(|a, b| {
+            let sideways = a.gap(self.x).total_cmp(&b.gap(self.x));
+            sideways.then((a.y - self.y).abs().total_cmp(&(b.y - self.y).abs()))
+        })
+        .copied()
+    }
+
+    /// 가까운 창 윗변으로 뛰어오르기 시작한다. 뛰어오를 곳이 없으면 `false`다.
+    ///
+    /// 떠 있는 시간은 늘 같다. 그 시간에 꼭 맞게 올라갔다가 윗변에 내려앉도록 중력과 박차는 빠르기를 정한다.
+    /// 그래서 아무리 높은 곳도 한 번에 뛰어오르고, 점프 그림과도 맞는다.
+    fn start_climb(&mut self, motions: &Motions, around: &Surroundings) -> bool {
+        let Some(target) = self.climb_target(around) else { return false };
+        let land_x = self.x.clamp(target.left, target.right);
+        let peak = self.y.min(target.y) - LEAP_CLEAR * self.scale;
+        let (up, down) = (self.y - peak, target.y - peak);
+        let gravity = 2.0 * (up.sqrt() + down.sqrt()).powi(2) / (LEAP_AIR * LEAP_AIR);
+        let speed = (2.0 * gravity * up).sqrt();
+        self.act(motions.jump);
+        self.mode = Mode::Jump;
+        self.vy = 0.0;
+        self.launched = false;
+        self.through = false;
+        self.vx = 0.0;
+        let vx = (land_x - self.x) / LEAP_AIR;
+        self.leap = Some(Leap { window: target.window, from: (self.x, self.y), vx, speed, gravity, t: 0.0 });
+        true
+    }
+
+    /// 뛰어오르는 길을 따라 `dt`초만큼 간다. 윗변에 내려앉았으면 `true`를 돌려준다.
+    ///
+    /// 다 왔는데 그 창의 윗변이 그 자리에 없으면(그사이에 닫혔거나 옮겨졌으면) 그대로 떨어진다.
+    fn leap_step(&mut self, dt: f64, motions: &Motions, around: &Surroundings) -> bool {
+        let Some(mut leap) = self.leap else { return false };
+        leap.t += dt;
+        let t = leap.t.min(LEAP_AIR);
+        self.x = leap.from.0 + leap.vx * t;
+        self.y = leap.from.1 - leap.speed * t + 0.5 * leap.gravity * t * t;
+        self.vy = leap.gravity * t - leap.speed;
+        if leap.t < LEAP_AIR {
+            self.leap = Some(leap);
+            return false;
+        }
+        self.leap = None;
+        let snap = PERCH_SNAP * self.scale;
+        let waiting =
+            |perch: &&Perch| perch.window == leap.window && perch.holds(self.x) && (perch.y - self.y).abs() <= snap;
+        if let Some(perch) = around.perches.iter().find(waiting).copied() {
+            self.touch_down(motions, perch.y, Some(perch));
+            return true;
+        }
+        false
+    }
+
+    /// 올라서 있던 창에서 뛰어내리기 시작한다. `dir`이 있으면 그쪽 바깥으로, 없으면 제자리에서 뛴다.
+    /// 다른 창 윗변을 지나쳐 바닥까지 내려간다.
+    fn start_hop(&mut self, motions: &Motions, dir: Option<Dir>) {
+        self.act(motions.jump);
+        self.mode = Mode::Jump;
+        self.vy = 0.0;
+        self.launched = false;
+        self.leap = None;
+        self.through = true;
+        self.vx = dir.map_or(0.0, |dir| dir.sign() * HOP_SPEED * self.scale);
+    }
+
+    /// 쉬다가 고른 행동을 시작한다. 뛰어오르거나 뛰어내릴 수 없게 됐으면 그만두고 다시 쉰다.
+    fn begin(&mut self, whim: Whim, motions: &Motions, around: &Surroundings) {
+        match whim {
+            Whim::Climb if self.start_climb(motions, around) => {}
+            Whim::Hop if self.on.is_some() => {
+                let dir = self.hop_dir.take();
+                self.start_hop(motions, dir);
+            }
+            Whim::Climb | Whim::Hop => self.rest(motions, REST),
+            other => self.start(other, motions),
         }
     }
 
@@ -471,6 +651,11 @@ impl Actor {
         self.motion = motions.hang;
         self.t = 0.0;
         self.vy = 0.0;
+        self.vx = 0.0;
+        self.on = None;
+        self.through = false;
+        self.leap = None;
+        self.riding = 0.0;
         self.walk = None;
         self.turn_to = None;
         self.pending = None;
@@ -524,18 +709,73 @@ impl Actor {
     pub fn update(&mut self, dt: f64, motions: &Motions, around: &Surroundings) {
         let dt = dt.clamp(0.0, MAX_STEP);
         self.pat_quiet += dt;
-        match self.mode {
-            Mode::Gone => return,
-            Mode::Ground => self.ground_step(dt, motions, around),
-            _ => self.air_step(dt, motions, around),
+        self.riding = (self.riding - dt).max(0.0);
+        if self.mode == Mode::Gone {
+            return;
         }
-        if around.left <= around.right {
-            self.x = self.x.clamp(around.left, around.right);
+        // 창 위에 서 있으면 그 윗변이 바닥이고 양 끝이 벽이다.
+        let here = self.footing(motions, around);
+        match self.mode {
+            Mode::Ground => self.ground_step(dt, motions, &here),
+            _ => self.air_step(dt, motions, &here),
+        }
+        if here.left <= here.right {
+            self.x = self.x.clamp(here.left, here.right);
         }
     }
 
+    /// 무엇인가를 딛고 서 있는가. 떠 있거나 잡혀 있으면 아니다.
+    fn is_standing(&self) -> bool {
+        match self.mode {
+            Mode::Ground | Mode::Act | Mode::Sleep | Mode::Sit | Mode::Land | Mode::Settle | Mode::Vanish => true,
+            // 박차기 전에는 아직 딛고 있다.
+            Mode::Jump => !self.launched,
+            _ => false,
+        }
+    }
+
+    /// 딛고 있는 곳의 상황을 돌려준다. 창 위에 서 있으면 그 윗변이 바닥이고 양 끝이 벽이다.
+    ///
+    /// 창이 움직였으면 따라 움직인다. 딛고 있던 윗변이 없어졌으면(창을 닫았거나, 최소화했거나, 선 자리가
+    /// 다른 창에 가려졌으면) 그 자리에서 바닥까지 떨어지기 시작한다.
+    fn footing<'a>(&mut self, motions: &Motions, around: &Surroundings<'a>) -> Surroundings<'a> {
+        let Some((window, origin)) = self.on else { return *around };
+        if !self.is_standing() {
+            return *around;
+        }
+        // 그 창의 윗변 토막 가운데, 창이 옆으로 움직인 만큼 옮긴 자리를 받치는 것을 찾는다.
+        let under = |perch: &&Perch| perch.window == window && perch.holds(self.x + perch.origin - origin);
+        let Some(perch) = around.perches.iter().find(under) else {
+            self.on = None;
+            self.through = true;
+            self.mode = Mode::Fall;
+            self.motion = motions.fall;
+            self.t = 0.0;
+            self.vy = 0.0;
+            self.vx = 0.0;
+            self.leap = None;
+            self.walk = None;
+            self.turn_to = None;
+            self.pending = None;
+            self.showcase = false;
+            return *around;
+        };
+        let (dx, dy) = (perch.origin - origin, perch.y - self.y);
+        if dx.abs() > 0.01 || dy.abs() > 0.01 {
+            self.riding = RIDE_SMOOTH;
+        }
+        self.x += dx;
+        self.y = perch.y;
+        self.on = Some((window, perch.origin));
+        Surroundings { floor: perch.y, left: perch.left, right: perch.right, ledge: true, ..*around }
+    }
+
     /// 장이 바뀌지 않아도 자리를 자주 고쳐야 하는가. 떨어지는 중이거나 끌려가는 중이면 그렇다.
+    /// 올라선 창이 움직이는 동안에도 그렇다.
     pub fn moves_smoothly(&self) -> bool {
+        if self.riding > 0.0 && self.mode != Mode::Gone {
+            return true;
+        }
         match self.mode {
             Mode::Fall => true,
             Mode::Drag => (self.drag.0 - self.x).abs() > 0.5 || (self.drag.1 - self.y).abs() > 0.5,
@@ -642,24 +882,49 @@ impl Actor {
         }
     }
 
-    /// 중력 `gravity`로 한 걸음 떨어진다. 바닥에 닿았으면 착지하고 `true`를 돌려준다.
+    /// 중력 `gravity`로 한 걸음 떨어진다. 바닥이나 창 윗변에 닿았으면 착지하고 `true`를 돌려준다.
     fn fall_step(&mut self, dt: f64, gravity: f64, motions: &Motions, around: &Surroundings) -> bool {
+        let before = self.y;
         self.vy += gravity * self.scale * dt;
         self.y += self.vy * dt;
-        if self.vy > 0.0 && self.y >= around.floor {
-            self.touch_down(motions, around);
+        self.x += self.vx * dt;
+        if self.vy <= 0.0 {
+            return false;
+        }
+        if !self.through {
+            // 이번 걸음에 위에서 아래로 지나친 윗변 가운데 가장 높은 것에 내려앉는다.
+            let crossed = |perch: &&Perch| before <= perch.y && self.y >= perch.y && perch.holds(self.x);
+            if let Some(perch) = around.perches.iter().filter(crossed).min_by(|a, b| a.y.total_cmp(&b.y)).copied() {
+                self.touch_down(motions, perch.y, Some(perch));
+                return true;
+            }
+        }
+        if self.y >= around.floor {
+            self.touch_down(motions, around.floor, None);
             return true;
         }
         false
     }
 
-    fn touch_down(&mut self, motions: &Motions, around: &Surroundings) {
-        self.y = around.floor;
+    /// 높이 `y`에 내려앉는다. `perch`가 있으면 그 창 윗변에 올라선 것이다.
+    fn touch_down(&mut self, motions: &Motions, y: f64, perch: Option<Perch>) {
+        self.y = y;
         self.vy = 0.0;
+        self.vx = 0.0;
+        self.leap = None;
+        self.through = false;
+        self.on = perch.map(|perch| (perch.window, perch.origin));
         self.home = self.x;
         self.mode = Mode::Land;
         self.motion = motions.land;
         self.t = 0.0;
+    }
+
+    /// 놓은 자리의 발밑 가까이에 있는 창 윗변. 그 위에 올려놓은 것으로 친다.
+    fn perch_at_feet(&self, around: &Surroundings) -> Option<Perch> {
+        let snap = PERCH_SNAP * self.scale;
+        let near = around.perches.iter().filter(|perch| perch.holds(self.x) && (perch.y - self.y).abs() <= snap);
+        near.min_by(|a, b| (a.y - self.y).abs().total_cmp(&(b.y - self.y).abs())).copied()
     }
 
     /// 바닥에 있지 않을 때의 한 걸음.
@@ -679,13 +944,22 @@ impl Actor {
                     return;
                 }
                 if self.y >= around.floor {
-                    self.touch_down(motions, around);
+                    self.touch_down(motions, around.floor, None);
+                } else if let (Mode::Release, Some(perch)) = (self.mode, self.perch_at_feet(around)) {
+                    // 창 윗변 가까이에 놓았다. 떨어뜨리지 않고 그 위에 올려놓는다.
+                    self.touch_down(motions, perch.y, Some(perch));
                 } else {
                     self.follow_when_over(motions);
                 }
             }
             Mode::Fall => {
-                if !self.fall_step(dt, GRAVITY, motions, around) {
+                // 창으로 뛰어오르다 점프 그림이 먼저 끝났으면, 가던 길을 마저 간다.
+                let landed = if self.leap.is_some() {
+                    self.leap_step(dt, motions, around)
+                } else {
+                    self.fall_step(dt, GRAVITY, motions, around)
+                };
+                if !landed {
                     self.wrap(motions);
                 }
             }
@@ -693,9 +967,18 @@ impl Actor {
                 if self.t >= self.launch_ms(motions) {
                     if !self.launched {
                         self.launched = true;
-                        self.vy = -JUMP_SPEED * self.scale;
+                        self.on = None;
+                        match &mut self.leap {
+                            Some(leap) => leap.from = (self.x, self.y),
+                            None => self.vy = -JUMP_SPEED * self.scale,
+                        }
                     }
-                    if self.fall_step(dt, JUMP_GRAVITY, motions, around) {
+                    let landed = if self.leap.is_some() {
+                        self.leap_step(dt, motions, around)
+                    } else {
+                        self.fall_step(dt, JUMP_GRAVITY, motions, around)
+                    };
+                    if landed {
                         return;
                     }
                 }
@@ -773,11 +1056,17 @@ impl Actor {
 
     /// 쉬기를 마쳤을 때 가끔 하는 행동 가운데 하나를 고른다. 고르지 않으면 `None`이다.
     ///
-    /// `ledge`는 단 위에 서 있는지다. 단 위에서만 걸터앉기를 고른다.
-    fn pick_whim(&mut self, ledge: bool) -> Option<Whim> {
-        let sit = (Whim::Sit, if ledge { SIT_CHANCE } else { 0.0 });
+    /// `ledge`는 단 위에 서 있는지다. 단 위에서만 걸터앉기를 고른다. `can_climb`은 뛰어오를 창 윗변이
+    /// 가까이에 있는지다. 창 위에 서 있을 때만 뛰어내리기를 고른다.
+    fn pick_whim(&mut self, ledge: bool, can_climb: bool) -> Option<Whim> {
+        let chance_if = |yes: bool, chance: f64| if yes { chance } else { 0.0 };
+        let first = [
+            (Whim::Sit, chance_if(ledge, SIT_CHANCE)),
+            (Whim::Climb, chance_if(can_climb, CLIMB_CHANCE)),
+            (Whim::Hop, chance_if(self.on.is_some(), HOP_CHANCE)),
+        ];
         let mut r = self.rng.unit();
-        for &(whim, chance) in std::iter::once(&sit).chain(&WHIMS) {
+        for &(whim, chance) in first.iter().chain(&WHIMS) {
             r -= chance * self.habits.whim_rate;
             if r < 0.0 {
                 return Some(whim);
@@ -829,7 +1118,7 @@ impl Actor {
             // 가끔 하는 행동도 idle2의 첫 장에서 이어지게 그려져 있다. 혼자 시작하는 것이라 서두를 까닭이 없으므로
             // idle2가 첫 장으로 돌아올 때까지 기다렸다 시작한다.
             if self.idle2_at_first_frame(dt, motions) {
-                self.start(whim, motions);
+                self.begin(whim, motions, around);
             }
             return;
         }
@@ -837,10 +1126,16 @@ impl Actor {
         self.wait -= dt;
         if let Some(dir) = self.walk {
             if self.at_edge(dir, around) {
-                // 벽에 닿으면 잠깐 섰다가 돌아선다.
                 self.walk = None;
-                self.turn_to = Some(dir.opposite());
-                self.wait = self.rng.range(TURN_PAUSE);
+                if self.on.is_some() && self.habits.whim_rate > 0.0 && self.rng.chance(HOP_AT_END) {
+                    // 창 윗변의 끝이다. 돌아서지 않고 바깥쪽으로 뛰어내리기도 한다.
+                    self.hop_dir = Some(dir);
+                    self.pending = Some(Whim::Hop);
+                } else {
+                    // 벽에 닿으면 잠깐 섰다가 돌아선다.
+                    self.turn_to = Some(dir.opposite());
+                    self.wait = self.rng.range(TURN_PAUSE);
+                }
             } else if self.wait <= 0.0 {
                 self.walk = None;
                 if self.rng.chance(TURN_CHANCE) {
@@ -864,7 +1159,9 @@ impl Actor {
             // 사용자가 자리를 비웠으면 쉬는 김에 잠든다.
             self.pending = Some(Whim::Sleep);
         } else if self.wait <= 0.0 {
-            if let Some(whim) = self.pick_whim(around.ledge) {
+            let can_climb = self.climb_target(around).is_some();
+            if let Some(whim) = self.pick_whim(around.ledge, can_climb) {
+                self.hop_dir = None;
                 self.pending = Some(whim);
             } else if self.habits.roam {
                 // 어느 쪽으로든 걷는다. 그래서 벽에서 벽까지 어디든 간다.
@@ -908,7 +1205,8 @@ mod tests {
     use crate::motions::tests::{sample, sample_24fps};
 
     /// 화면의 아래 끝이 바닥인 곳. 걸터앉을 단이 없다.
-    const AROUND: Surroundings = Surroundings { floor: 1000.0, left: 100.0, right: 1900.0, top: 150.0, ledge: false };
+    const AROUND: Surroundings =
+        Surroundings { floor: 1000.0, left: 100.0, right: 1900.0, top: 150.0, ledge: false, perches: &[] };
     /// 작업표시줄 위. 바닥이 단의 윗변이다.
     const ON_LEDGE: Surroundings = Surroundings { ledge: true, ..AROUND };
     /// 시험에서 시간을 흘리는 걸음(초). 앱은 1/24초나 1/60초마다 부른다.
@@ -1211,7 +1509,7 @@ mod tests {
         let motions = sample();
         let sits = |around: &Surroundings| {
             let mut actor = Actor::stand(&motions, 1000.0, around.floor, 1.0, 11);
-            (0..20000).filter(|_| actor.pick_whim(around.ledge) == Some(Whim::Sit)).count() as f64 / 200.0
+            (0..20000).filter(|_| actor.pick_whim(around.ledge, false) == Some(Whim::Sit)).count() as f64 / 200.0
         };
         // 단 위에서는 쉬기를 마칠 때 10%.
         assert!((sits(&ON_LEDGE) - 10.0).abs() < 1.0, "{}", sits(&ON_LEDGE));
@@ -1618,5 +1916,385 @@ mod tests {
             assert!((1.5..4.0).contains(&v));
         }
         assert!((0..1000).filter(|_| rng.chance(0.25)).count().abs_diff(250) < 60);
+    }
+
+    /// 바닥(y 1000)보다 400px 높이 떠 있는 창의 윗변. 발바닥이 설 수 있는 범위는 x 800~1200이다.
+    const WINDOW: Perch = Perch { window: 7, y: 600.0, left: 800.0, right: 1200.0, origin: 730.0 };
+    /// 그 아래에 있는 더 넓은 창의 윗변.
+    const LOWER: Perch = Perch { window: 8, y: 800.0, left: 600.0, right: 1400.0, origin: 530.0 };
+
+    /// 작업표시줄 위이고, 창들이 떠 있는 곳.
+    fn among(perches: &[Perch]) -> Surroundings<'_> {
+        Surroundings { perches, ..ON_LEDGE }
+    }
+
+    /// 창 윗변 `perch`의 `x`에 이미 올라서 있는 꽃핀.
+    fn standing_on(motions: &Motions, perch: Perch, x: f64, seed: u64) -> Actor {
+        let mut actor = Actor::stand(motions, x, perch.y, 1.0, seed);
+        actor.on = Some((perch.window, perch.origin));
+        actor
+    }
+
+    /// 잡아서 `to`로 옮긴 뒤 놓는다.
+    fn carry_and_drop(actor: &mut Actor, motions: &Motions, around: &Surroundings, to: (f64, f64)) {
+        assert!(actor.grab(motions, to));
+        run(actor, motions, around, 1.0);
+        actor.release(motions);
+    }
+
+    #[test]
+    fn dropped_above_a_window_lands_on_its_top_edge_and_stays_there() {
+        let motions = sample();
+        let perches = [WINDOW];
+        let around = among(&perches);
+        let mut actor = Actor::stand(&motions, 1000.0, AROUND.floor, 1.0, 5);
+        // 가끔 하는 행동은 끄고 쉬기와 걷기만 본다. 그러면 윗변 끝에서도 뛰어내리지 않고 돌아선다.
+        actor.set_habits(Habits { whim_rate: 0.0, ..Habits::default() });
+        carry_and_drop(&mut actor, &motions, &around, (1000.0, 300.0));
+        let seen = run(&mut actor, &motions, &around, 5.0);
+        assert_eq!(names(&seen)[..5], ["hang_to_fall", "fall", "land", "land_to_idle2", "idle2"]);
+        // 놓은 자리의 바로 아래 윗변에 내려앉았다.
+        assert_eq!((actor.support(), actor.position().1, actor.home()), (Some(7), 600.0, 1000.0));
+
+        // 그 위에서 쉬고 걷는다. 윗변의 양 끝이 벽이다.
+        let (mut low, mut high) = (f64::MAX, f64::MIN);
+        for _ in 0..(1800.0 / STEP) as usize {
+            actor.update(STEP, &motions, &around);
+            let (x, y) = actor.position();
+            assert_eq!((actor.mode(), actor.support(), y), (Mode::Ground, Some(7), 600.0));
+            low = low.min(x);
+            high = high.max(x);
+        }
+        assert!(low >= WINDOW.left && high <= WINDOW.right, "{low}..{high}");
+        assert!(high - low > 300.0, "윗변을 돌아다니지 않음: {low}..{high}");
+    }
+
+    #[test]
+    fn dropped_beside_or_below_the_edge_falls_to_the_floor() {
+        let motions = sample();
+        let perches = [WINDOW];
+        let around = among(&perches);
+        // 윗변의 범위 밖, 그리고 윗변보다 아래(창의 앞)에서 놓는다.
+        for to in [(700.0, 300.0), (1000.0, 700.0)] {
+            let mut actor = Actor::stand(&motions, 1000.0, AROUND.floor, 1.0, 5);
+            actor.set_habits(Habits { roam: false, whim_rate: 0.0 });
+            carry_and_drop(&mut actor, &motions, &around, to);
+            run(&mut actor, &motions, &around, 5.0);
+            let (x, y) = actor.position();
+            assert_eq!((actor.support(), y), (None, AROUND.floor), "{to:?}");
+            assert!((x - to.0).abs() < 1e-6, "{to:?}: {x}");
+        }
+    }
+
+    #[test]
+    fn put_down_right_at_the_edge_stands_on_it_at_once() {
+        let motions = sample();
+        let perches = [WINDOW];
+        let around = among(&perches);
+        // 윗변보다 조금 아래에 놓아도, 조금 위에 놓아도 그 위에 올려놓은 것이다.
+        for y in [612.0, 590.0] {
+            let mut actor = Actor::stand(&motions, 1000.0, AROUND.floor, 1.0, 5);
+            carry_and_drop(&mut actor, &motions, &around, (1000.0, y));
+            actor.update(STEP, &motions, &around);
+            assert_eq!((actor.mode(), actor.support(), actor.position().1), (Mode::Land, Some(7), 600.0), "{y}");
+        }
+    }
+
+    #[test]
+    fn rides_along_when_the_window_moves() {
+        let motions = sample();
+        let mut actor = standing_on(&motions, WINDOW, 1000.0, 5);
+        actor.set_habits(Habits { roam: false, whim_rate: 0.0 });
+        run(&mut actor, &motions, &among(&[WINDOW]), 1.0);
+        assert!(!actor.moves_smoothly());
+        // 창이 오른쪽으로 100, 위로 50 움직였다.
+        let moved = [Perch { y: 550.0, left: 900.0, right: 1300.0, origin: 830.0, ..WINDOW }];
+        actor.update(STEP, &motions, &among(&moved));
+        assert_eq!((actor.support(), actor.position()), (Some(7), (1100.0, 550.0)));
+        // 움직이는 동안에는 자리를 자주 고친다. 멈추면 다시 장에 맞춰 산다.
+        assert!(actor.moves_smoothly());
+        assert!((actor.wake_in(&motions) - SMOOTH_STEP).abs() < 1e-9);
+        run(&mut actor, &motions, &among(&moved), 1.0);
+        assert!(!actor.moves_smoothly());
+        assert_eq!((actor.mode(), actor.position()), (Mode::Ground, (1100.0, 550.0)));
+    }
+
+    #[test]
+    fn falls_to_the_floor_when_the_window_goes_away() {
+        let motions = sample();
+        for (name, start) in [("쉬는 중", None), ("자는 중", Some(Whim::Sleep)), ("걸터앉은 중", Some(Whim::Sit))]
+        {
+            let mut actor = standing_on(&motions, WINDOW, 1000.0, 5);
+            actor.set_habits(Habits { roam: false, whim_rate: 0.0 });
+            if let Some(whim) = start {
+                actor.start(whim, &motions);
+            }
+            run(&mut actor, &motions, &among(&[WINDOW, LOWER]), 1.0);
+            assert_eq!(actor.support(), Some(7), "{name}");
+            // 창을 닫았다. 아래에 다른 창이 있어도 그 위에 서지 않고 바닥까지 떨어진다.
+            let left = [LOWER];
+            let seen = run(&mut actor, &motions, &among(&left), 5.0);
+            assert!(names(&seen).contains(&"fall") && names(&seen).contains(&"land"), "{name}: {seen:?}");
+            assert_eq!((actor.support(), actor.position()), (None, (1000.0, AROUND.floor)), "{name}");
+            assert_eq!(actor.mode(), Mode::Ground, "{name}");
+        }
+    }
+
+    #[test]
+    fn falls_when_the_spot_gets_covered() {
+        let motions = sample();
+        let mut actor = standing_on(&motions, WINDOW, 1000.0, 5);
+        actor.set_habits(Habits { roam: false, whim_rate: 0.0 });
+        run(&mut actor, &motions, &among(&[WINDOW]), 1.0);
+        // 다른 창이 앞으로 나와 선 자리를 가렸다. 그 창의 윗변은 양쪽 토막만 남았다.
+        let covered = [Perch { right: 900.0, ..WINDOW }, Perch { left: 1100.0, ..WINDOW }];
+        run(&mut actor, &motions, &among(&covered), 5.0);
+        assert_eq!((actor.support(), actor.position()), (None, (1000.0, AROUND.floor)));
+    }
+
+    #[test]
+    fn picking_up_from_a_window_lets_go_of_it() {
+        let motions = sample();
+        let mut actor = standing_on(&motions, WINDOW, 1000.0, 5);
+        let perches = [WINDOW];
+        run(&mut actor, &motions, &among(&perches), 0.5);
+        assert!(actor.grab(&motions, (300.0, 300.0)));
+        assert_eq!(actor.support(), None);
+        run(&mut actor, &motions, &among(&perches), 1.0);
+        actor.release(&motions);
+        run(&mut actor, &motions, &among(&perches), 5.0);
+        assert_eq!((actor.support(), actor.position().1), (None, AROUND.floor));
+    }
+
+    #[test]
+    fn leaps_onto_a_window_however_high_in_one_jump() {
+        let motions = sample();
+        // (윗변의 높이, 처음 선 x, 내려앉을 x, 배율). 윗변 아래에서도, 옆에서도, 아주 높아도 한 번에 올라간다.
+        let cases = [
+            (100.0, 1000.0, 1000.0, 1.0),
+            (400.0, 1350.0, 1200.0, 1.0),
+            (840.0, 500.0, 800.0, 1.0),
+            (840.0, 1700.0, 1200.0, 2.0),
+        ];
+        for (height, from, to, scale) in cases {
+            let perches = [Perch { y: AROUND.floor - height, ..WINDOW }];
+            let around = among(&perches);
+            let mut actor = Actor::stand(&motions, from, AROUND.floor, scale, 3);
+            actor.set_habits(Habits { whim_rate: 0.0, ..Habits::default() });
+            actor.start(Whim::Climb, &motions);
+            let (mut airborne, mut highest) = (0.0, f64::MAX);
+            let mut seen = Vec::new();
+            for _ in 0..(4.0 / STEP) as usize {
+                actor.update(STEP, &motions, &around);
+                if actor.is_airborne() {
+                    airborne += STEP;
+                }
+                highest = highest.min(actor.position().1);
+                seen.push(motions.clip(actor.motion()).name.clone());
+                if actor.mode() == Mode::Land {
+                    break;
+                }
+            }
+            seen.dedup();
+            let case = format!("높이 {height}, {from} → {to}, {scale}배");
+            assert_eq!((actor.mode(), actor.support()), (Mode::Land, Some(7)), "{case}: {seen:?}");
+            assert_eq!(actor.position(), (to, AROUND.floor - height), "{case}");
+            // 떠 있는 시간은 높이와 상관없이 같고, 내려앉을 곳보다 조금 더 높이 떴다가 내려앉는다.
+            assert!((airborne - LEAP_AIR).abs() < 2.5 * STEP, "{case}: {airborne}초");
+            let cleared = AROUND.floor - height - highest;
+            assert!((cleared - LEAP_CLEAR * scale).abs() < 2.0, "{case}: {cleared}px 더 뜸");
+            assert!(seen.contains(&"jump".to_string()), "{case}: {seen:?}");
+        }
+    }
+
+    #[test]
+    fn does_not_leap_at_a_window_too_far_to_the_side() {
+        let motions = sample();
+        let perches = [WINDOW];
+        let around = among(&perches);
+        // 윗변의 오른쪽 끝(1200)에서 321px 떨어져 있다. 320px까지만 뛰어오른다.
+        let mut actor = Actor::stand(&motions, 1521.0, AROUND.floor, 1.0, 3);
+        actor.set_habits(Habits { roam: false, whim_rate: 0.0 });
+        assert!(actor.climb_target(&around).is_none());
+        actor.start(Whim::Climb, &motions);
+        let seen = run(&mut actor, &motions, &around, 4.0);
+        assert_eq!(names(&seen), ["idle2"]);
+        actor.x = 1520.0;
+        assert_eq!(actor.climb_target(&around), Some(WINDOW));
+        // 가까운 윗변이 여럿이면 옆으로 가장 가까운 것을 고른다.
+        let two = [WINDOW, Perch { window: 9, y: 300.0, left: 1400.0, right: 1800.0, origin: 1330.0 }];
+        assert_eq!(actor.climb_target(&among(&two)).map(|perch| perch.window), Some(9));
+    }
+
+    #[test]
+    fn a_leap_whose_window_moved_away_falls_to_the_floor() {
+        let motions = sample();
+        let perches = [WINDOW];
+        let mut actor = Actor::stand(&motions, 1000.0, AROUND.floor, 1.0, 3);
+        actor.set_habits(Habits { roam: false, whim_rate: 0.0 });
+        actor.start(Whim::Climb, &motions);
+        // 떠 있는 동안 창이 옆으로 치워졌다.
+        let mut gone = false;
+        for _ in 0..(6.0 / STEP) as usize {
+            if actor.is_airborne() {
+                gone = true;
+            }
+            let moved = [Perch { left: 1500.0, right: 1900.0, origin: 1430.0, ..WINDOW }];
+            actor.update(STEP, &motions, &among(if gone { &moved } else { &perches }));
+        }
+        assert!(gone);
+        assert_eq!((actor.mode(), actor.support(), actor.position()), (Mode::Ground, None, (1000.0, AROUND.floor)));
+    }
+
+    #[test]
+    fn hopping_off_goes_all_the_way_down_to_the_floor() {
+        let motions = sample();
+        let perches = [WINDOW, LOWER];
+        let around = among(&perches);
+        let mut actor = standing_on(&motions, WINDOW, 1000.0, 5);
+        actor.set_habits(Habits { roam: false, whim_rate: 0.0 });
+        actor.start(Whim::Hop, &motions);
+        let seen = run(&mut actor, &motions, &around, 6.0);
+        assert_eq!(names(&seen), ["idle2", "jump", "fall", "land", "land_to_idle2", "idle2"]);
+        // 아래에 있는 창을 지나쳐 바닥에 내려앉는다.
+        assert_eq!((actor.support(), actor.position()), (None, (1000.0, AROUND.floor)));
+        // 바닥에서는 뛰어내릴 것이 없다. 시켜도 그냥 쉰다.
+        actor.start(Whim::Hop, &motions);
+        assert_eq!(names(&run(&mut actor, &motions, &around, 3.0)), ["idle2"]);
+    }
+
+    #[test]
+    fn at_the_end_of_the_edge_turns_around_or_hops_off() {
+        let motions = sample();
+        let perches = [WINDOW];
+        let around = among(&perches);
+        let (mut hopped, mut turned) = (0, 0);
+        for seed in 1..=200 {
+            let mut actor = standing_on(&motions, WINDOW, WINDOW.right - 20.0, seed);
+            // 가끔 하는 행동을 아주 드물게 해서, 끝에 닿았을 때 하는 일만 본다.
+            actor.set_habits(Habits { roam: true, whim_rate: 1e-9 });
+            actor.walk = Some(Dir::East);
+            actor.wait = 10.0;
+            let seen = run(&mut actor, &motions, &around, 2.0);
+            if names(&seen).contains(&"jump") {
+                hopped += 1;
+                run(&mut actor, &motions, &around, 5.0);
+                // 바깥쪽으로 뛰어서 창의 오른쪽 바닥에 내려앉는다.
+                assert_eq!((actor.support(), actor.position().1), (None, AROUND.floor), "씨앗 {seed}");
+                assert!(actor.position().0 > WINDOW.right + 50.0, "씨앗 {seed}: {}", actor.position().0);
+            } else {
+                turned += 1;
+                assert_eq!(names(&seen)[..3], ["idle2", "walk_e", "idle"], "씨앗 {seed}");
+                assert_eq!(actor.support(), Some(7), "씨앗 {seed}");
+            }
+        }
+        // 뛰어내리는 것이 35%쯤이다.
+        assert!((50..=90).contains(&hopped), "뛰어내림 {hopped}, 돌아섬 {turned}");
+    }
+
+    #[test]
+    fn jumping_in_place_on_a_window_comes_back_down_onto_it() {
+        let motions = sample();
+        let perches = [WINDOW, LOWER];
+        let around = among(&perches);
+        let mut actor = standing_on(&motions, WINDOW, 1000.0, 5);
+        actor.set_habits(Habits { roam: false, whim_rate: 0.0 });
+        actor.start(Whim::Jump, &motions);
+        let seen = run(&mut actor, &motions, &around, 6.0);
+        assert!(names(&seen).contains(&"land"));
+        assert_eq!((actor.mode(), actor.support(), actor.position()), (Mode::Ground, Some(7), (1000.0, 600.0)));
+    }
+
+    #[test]
+    fn leaping_and_hopping_are_picked_only_where_they_make_sense() {
+        let motions = sample();
+        let share = |actor: &mut Actor, around: &Surroundings, whim: Whim| {
+            let can_climb = actor.climb_target(around).is_some();
+            (0..20000).filter(|_| actor.pick_whim(around.ledge, can_climb) == Some(whim)).count() as f64 / 200.0
+        };
+        let perches = [WINDOW];
+        let around = among(&perches);
+        // 바닥에서, 가까이에 창이 있으면 쉬기를 마칠 때 10%로 뛰어오른다. 뛰어내리기는 고르지 않는다.
+        let mut below = Actor::stand(&motions, 1000.0, AROUND.floor, 1.0, 11);
+        assert!((share(&mut below, &around, Whim::Climb) - 10.0).abs() < 1.0);
+        assert_eq!(share(&mut below, &around, Whim::Hop), 0.0);
+        // 창이 없으면 뛰어오르기도 고르지 않는다.
+        assert_eq!(share(&mut below, &ON_LEDGE, Whim::Climb), 0.0);
+        // 창 위에서는 8%로 뛰어내린다. 옮겨 뛸 다른 창이 없으면 뛰어오르기는 고르지 않는다.
+        let mut above = standing_on(&motions, WINDOW, 1000.0, 11);
+        assert!((share(&mut above, &around, Whim::Hop) - 8.0).abs() < 1.0);
+        assert_eq!(share(&mut above, &around, Whim::Climb), 0.0);
+        // 다른 창이 가까이에 있으면 그리로 옮겨 뛰기도 한다.
+        let two = [WINDOW, LOWER];
+        assert!((share(&mut above, &among(&two), Whim::Climb) - 10.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn leaps_from_one_window_down_to_another() {
+        let motions = sample();
+        let perches = [WINDOW, LOWER];
+        let around = among(&perches);
+        let mut actor = standing_on(&motions, WINDOW, 1000.0, 5);
+        actor.set_habits(Habits { roam: false, whim_rate: 0.0 });
+        actor.start(Whim::Climb, &motions);
+        run(&mut actor, &motions, &around, 6.0);
+        assert_eq!((actor.mode(), actor.support(), actor.position()), (Mode::Ground, Some(8), (1000.0, 800.0)));
+    }
+
+    #[test]
+    fn the_shadow_falls_on_the_window_under_the_feet() {
+        let motions = sample();
+        let perches = [WINDOW];
+        let around = among(&perches);
+        let mut actor = standing_on(&motions, WINDOW, 1000.0, 5);
+        assert_eq!(actor.ground_below(&around), 600.0);
+        // 윗변 위에 떠 있을 때도 그 윗변에 진다. 윗변보다 아래에 있거나 옆으로 벗어나 있으면 바닥에 진다.
+        actor.y = 400.0;
+        assert_eq!(actor.ground_below(&around), 600.0);
+        actor.y = 700.0;
+        assert_eq!(actor.ground_below(&around), AROUND.floor);
+        (actor.x, actor.y) = (1300.0, 400.0);
+        assert_eq!(actor.ground_below(&around), AROUND.floor);
+        // 윗변을 지나쳐 바닥까지 내려가는 중이면 바닥에 진다.
+        (actor.x, actor.through) = (1000.0, true);
+        assert_eq!(actor.ground_below(&around), AROUND.floor);
+    }
+
+    #[test]
+    fn on_the_beat_every_frame_shows_exactly_once_on_a_window_too() {
+        // 창 위에서 쉬고 걷고, 뛰어내리고, 다시 뛰어오르는 동안에도 박자마다 장이 꼭 하나씩 넘어간다.
+        // 떠 있는 동안에는 박자보다 자주 움직이므로 그때는 세지 않는다.
+        let motions = sample_24fps();
+        let perches = [WINDOW];
+        let around = among(&perches);
+        let beat_ns = |beat: u64| (beat as f64 * 1e9 / 24.0).round() as u64;
+        for seed in 1..=4 {
+            let mut actor = standing_on(&motions, WINDOW, 1000.0, seed);
+            let mut before = (actor.motion(), actor.frame(&motions));
+            let (mut on_window, mut on_floor) = (0u32, 0u32);
+            for beat in 1..=24 * 1200 {
+                let dt = (beat_ns(beat) - beat_ns(beat - 1)) as f64 / 1e9;
+                let smooth = actor.moves_smoothly();
+                actor.update(dt, &motions, &around);
+                let now = (actor.motion(), actor.frame(&motions));
+                if actor.mode() == Mode::Ground {
+                    if actor.support().is_some() { on_window += 1 } else { on_floor += 1 }
+                }
+                let clip = motions.clip(now.0);
+                let first = clip.first_frame;
+                let last = first + clip.frame_at(clip.total_ms - 1.0);
+                let ok = smooth
+                    || actor.moves_smoothly()
+                    || if now.0 != before.0 {
+                        now.1 == first
+                    } else {
+                        now.1 == before.1 + 1 || (clip.looping && before.1 == last && now.1 == first)
+                    };
+                assert!(ok, "씨앗 {seed}, {beat}번째 박자: {} {} -> {} {}", before.0, before.1, clip.name, now.1);
+                before = now;
+            }
+            // 20분 동안 창 위에도 있었고 바닥에도 있었다.
+            assert!(on_window > 24 * 30 && on_floor > 24 * 30, "씨앗 {seed}: 창 위 {on_window}, 바닥 {on_floor}");
+        }
     }
 }

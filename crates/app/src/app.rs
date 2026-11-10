@@ -21,6 +21,7 @@ use crate::actor::{Habits, Mode};
 use crate::character::{self, Character, Look};
 use crate::character_window::{self, WindowEvent};
 use crate::clock::WakeTimer;
+use crate::desktop::Desktop;
 use crate::dev;
 use crate::frames::Frames;
 use crate::links::LINKS;
@@ -47,6 +48,11 @@ const RUB_GAP: Duration = Duration::from_millis(250);
 const RUB_JUMP: f64 = 120.0;
 /// 끝내기를 고른 뒤 꽃핀들이 사라지기를 기다리는 한계. 공중에 있던 꽃핀이 내려와 인사할 시간이다.
 const QUIT_LIMIT: Duration = Duration::from_secs(8);
+/// 보이는 다른 창들을 다시 읽는 간격. 꽃핀이 떠 있을 때(어디에 내려앉을지 알아야 한다), 창 위에 서 있을 때
+/// (그 자리가 가려졌는지 알아야 한다), 바닥에 있을 때(뛰어오를 곳만 알면 된다)의 차례다.
+const SCAN_IN_AIR: Duration = Duration::from_millis(100);
+const SCAN_ON_PERCH: Duration = Duration::from_millis(250);
+const SCAN_ON_FLOOR: Duration = Duration::from_millis(1000);
 /// 설정 창의 "지금 쓰는 자원"을 고치는 간격.
 const USAGE_EVERY: Duration = Duration::from_secs(1);
 /// 설정 창 정보 탭에 보여 줄 그림의 한 변(px).
@@ -89,6 +95,8 @@ struct Dev {
     script_origin: (f64, f64),
     play: VecDeque<MotionId>,
     hellos: u32,
+    /// 보이는 창들을 읽을 때마다 걸린 시간.
+    scans: Vec<Duration>,
     /// 맨 앞 창이 바뀌었다는 알림을 받은 횟수.
     foregrounds: u32,
     snaps: u32,
@@ -124,6 +132,9 @@ pub struct App {
     timer: WakeTimer,
     /// 다른 창에서 일어난 일을 전해 듣는다. 들고 있는 동안만 알림이 온다.
     _watch: Watch,
+    /// 화면에 보이는 다른 창들과, 마지막으로 읽은 시각.
+    desktop: Desktop,
+    scanned: Option<Instant>,
     dev: Dev,
 }
 
@@ -212,6 +223,8 @@ impl App {
                 .unwrap_or_else(|| SystemTime::now().duration_since(UNIX_EPOCH).map_or(1, |d| d.as_nanos() as u64)),
             timer: WakeTimer::new(),
             _watch: Watch::start(),
+            desktop: Desktop::default(),
+            scanned: None,
             dev: Dev {
                 pace: dev::Pace::default(),
                 trace: dev::Trace::default(),
@@ -222,6 +235,7 @@ impl App {
                 script_origin: (0.0, 0.0),
                 play,
                 hellos: 0,
+                scans: Vec::new(),
                 foregrounds: 0,
                 snaps: 0,
                 deadline: options.run_for.map(|d| started + d),
@@ -459,6 +473,8 @@ impl App {
                         self.dev.notes.push(format!("{at:.2}초 맨 앞 창이 바뀌었다는 알림"));
                     }
                     self.characters.iter().for_each(Character::keep_on_top);
+                    // 창들의 앞뒤가 바뀌었을 것이다. 다음 걸음에서 바로 다시 읽는다.
+                    self.scanned = None;
                 }
             }
         }
@@ -568,10 +584,11 @@ impl App {
         {
             check.sample(first.window(), now);
         }
+        self.read_desktop(now);
         let started = Instant::now();
         let mut shown = false;
         for character in &mut self.characters {
-            shown |= character.tick(&mut self.frames, &self.motions, &self.stage, horizon)?;
+            shown |= character.tick(&mut self.frames, &self.motions, &self.stage, &self.desktop, horizon)?;
         }
         if let (true, Some(first)) = (shown, self.characters.first()) {
             self.dev.pace.frame_shown(now, started.elapsed());
@@ -587,6 +604,33 @@ impl App {
         }
         self.characters.retain(|character| !character.actor().is_gone());
         Ok(!self.characters.is_empty())
+    }
+
+    /// 보이는 다른 창들을 때맞춰 다시 읽는다. 꽃핀이 올라서 있는 창은 걸음마다 다시 본다.
+    fn read_desktop(&mut self, now: Instant) {
+        if !self.look.topmost {
+            // "항상 위"가 꺼져 있으면 창 위에 올라서지 않으므로 읽을 까닭이 없다.
+            self.desktop.clear();
+            self.scanned = None;
+            return;
+        }
+        let actors = || self.characters.iter().map(Character::actor);
+        let every = if actors().any(|actor| actor.is_airborne()) {
+            SCAN_IN_AIR
+        } else if actors().any(|actor| actor.support().is_some()) {
+            SCAN_ON_PERCH
+        } else {
+            SCAN_ON_FLOOR
+        };
+        if self.scanned.is_none_or(|at| now >= at + every) {
+            let started = Instant::now();
+            self.desktop.scan();
+            self.dev.scans.push(started.elapsed());
+            self.scanned = Some(now);
+        }
+        for window in self.characters.iter().filter_map(|character| character.actor().support()) {
+            self.desktop.track(window);
+        }
     }
 
     /// 다음에 할 일이 있을 때까지 잔다. 창 메시지가 오면 그 전에 깬다.
@@ -870,6 +914,17 @@ impl App {
             lines.push(format!("실행 중에 앱을 한 번 더 켠 횟수 {}", self.dev.hellos));
         }
         lines.push(format!("맨 앞 창이 바뀌었다는 알림 {}번", self.dev.foregrounds));
+        if !self.dev.scans.is_empty() {
+            let total: Duration = self.dev.scans.iter().sum();
+            let longest = self.dev.scans.iter().max().copied().unwrap_or_default();
+            lines.push(format!(
+                "보이는 창 읽기 {}번, 평균 {:.0} / 최대 {:.0} µs, 마지막에 읽은 창 {}개",
+                self.dev.scans.len(),
+                total.as_secs_f64() * 1e6 / self.dev.scans.len() as f64,
+                longest.as_secs_f64() * 1e6,
+                self.desktop.panes().len()
+            ));
+        }
         lines.extend(self.dev.trace.lines());
         lines
     }

@@ -31,7 +31,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 use crate::geom::Rect;
 use crate::win::{cursor_position, fatal, wide};
 
-const CLASS_NAME: &str = "DesktopFlowerpinCharacter";
+pub const CLASS_NAME: &str = "DesktopFlowerpinCharacter";
 
 /// 꽃핀 창에서 일어난 일. 좌표는 화면 기준이다.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

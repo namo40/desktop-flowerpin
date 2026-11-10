@@ -6,9 +6,11 @@ use dfp_pack::PackError;
 
 use crate::actor::{Actor, Mode, Surroundings};
 use crate::character_window::CharacterWindow;
+use crate::desktop::Desktop;
 use crate::frames::Frames;
 use crate::geom::Rect;
 use crate::motions::{BEAT_MS, Motions};
+use crate::perch::{self, Body, Perch};
 use crate::scale::Scale;
 use crate::shadow::Shadow;
 use crate::stage::{Monitor, Stage};
@@ -172,6 +174,9 @@ pub struct Character {
     moved: bool,
     /// 마지막 걸음에서 걸터앉아 있었는가.
     sitting: bool,
+    /// 올라설 수 있는 다른 창의 윗변들과, 그것을 계산했을 때의 조건. 조건이 달라졌을 때만 다시 계산한다.
+    perches: Vec<Perch>,
+    perches_for: Option<(u64, Rect, Body, bool)>,
 }
 
 impl Character {
@@ -230,6 +235,8 @@ impl Character {
             beat,
             moved: false,
             sitting: false,
+            perches: Vec::new(),
+            perches_for: None,
         };
         let around = character.surroundings(character.monitor(stage));
         character.render(frames, motions, &around)?;
@@ -317,8 +324,27 @@ impl Character {
         stage.nearest(x.round() as i32, y.round() as i32 - 1)
     }
 
-    fn surroundings(&self, monitor: &Monitor) -> Surroundings {
+    fn surroundings(&self, monitor: &Monitor) -> Surroundings<'static> {
         monitor.surroundings(self.layout.wall_margin, self.layout.headroom)
+    }
+
+    /// 선 몸이 발바닥 가운데에서 차지하는 범위. 창에 그리는 범위 전체로 친다.
+    fn body(&self) -> Body {
+        Body { left: self.layout.foot.0, right: self.layout.size.0 - self.layout.foot.0, up: self.layout.foot.1 }
+    }
+
+    /// 이 꽃핀이 올라설 수 있는 창 윗변을 다시 계산한다. 보이는 창, 모니터, 몸 크기가 그대로면 건너뛴다.
+    fn refresh_perches(&mut self, desktop: &Desktop, monitor: &Monitor) {
+        let body = self.body();
+        // 몸이 벗어나면 안 되는 범위. 옆은 작업 영역, 위는 모니터의 위 끝, 아래는 바닥이다.
+        let top = monitor.area.y;
+        let stage = Rect::new(monitor.work.x, top, monitor.work.w, monitor.work.bottom() - top);
+        let conditions = (desktop.version(), stage, body, self.look.topmost);
+        if self.perches_for != Some(conditions) {
+            // "항상 위"가 꺼져 있으면 꽃핀이 다른 창에 가려진다. 그때는 창 위에 올라서지 않는다.
+            self.perches = if self.look.topmost { perch::find(desktop.panes(), body, stage) } else { Vec::new() };
+            self.perches_for = Some(conditions);
+        }
     }
 
     /// 시각이 됐으면 상태 기계의 시간을 흘리고, 달라진 모습을 화면에 넘긴다. 걸음을 밟았으면 `true`다.
@@ -329,6 +355,7 @@ impl Character {
         frames: &mut Frames,
         motions: &Motions,
         stage: &Stage,
+        desktop: &Desktop,
         horizon: Instant,
     ) -> Result<bool, PackError> {
         if horizon < self.due {
@@ -345,7 +372,10 @@ impl Character {
         if scale != self.layout.scale && self.actor.mode() != Mode::Drag {
             self.rescale(frames, motions, scale);
         }
-        let around = self.surroundings(&monitor);
+        self.refresh_perches(desktop, &monitor);
+        // 둘레의 상황이 윗변 목록을 빌려 쓰므로, 걸음을 밟는 동안 잠깐 꺼내 둔다.
+        let perches = std::mem::take(&mut self.perches);
+        let around = Surroundings { perches: &perches, ..self.surroundings(&monitor) };
         self.actor.update(dt, motions, &around);
         let sitting = self.actor.mode() == Mode::Sit;
         if sitting && !self.sitting {
@@ -353,7 +383,9 @@ impl Character {
             self.keep_on_top();
         }
         self.sitting = sitting;
-        self.render(frames, motions, &around)?;
+        let rendered = self.render(frames, motions, &around);
+        self.perches = perches;
+        rendered?;
         self.schedule(motions, at);
         Ok(true)
     }
@@ -381,8 +413,9 @@ impl Character {
 
     /// 지금 모습이 창에 그려진 것과 다르면 다시 그리고, 자리와 함께 화면에 넘긴다.
     fn render(&mut self, frames: &mut Frames, motions: &Motions, around: &Surroundings) -> Result<(), PackError> {
-        // 그림자는 바닥에 진다. 떠오르면 그만큼 발밑에서 멀어지고, 창 밖으로 나가기 전에 옅어져 없어진다.
-        let height = (around.floor - self.actor.position().1).max(0.0);
+        // 그림자는 발밑의 바닥(창 위에 있으면 그 윗변)에 진다. 떠오르면 그만큼 발밑에서 멀어지고,
+        // 창 밖으로 나가기 전에 옅어져 없어진다.
+        let height = (self.actor.ground_below(around) - self.actor.position().1).max(0.0);
         let level = self.actor.shadow() * (1.0 - height / self.layout.shadow_reach).clamp(0.0, 1.0);
         let shadow_level = (level * 255.0).round() as u8;
         let now = Drawn {
