@@ -10,8 +10,6 @@ use std::time::{Duration, Instant};
 use crate::bubble::Speech;
 
 /// 알릴 것의 종류. 먼저 띄울 것부터 차례로 적었다.
-// 알림과 메모는 그 기능을 만들 때부터 쓴다.
-#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Kind {
     /// 사용자가 정해 둔 시각의 알림. 때를 놓치면 안 되므로 가장 먼저 띄운다.
@@ -30,6 +28,8 @@ pub enum Click {
     Close,
     /// 주소를 기본 브라우저로 연다.
     Open(String),
+    /// 메모 창을 연다.
+    Memos,
 }
 
 /// 알릴 것 하나.
@@ -42,6 +42,9 @@ pub struct Notice {
     pub click: Click,
     /// 나중에 버릴 때 가리키는 이름. 같은 이름을 가진 것이 함께 버려진다. 버릴 일이 없으면 비워 둔다.
     pub tag: Option<&'static str>,
+    /// 알림이 가리키는 메모의 번호. 말풍선을 오른쪽 클릭하면 이 메모를 조금 뒤에 다시 알린다.
+    /// 알림이 아니면 비워 둔다.
+    pub memo: Option<u64>,
 }
 
 /// 알릴 것들의 줄과, 지금 떠 있는 것.
@@ -117,7 +120,7 @@ mod tests {
 
     fn notice(kind: Kind, title: &str) -> Notice {
         let speech = Speech { title: title.to_string(), body: String::new() };
-        Notice { kind, speech, lasts: None, click: Click::Close, tag: None }
+        Notice { kind, speech, lasts: None, click: Click::Close, tag: None, memo: None }
     }
 
     fn title(notice: Option<&Notice>) -> Option<&str> {

@@ -55,6 +55,8 @@ pub enum MenuItem {
     Settings,
     /// 방송 보러 가기. 방송 중일 때만 메뉴에 있다.
     Watch,
+    /// 메모 창을 연다.
+    Memos,
     /// 바로 가기. [`LINKS`]의 몇 번째인지다.
     Link(usize),
     /// 꽃핀에게 시켜서 볼 행동.
@@ -68,6 +70,7 @@ impl MenuItem {
             MenuItem::Quit => 1,
             MenuItem::Settings => 2,
             MenuItem::Watch => 3,
+            MenuItem::Memos => 4,
             MenuItem::Link(index) => 100 + index as u32,
             MenuItem::Show(show) => 200 + Show::ALL.iter().position(|&other| other == show).unwrap_or(0) as u32,
         }
@@ -78,6 +81,7 @@ impl MenuItem {
             1 => Some(MenuItem::Quit),
             2 => Some(MenuItem::Settings),
             3 => Some(MenuItem::Watch),
+            4 => Some(MenuItem::Memos),
             100.. if ((id - 100) as usize) < LINKS.len() => Some(MenuItem::Link((id - 100) as usize)),
             200.. if ((id - 200) as usize) < Show::ALL.len() => Some(MenuItem::Show(Show::ALL[(id - 200) as usize])),
             _ => None,
@@ -163,6 +167,7 @@ pub fn pick(owner: HWND, x: i32, y: i32, shows: &[(Show, bool)], live: Option<&(
         AppendMenuW(menu, MF_POPUP, actions as usize, wide("행동").as_ptr());
         // 이름 끝의 "..."은 창이 열린다는 뜻이다.
         AppendMenuW(menu, MF_POPUP, links as usize, wide("바로 가기").as_ptr());
+        add(menu, MenuItem::Memos, "메모와 알림...");
         AppendMenuW(menu, MF_SEPARATOR, 0, null());
         add(menu, MenuItem::Settings, "설정...");
         add(menu, MenuItem::Quit, "끝내기");
@@ -510,7 +515,7 @@ mod tests {
 
     #[test]
     fn menu_numbers_are_unique_and_read_back() {
-        let mut items = vec![MenuItem::Quit, MenuItem::Settings, MenuItem::Watch];
+        let mut items = vec![MenuItem::Quit, MenuItem::Settings, MenuItem::Watch, MenuItem::Memos];
         items.extend((0..LINKS.len()).map(MenuItem::Link));
         items.extend(Show::ALL.map(MenuItem::Show));
         for (n, item) in items.iter().enumerate() {
@@ -519,7 +524,7 @@ mod tests {
             assert_eq!(MenuItem::from_id(item.id()), Some(*item));
             assert!(items[..n].iter().all(|other| other.id() != item.id()), "{item:?}");
         }
-        for id in [0, 4, 99, 100 + LINKS.len() as u32, 199, 200 + Show::ALL.len() as u32] {
+        for id in [0, 5, 99, 100 + LINKS.len() as u32, 199, 200 + Show::ALL.len() as u32] {
             assert_eq!(MenuItem::from_id(id), None, "{id}");
         }
     }

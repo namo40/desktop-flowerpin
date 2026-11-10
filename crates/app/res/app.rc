@@ -125,3 +125,35 @@ BEGIN
     PUSHBUTTON "설정 폴더 열기(&O)", 1521, 7, 155, 107, 14
     PUSHBUTTON "GitHub 페이지 열기(&G)", 1522, 118, 155, 107, 14
 END
+
+// ---------- 메모 창: 250 x 229 ----------
+//   왼쪽에 메모 목록(x 7 너비 96), 오른쪽에 고른 메모(x 110 너비 133).
+//   오른쪽의 이름은 x 110, 고르는 칸은 x 150 너비 93. 여백과 줄 간격은 설정 창과 같다.
+//   0x00210100 = LBS_NOINTEGRALHEIGHT | WS_VSCROLL | WS_TABSTOP                  (목록. 고름 알림과 테두리는 기본으로 붙는다)
+//   0x00201044 = ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN | WS_VSCROLL       (여러 줄 적는 칸)
+//   0x5001000C = WS_CHILD | WS_VISIBLE | WS_TABSTOP | DTS_SHORTDATECENTURYFORMAT  (날짜 고르는 칸)
+//   0x50010009 = WS_CHILD | WS_VISIBLE | WS_TABSTOP | DTS_TIMEFORMAT              (시각 고르는 칸)
+// 컨트롤 번호는 src/memo_window.rs의 것과 같아야 한다.
+300 DIALOGEX 0, 0, 250, 229
+STYLE 0x80C808C0
+EXSTYLE 0x00050000
+CAPTION "메모와 알림 - DesktopFlowerpin"
+FONT 9, "맑은 고딕", 400, 0, 0x1
+BEGIN
+    LTEXT "메모(&M)", 3011, 7, 7, 96, 8
+    LISTBOX 3001, 7, 18, 96, 164, 0x00210100
+    PUSHBUTTON "새 메모(&N)", 3002, 7, 186, 46, 14
+    PUSHBUTTON "지우기(&X)", 3003, 57, 186, 46, 14
+    LTEXT "내용(&C)", 3012, 110, 7, 133, 8
+    EDITTEXT 3004, 110, 18, 133, 90, 0x00201044
+    LTEXT "알림(&R):", 3013, 110, 116, 38, 8
+    COMBOBOX 3005, 150, 114, 93, 120, 0x00210003
+    LTEXT "날짜(&D):", 3014, 110, 134, 38, 8
+    CONTROL "", 3006, "SysDateTimePick32", 0x5001000C, 150, 132, 93, 12
+    LTEXT "시각(&T):", 3015, 110, 152, 38, 8
+    CONTROL "", 3007, "SysDateTimePick32", 0x50010009, 150, 150, 93, 12
+    LTEXT "", 3008, 110, 168, 133, 8, 0x4080
+    AUTOCHECKBOX "꽃핀이 들고 있기(&H)", 3009, 110, 188, 133, 10
+    LTEXT "메모는 암호화하지 않고 이 PC에만 저장합니다.\n비밀번호 같은 것은 적지 마세요.", 3016, 7, 205, 180, 17, 0x80
+    DEFPUSHBUTTON "닫기", 2, 193, 208, 50, 14
+END

@@ -18,6 +18,8 @@ mod geom;
 mod key;
 mod links;
 mod live;
+mod memo_window;
+mod memos;
 mod motions;
 mod notices;
 mod perch;
@@ -31,6 +33,7 @@ mod text;
 mod tray;
 mod usage;
 mod watch;
+mod when;
 mod win;
 
 use std::time::Instant;
@@ -84,6 +87,14 @@ fn run(options: dev::Options) -> Result<Vec<String>, PackError> {
                 if app.picked(item, now) {
                     break;
                 }
+            }
+            Flow::ConfirmDelete(id) => {
+                // 글이 적힌 메모는 지우기 전에 한 번 묻는다.
+                let mut yes = app.answers_for_me();
+                if let (false, Some(owner)) = (yes, app.memo_hwnd()) {
+                    yes = app::run_modal(&mut app, || win::confirm(owner, "메모 지우기", "이 메모를 지울까요?"));
+                }
+                app.delete_confirmed(id, yes, Instant::now());
             }
             Flow::ConfirmReset(tab) => {
                 // 되돌리기 전에 한 번 묻는다.

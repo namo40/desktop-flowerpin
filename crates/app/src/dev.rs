@@ -46,8 +46,10 @@ use windows_sys::Win32::UI::WindowsAndMessaging::WindowFromPoint;
 use crate::actor::{Actor, Mode, Whim};
 use crate::character_window::CharacterWindow;
 use crate::geom::Rect;
+use crate::memos::Remind;
 use crate::motions::{MotionId, Motions};
 use crate::usage::{self, Meter};
+use crate::when::When;
 
 pub struct Options {
     pub run_for: Option<Duration>,
@@ -74,6 +76,9 @@ pub struct Options {
     pub greet: bool,
     /// 확인용 실행에서도 Windows 알림을 진짜로 띄운다. 주지 않으면 보고서에 적기만 한다.
     pub toast: bool,
+    /// `--clock "2026-11-12 18:59:50"`: 이 PC의 시계가 시작할 때 이 시각이었던 것으로 친다. 알림을 확인하는 데 쓴다.
+    /// 벽시계의 1970-01-01 00:00부터 흐른 초다.
+    pub clock: Option<i64>,
 }
 
 impl Options {
@@ -103,6 +108,8 @@ impl Options {
             live_check: args.iter().any(|a| a == "--live-check"),
             greet: args.iter().any(|a| a == "--greet"),
             toast: args.iter().any(|a| a == "--toast"),
+            clock: value("--clock")
+                .map(|s| parse_clock(&s).unwrap_or_else(|| crate::win::fatal("--clock을 읽을 수 없습니다."))),
         }
     }
 }
@@ -146,6 +153,49 @@ pub enum Command {
     Live(LiveReply),
     /// `toast click`: Windows 알림을 클릭한 것으로 친다.
     ToastClick,
+    /// `bubble dismiss`: 떠 있는 말풍선을 오른쪽 클릭한 것으로 친다.
+    BubbleDismiss,
+    /// `memo ...`: 메모 창을 다룬다.
+    Memo(MemoStep),
+}
+
+/// `--script`의 `memo` 명령. 사람이 메모 창에서 하는 일을 흉내 낸다.
+#[derive(Clone, Debug, PartialEq)]
+pub enum MemoStep {
+    /// `memo open`, `memo close`
+    Open,
+    Close,
+    /// `memo new`, `memo delete`: 버튼을 누른다. 지울지 묻는 창에는 "예"라고 답한 것으로 친다.
+    New,
+    Delete,
+    /// `memo select 줄`: 목록에서 그 줄을 고른다(0부터).
+    Select(usize),
+    /// `memo text 글`: 글을 적는다. `\n`은 줄바꿈이다.
+    Text(String),
+    /// `memo remind none`, `memo remind once 2026-11-12 19:00`, `memo remind daily 23:00`: 알림을 고른다.
+    Remind(Remind),
+    /// `memo hold`: "꽃핀이 들고 있기"를 누른다.
+    Hold,
+    /// `memo snap`: 지금 모습을 `--settings-dump`와 `--settings-shot`에 쓴다.
+    Snap,
+}
+
+/// 찍은 차례를 파일 이름에 붙인다. `창.txt`의 세 번째는 `창_3.txt`다.
+pub fn numbered(path: &Path, count: u32) -> PathBuf {
+    let stem = path.file_stem().unwrap_or_default().to_string_lossy();
+    let extension = path.extension().unwrap_or_default().to_string_lossy();
+    path.with_file_name(format!("{stem}_{count}.{extension}"))
+}
+
+/// `"2026-11-12 18:59:50"`처럼 적은 시각을 벽시계의 초로 읽는다. 초는 빼도 된다.
+fn parse_clock(text: &str) -> Option<i64> {
+    let (date, time) = text.trim().split_once(' ')?;
+    let mut parts = time.split(':');
+    let minutes = format!("{date} {}:{}", parts.next()?, parts.next()?);
+    let seconds = parts.next().map_or(Some(0), |second| second.parse::<i64>().ok().filter(|s| (0..60).contains(s)))?;
+    let (year, month, day, hour, minute) = When::parse(&minutes)?.parts();
+    let days = crate::when::days_from_civil(year as i64, month as i64, day as i64);
+    Some(days * 86_400 + hour as i64 * 3_600 + minute as i64 * 60 + seconds)
 }
 
 /// `--script`의 `live` 명령이 흉내 내는 답.
@@ -222,6 +272,26 @@ pub fn parse_script(text: &str) -> Result<Vec<Step>, String> {
                 Command::Say(number(2)?, title.trim().to_string(), body.trim().to_string())
             }
             (Some("bubble"), 3) if words[2] == "click" => Command::BubbleClick,
+            (Some("bubble"), 3) if words[2] == "dismiss" => Command::BubbleDismiss,
+            (Some("memo"), _) => Command::Memo(match (words.get(2).copied(), words.len()) {
+                (Some("open"), 3) => MemoStep::Open,
+                (Some("close"), 3) => MemoStep::Close,
+                (Some("new"), 3) => MemoStep::New,
+                (Some("delete"), 3) => MemoStep::Delete,
+                (Some("hold"), 3) => MemoStep::Hold,
+                (Some("snap"), 3) => MemoStep::Snap,
+                (Some("select"), 4) => MemoStep::Select(number(3)? as usize),
+                (Some("text"), 4..) => MemoStep::Text(words[3..].join(" ").replace("\\n", "\n")),
+                (Some("remind"), 4) if words[3] == "none" => MemoStep::Remind(Remind::None),
+                (Some("remind"), 6) if words[3] == "once" => {
+                    MemoStep::Remind(Remind::Once(When::parse(&words[4..6].join(" ")).ok_or_else(bad)?))
+                }
+                (Some("remind"), 5) if words[3] == "daily" => {
+                    let (hour, minute) = crate::when::parse_clock(words[4]).ok_or_else(bad)?;
+                    MemoStep::Remind(Remind::Daily { hour, minute })
+                }
+                _ => return Err(bad()),
+            }),
             (Some("toast"), 3) if words[2] == "click" => Command::ToastClick,
             (Some("live"), 6..) if words[2] == "open" => {
                 Command::Live(LiveReply::Open { opened: words[3..5].join(" "), title: words[5..].join(" ") })
@@ -506,6 +576,36 @@ mod tests {
         let open = LiveReply::Open { opened: "2026-11-10 13:00:00".to_string(), title: "꽃핀 방송".to_string() };
         assert_eq!(commands, [open, LiveReply::Close, LiveReply::Fail, LiveReply::Moved].map(Command::Live));
         assert_eq!(parse_script("1 toast click").unwrap()[0].command, Command::ToastClick);
+        let memo = parse_script(
+            "1 memo open; 2 memo new; 3 memo text 약 먹기\\n물도 마시기; 4 memo remind once 2026-11-12 19:00; \
+             5 memo remind daily 23:05; 6 memo remind none; 7 memo hold; 8 memo select 1; 9 memo delete; 10 memo snap",
+        )
+        .unwrap();
+        let commands: Vec<Command> = memo.iter().map(|step| step.command.clone()).collect();
+        assert_eq!(
+            commands,
+            [
+                MemoStep::Open,
+                MemoStep::New,
+                MemoStep::Text("약 먹기\n물도 마시기".to_string()),
+                MemoStep::Remind(Remind::Once(When::new(2026, 11, 12, 19, 0).unwrap())),
+                MemoStep::Remind(Remind::Daily { hour: 23, minute: 5 }),
+                MemoStep::Remind(Remind::None),
+                MemoStep::Hold,
+                MemoStep::Select(1),
+                MemoStep::Delete,
+                MemoStep::Snap
+            ]
+            .map(Command::Memo)
+        );
+        assert_eq!(parse_script("1 bubble dismiss").unwrap()[0].command, Command::BubbleDismiss);
+        // 확인용 시계.
+        assert_eq!(parse_clock("1970-01-02 00:01:05"), Some(86_400 + 65));
+        assert_eq!(parse_clock("1970-01-01 09:00"), Some(9 * 3_600));
+        assert_eq!(
+            (parse_clock("1970-01-01"), parse_clock("1970-01-01 09:00:61"), parse_clock("어제 09:00")),
+            (None, None, None)
+        );
         let steps = parse_script(" 4 release; 1.5 grab ; 2 drag 300 -400;; 9 leave; 0 roam off; 3 dpi 144 ").unwrap();
         let commands: Vec<Command> = steps.iter().map(|step| step.command.clone()).collect();
         assert_eq!(
@@ -526,6 +626,14 @@ mod tests {
     fn bad_script_is_rejected() {
         let wrong = ["grab", "1 fly", "1 drag 300", "-1 grab", "1 roam maybe", "1 grab extra", "1 do dance", "1 rub"];
         let live = ["1 live", "1 live open", "1 live open 2026-11-10 13:00:00", "1 live pause", "1 toast"];
+        let memo = [
+            "1 memo",
+            "1 memo fly",
+            "1 memo remind",
+            "1 memo remind once 2026-02-30 10:00",
+            "1 memo remind daily 25:00",
+        ];
+        let live = live.into_iter().chain(memo);
         for text in wrong.into_iter().chain(["1 settings", "1 settings fly", "1 settings pick 1103"]).chain(live) {
             assert!(parse_script(text).is_err(), "{text}");
         }

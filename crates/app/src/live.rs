@@ -10,6 +10,8 @@ use std::time::Duration;
 
 use serde_json::Value;
 
+use crate::when::{When, days_from_civil};
+
 /// 꽃핀의 치지직 채널.
 pub const CHANNEL_ID: &str = "a86031fdfeb1b223ad1172cf6ba4b94e";
 /// 방송 상태를 묻는 곳.
@@ -209,11 +211,7 @@ fn unix_seconds(text: &str) -> Option<i64> {
     if !(1..=12).contains(&month) || !(1..=31).contains(&day) || hour > 23 || minute > 59 || second > 60 {
         return None;
     }
-    // 3월을 한 해의 첫 달로 놓고 날수를 센다(윤년의 2월 29일이 해의 맨 끝에 온다).
-    let (year, month) = if month <= 2 { (year - 1, month + 9) } else { (year, month - 3) };
-    let era_days = year * 365 + year.div_euclid(4) - year.div_euclid(100) + year.div_euclid(400);
-    let days = era_days + (153 * month + 2) / 5 + day - 1 - 719_468;
-    Some(days * 86_400 + hour * 3600 + minute * 60 + second - KST_OFFSET)
+    Some(days_from_civil(year, month, day) * 86_400 + hour * 3600 + minute * 60 + second - KST_OFFSET)
 }
 
 /// 방송을 시작한 지 얼마나 됐는지. "13분째", "2시간 13분째"처럼 적는다. 시각을 읽지 못하면 `None`이다.
@@ -230,15 +228,12 @@ pub fn running_for(opened: &str, now: i64) -> Option<String> {
 
 /// 설정 창 방송 탭의 상태 줄.
 ///
-/// `enabled`는 방송 상태 확인이 켜져 있는지, `checked`는 마지막으로 확인한 시각(시, 분)이다.
-pub fn status_line(view: &View, enabled: bool, checked: Option<(u32, u32)>) -> String {
+/// `enabled`는 방송 상태 확인이 켜져 있는지, `checked`는 마지막으로 확인한 이 PC의 시각이다.
+pub fn status_line(view: &View, enabled: bool, checked: Option<When>) -> String {
     if !enabled {
         return "방송 상태 확인이 꺼져 있습니다. 인터넷을 쓰지 않습니다.".to_string();
     }
-    let when = checked.map_or(String::new(), |(hour, minute)| {
-        let half = if hour < 12 { "오전" } else { "오후" };
-        format!(" · 마지막 확인 {half} {}:{minute:02}", if hour % 12 == 0 { 12 } else { hour % 12 })
-    });
+    let when = checked.map_or(String::new(), |checked| format!(" · 마지막 확인 {}", checked.clock()));
     match view {
         View::Unknown => "지금: 확인하는 중입니다".to_string(),
         View::Open(live) => format!("지금: 방송 중 · {} · 시청자 {}명", live.title, with_commas(live.viewers)),
@@ -364,7 +359,7 @@ mod tests {
         tracker.feed(Reply::Open(live(FIRST)));
         assert_eq!(tracker.feed(Reply::Refused), None);
         assert_eq!((tracker.view(), tracker.live(), tracker.wait(minute)), (&View::Refused, None, None));
-        assert!(status_line(tracker.view(), true, Some((15, 12))).contains("받아 주지 않아"));
+        assert!(status_line(tracker.view(), true, None).contains("받아 주지 않아"));
     }
 
     #[test]
@@ -455,7 +450,9 @@ mod tests {
 
     #[test]
     fn status_line_says_what_is_known() {
-        let line = |view: &View, checked| status_line(view, true, checked);
+        let line = |view: &View, checked: Option<(u32, u32)>| {
+            status_line(view, true, checked.and_then(|(hour, minute)| When::new(2026, 11, 10, hour, minute)))
+        };
         assert_eq!(line(&View::Unknown, None), "지금: 확인하는 중입니다");
         assert_eq!(line(&View::Open(live(FIRST)), Some((15, 12))), "지금: 방송 중 · 꽃핀 방송 · 시청자 2,229명");
         assert_eq!(line(&View::Closed, Some((15, 12))), "지금: 방송 꺼짐 · 마지막 확인 오후 3:12");

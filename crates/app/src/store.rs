@@ -3,9 +3,10 @@
 //! `%APPDATA%\DesktopFlowerpin\` 아래에 파일을 둔다.
 //! - `settings.json`: 사용자가 고른 설정([`Settings`]).
 //! - `state.json`: 앱이 기억하는 것([`State`]). 꽃핀이 마지막으로 있던 자리 같은 것이다.
+//! - `memos.json`: 사용자가 적은 메모와 알림([`Memos`]).
 //!
-//! 둘을 나눈 까닭은, "기본값으로"가 상태를 건드리지 않게 하고, 자주 바뀌는 상태를 쓰다가 설정 파일이
-//! 깨지는 일을 막으려는 것이다.
+//! 셋으로 나눈 까닭은, "기본값으로"가 상태와 메모를 건드리지 않게 하고, 자주 바뀌는 상태를 쓰다가 설정이나
+//! 메모 파일이 깨지는 일을 막으려는 것이다.
 //!
 //! 저장은 바뀐 뒤 잠깐 모았다가 한 번에 한다. 임시 파일에 다 쓴 뒤 이름을 바꿔치기해서, 쓰는 도중에
 //! 꺼져도 파일이 깨지지 않는다. 읽지 못하는 파일은 `settings.bad.json`처럼 이름을 바꿔 남겨 두고
@@ -16,11 +17,13 @@ use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
+use crate::memos::Memos;
 use crate::settings::Settings;
 
 const FOLDER: &str = "DesktopFlowerpin";
 const SETTINGS_FILE: &str = "settings.json";
 const STATE_FILE: &str = "state.json";
+const MEMOS_FILE: &str = "memos.json";
 const STATE_VERSION: i64 = 1;
 
 /// 바뀐 뒤 이만큼 모았다가 저장한다. 설정 창에서 여러 항목을 잇달아 바꿔도 한 번만 쓴다.
@@ -110,17 +113,22 @@ pub fn default_folder() -> Option<PathBuf> {
 pub struct Store {
     /// 파일을 두는 폴더. 없으면 아무것도 읽거나 쓰지 않는다(만드는 동안 확인용 실행).
     folder: Option<PathBuf>,
-    /// 설정과 상태를 저장할 시각. 바뀐 것이 없으면 `None`이다.
+    /// 설정, 상태, 메모를 저장할 시각. 바뀐 것이 없으면 `None`이다.
     settings_due: Option<Instant>,
     state_due: Option<Instant>,
+    memos_due: Option<Instant>,
+    /// 메모 파일이 깨져 있어서 옆으로 치워 두었는가. 사용자가 직접 쓴 것이라 따로 알린다.
+    memos_lost: bool,
 }
 
 impl Store {
     /// 폴더의 파일을 읽는다. 읽으면서 있었던 일(파일이 깨져 있었음 등)을 함께 돌려준다.
-    pub fn open(folder: Option<PathBuf>) -> (Store, Settings, State, Vec<String>) {
+    pub fn open(folder: Option<PathBuf>) -> (Store, Settings, State, Memos, Vec<String>) {
         let mut notes = Vec::new();
         let mut settings = Settings::default();
         let mut state = State::default();
+        let mut memos = Memos::default();
+        let mut memos_lost = false;
         if let Some(folder) = &folder {
             let path = folder.join(SETTINGS_FILE);
             match load(&path, Settings::from_json) {
@@ -140,8 +148,24 @@ impl Store {
                     notes.push(format!("{STATE_FILE}을 읽지 못해 처음 상태로 시작합니다"));
                 }
             }
+            let path = folder.join(MEMOS_FILE);
+            match load(&path, Memos::from_json) {
+                Loaded::Ok(loaded) => memos = loaded,
+                Loaded::Missing => {}
+                Loaded::Broken => {
+                    set_aside(&path);
+                    memos_lost = true;
+                    notes.push(format!("{MEMOS_FILE}을 읽지 못해 메모 없이 시작합니다"));
+                }
+            }
         }
-        (Store { folder, settings_due: None, state_due: None }, settings, state, notes)
+        let store = Store { folder, settings_due: None, state_due: None, memos_due: None, memos_lost };
+        (store, settings, state, memos, notes)
+    }
+
+    /// 메모 파일이 깨져 있어서 옆으로 치워 두었는가.
+    pub fn memos_lost(&self) -> bool {
+        self.memos_lost
     }
 
     pub fn folder(&self) -> Option<&Path> {
@@ -158,16 +182,18 @@ impl Store {
         self.state_due.get_or_insert(now + SAVE_DELAY);
     }
 
+    /// 메모가 바뀌었다고 알린다. 잠깐 뒤에 저장한다. 글을 적는 동안에는 글자마다 불린다.
+    pub fn memos_changed(&mut self, now: Instant) {
+        self.memos_due.get_or_insert(now + SAVE_DELAY);
+    }
+
     /// 저장하려고 깨어나야 할 시각.
     pub fn due(&self) -> Option<Instant> {
-        match (self.settings_due, self.state_due) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (a, b) => a.or(b),
-        }
+        [self.settings_due, self.state_due, self.memos_due].into_iter().flatten().min()
     }
 
     /// 저장할 때가 된 것을 저장한다. `now`가 `None`이면 미뤄 둔 것을 모두 바로 저장한다(끝낼 때).
-    pub fn save(&mut self, now: Option<Instant>, settings: &Settings, state: &State) {
+    pub fn save(&mut self, now: Option<Instant>, settings: &Settings, state: &State, memos: &Memos) {
         let ready = |due: Option<Instant>| due.is_some_and(|due| now.is_none_or(|now| now >= due));
         if ready(self.settings_due) {
             self.settings_due = None;
@@ -176,6 +202,10 @@ impl Store {
         if ready(self.state_due) {
             self.state_due = None;
             self.write(STATE_FILE, &state.to_json());
+        }
+        if ready(self.memos_due) {
+            self.memos_due = None;
+            self.write(MEMOS_FILE, &memos.to_json());
         }
     }
 
@@ -191,6 +221,7 @@ impl Store {
 mod tests {
     use super::*;
     use crate::settings::Key;
+    use crate::when::When;
 
     /// 시험마다 따로 쓰는 빈 폴더.
     fn folder(name: &str) -> PathBuf {
@@ -226,25 +257,28 @@ mod tests {
     #[test]
     fn first_run_starts_with_defaults_and_writes_nothing() {
         let folder = folder("first");
-        let (_, settings, state, notes) = Store::open(Some(folder.clone()));
-        assert_eq!((settings, state), (Settings::default(), State::default()));
-        assert!(notes.is_empty());
+        let (store, settings, state, memos, notes) = Store::open(Some(folder.clone()));
+        assert_eq!((settings, state, memos), (Settings::default(), State::default(), Memos::default()));
+        assert!(notes.is_empty() && !store.memos_lost());
         assert!(!folder.exists());
     }
 
     #[test]
     fn saved_values_come_back_next_time() {
         let folder = folder("saved");
-        let (mut store, mut settings, mut state, _) = Store::open(Some(folder.clone()));
+        let (mut store, mut settings, mut state, mut memos, _) = Store::open(Some(folder.clone()));
         settings.set(Key::Size, 2);
         state.character = Some((300, 1032));
+        let id = memos.add(When::new(2026, 11, 10, 21, 0).unwrap()).unwrap();
+        memos.get_mut(id).unwrap().text = "우유 사기".to_string();
         let now = Instant::now();
         store.settings_changed(now);
         store.state_changed(now);
-        store.save(None, &settings, &state);
+        store.memos_changed(now);
+        store.save(None, &settings, &state, &memos);
 
-        let (_, loaded_settings, loaded_state, notes) = Store::open(Some(folder.clone()));
-        assert_eq!((loaded_settings, loaded_state), (settings, state));
+        let (_, loaded_settings, loaded_state, loaded_memos, notes) = Store::open(Some(folder.clone()));
+        assert_eq!((loaded_settings, loaded_state, loaded_memos), (settings, state, memos));
         assert!(notes.is_empty());
         // 임시 파일은 남지 않는다.
         let names: Vec<String> = std::fs::read_dir(&folder)
@@ -258,7 +292,7 @@ mod tests {
     #[test]
     fn saving_waits_and_writes_once() {
         let folder = folder("delay");
-        let (mut store, settings, state, _) = Store::open(Some(folder.clone()));
+        let (mut store, settings, state, memos, _) = Store::open(Some(folder.clone()));
         let start = Instant::now();
         assert_eq!(store.due(), None);
         // 잇달아 바뀌어도 저장할 시각은 처음 바뀐 때부터 센다.
@@ -266,12 +300,19 @@ mod tests {
         store.settings_changed(start + Duration::from_millis(300));
         assert_eq!(store.due(), Some(start + SAVE_DELAY));
         // 아직 때가 아니면 쓰지 않는다.
-        store.save(Some(start + Duration::from_millis(400)), &settings, &state);
+        store.save(Some(start + Duration::from_millis(400)), &settings, &state, &memos);
         assert!(!folder.join(SETTINGS_FILE).exists());
-        store.save(Some(start + SAVE_DELAY), &settings, &state);
+        store.save(Some(start + SAVE_DELAY), &settings, &state, &memos);
         assert!(folder.join(SETTINGS_FILE).exists());
-        // 상태는 바뀌지 않았으므로 쓰지 않는다.
-        assert!(!folder.join(STATE_FILE).exists());
+        // 상태와 메모는 바뀌지 않았으므로 쓰지 않는다.
+        assert!(!folder.join(STATE_FILE).exists() && !folder.join(MEMOS_FILE).exists());
+        assert_eq!(store.due(), None);
+        // 글자마다 바뀌었다고 알려도, 메모는 잠깐 모았다가 한 번만 쓴다.
+        store.memos_changed(start + SAVE_DELAY);
+        store.memos_changed(start + SAVE_DELAY + Duration::from_millis(100));
+        assert_eq!(store.due(), Some(start + 2 * SAVE_DELAY));
+        store.save(Some(start + 2 * SAVE_DELAY), &settings, &state, &memos);
+        assert!(folder.join(MEMOS_FILE).exists());
         assert_eq!(store.due(), None);
         let _ = std::fs::remove_dir_all(&folder);
     }
@@ -282,21 +323,27 @@ mod tests {
         std::fs::create_dir_all(&folder).unwrap();
         std::fs::write(folder.join(SETTINGS_FILE), "{ \"size\": 125, ").unwrap();
         std::fs::write(folder.join(STATE_FILE), [0xFFu8, 0xFE, 0x00]).unwrap();
-        let (_, settings, state, notes) = Store::open(Some(folder.clone()));
-        assert_eq!((settings, state), (Settings::default(), State::default()));
-        assert_eq!(notes.len(), 2);
+        std::fs::write(folder.join(MEMOS_FILE), "{ \"memos\": [ { \"id\": 1, \"text\": \"적다 만").unwrap();
+        let (store, settings, state, memos, notes) = Store::open(Some(folder.clone()));
+        assert_eq!((settings, state, memos), (Settings::default(), State::default(), Memos::default()));
+        assert_eq!(notes.len(), 3);
+        // 메모는 사용자가 직접 쓴 것이라, 읽지 못했다는 것을 따로 알 수 있게 한다.
+        assert!(store.memos_lost());
         // 깨진 파일은 지우지 않고 이름을 바꿔 남긴다.
-        assert!(folder.join("settings.bad.json").exists() && folder.join("state.bad.json").exists());
-        assert!(!folder.join(SETTINGS_FILE).exists() && !folder.join(STATE_FILE).exists());
+        for name in ["settings", "state", "memos"] {
+            assert!(folder.join(format!("{name}.bad.json")).exists(), "{name}");
+            assert!(!folder.join(format!("{name}.json")).exists(), "{name}");
+        }
         let _ = std::fs::remove_dir_all(&folder);
     }
 
     #[test]
     fn without_a_folder_nothing_is_read_or_written() {
-        let (mut store, settings, state, notes) = Store::open(None);
+        let (mut store, settings, state, memos, notes) = Store::open(None);
         assert!(notes.is_empty() && store.folder().is_none());
         store.settings_changed(Instant::now());
-        store.save(None, &settings, &state);
+        store.memos_changed(Instant::now());
+        store.save(None, &settings, &state, &memos);
         assert_eq!(store.due(), None);
     }
 }

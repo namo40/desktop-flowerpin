@@ -2,6 +2,8 @@
 
 use std::ptr::{null, null_mut};
 
+use crate::when::days_from_civil;
+
 use windows_sys::Win32::Foundation::{HWND, POINT};
 use windows_sys::Win32::System::SystemInformation::{GetLocalTime, GetTickCount};
 use windows_sys::Win32::UI::HiDpi::{DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext};
@@ -32,11 +34,12 @@ pub fn idle_seconds() -> f64 {
     unsafe { GetTickCount() }.wrapping_sub(info.dwTime) as f64 / 1000.0
 }
 
-/// 지금 이 PC의 시각(시, 분).
-pub fn local_time() -> (u32, u32) {
+/// 지금 이 PC의 벽시계 시각. 1970-01-01 00:00부터 흐른 초로 센다(시간대를 따지지 않는다).
+pub fn local_seconds() -> i64 {
     let mut time = unsafe { std::mem::zeroed() };
     unsafe { GetLocalTime(&mut time) };
-    (time.wHour as u32, time.wMinute as u32)
+    let days = days_from_civil(time.wYear as i64, time.wMonth as i64, time.wDay as i64);
+    days * 86_400 + time.wHour as i64 * 3_600 + time.wMinute as i64 * 60 + time.wSecond as i64
 }
 
 /// 마우스 커서의 자리(화면 좌표).
