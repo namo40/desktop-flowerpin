@@ -18,6 +18,9 @@ use windows_sys::Win32::Graphics::Gdi::{
     BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CreateBitmap, CreateDIBSection, DIB_RGB_COLORS, DeleteObject,
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows_sys::Win32::System::RemoteDesktop::{
+    NOTIFY_FOR_THIS_SESSION, WTSRegisterSessionNotification, WTSUnRegisterSessionNotification,
+};
 use windows_sys::Win32::System::Threading::CreateMutexW;
 use windows_sys::Win32::UI::Shell::{
     NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_TIP, NIIF_LARGE_ICON, NIIF_RESPECT_QUIET_TIME, NIIF_USER, NIM_ADD, NIM_DELETE,
@@ -27,9 +30,11 @@ use windows_sys::Win32::UI::Shell::{
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreateIconIndirect, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyIcon, DestroyMenu,
     DestroyWindow, FindWindowW, GetSystemMetrics, HICON, HMENU, ICONINFO, KillTimer, MF_DISABLED, MF_GRAYED, MF_POPUP,
-    MF_SEPARATOR, MF_STRING, PostMessageW, RegisterClassExW, RegisterWindowMessageW, SM_CXICON, SM_CXSMICON,
-    SetForegroundWindow, SetTimer, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenuEx, WM_APP,
-    WM_CONTEXTMENU, WM_LBUTTONDBLCLK, WM_NULL, WM_RBUTTONUP, WM_TIMER, WNDCLASSEXW, WS_POPUP,
+    MF_SEPARATOR, MF_STRING, PBT_APMRESUMEAUTOMATIC, PBT_APMRESUMESUSPEND, PBT_APMSUSPEND, PostMessageW,
+    RegisterClassExW, RegisterWindowMessageW, SM_CXICON, SM_CXSMICON, SetForegroundWindow, SetTimer, TPM_NONOTIFY,
+    TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenuEx, WM_APP, WM_CONTEXTMENU, WM_LBUTTONDBLCLK, WM_NULL,
+    WM_POWERBROADCAST, WM_RBUTTONUP, WM_TIMER, WM_WTSSESSION_CHANGE, WNDCLASSEXW, WS_POPUP, WTS_SESSION_LOCK,
+    WTS_SESSION_UNLOCK,
 };
 
 use crate::actor::Show;
@@ -47,6 +52,9 @@ const TIP: &str = "DesktopFlowerpin";
 /// 메뉴나 물음 창이 떠 있는 동안 꽃핀을 움직이게 하는 타이머의 번호와 간격(ms).
 const TICK_TIMER: usize = 1;
 const TICK_EVERY_MS: u32 = 15;
+
+/// "잠깐 숨기기"에서 고를 수 있는 것. 이름과, 숨겨 둘 시간(초)이다. 시간이 없으면 다시 보이라고 할 때까지다.
+pub const HIDES: [(&str, Option<u64>); 3] = [("10분", Some(600)), ("1시간", Some(3600)), ("다시 켤 때까지", None)];
 
 /// 메뉴에서 고를 수 있는 것.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -67,6 +75,10 @@ pub enum MenuItem {
     SendAll,
     /// 메뉴를 띄운 꽃핀을 돌려보낸다. 더 부른 꽃핀의 메뉴에만 있다.
     SendThis,
+    /// 꽃핀을 잠깐 숨긴다. [`HIDES`]의 몇 번째인지다.
+    Hide(usize),
+    /// 숨겨 둔 꽃핀을 다시 보인다. 숨겨 둔 동안에만 메뉴에 있다.
+    Unhide,
     /// 바로 가기. [`LINKS`]의 몇 번째인지다.
     Link(usize),
     /// 꽃핀에게 시켜서 볼 행동.
@@ -86,6 +98,8 @@ impl MenuItem {
             MenuItem::CallOne => 7,
             MenuItem::SendAll => 8,
             MenuItem::SendThis => 9,
+            MenuItem::Hide(index) => 10 + index as u32,
+            MenuItem::Unhide => 13,
             MenuItem::Link(index) => 100 + index as u32,
             MenuItem::Show(show) => 200 + Show::ALL.iter().position(|&other| other == show).unwrap_or(0) as u32,
         }
@@ -102,6 +116,8 @@ impl MenuItem {
             7 => Some(MenuItem::CallOne),
             8 => Some(MenuItem::SendAll),
             9 => Some(MenuItem::SendThis),
+            10..=12 => Some(MenuItem::Hide((id - 10) as usize)),
+            13 => Some(MenuItem::Unhide),
             100.. if ((id - 100) as usize) < LINKS.len() => Some(MenuItem::Link((id - 100) as usize)),
             200.. if ((id - 200) as usize) < Show::ALL.len() => Some(MenuItem::Show(Show::ALL[(id - 200) as usize])),
             _ => None,
@@ -122,6 +138,10 @@ pub enum TrayEvent {
     Hello,
     /// Windows 알림을 클릭했다.
     ToastClicked,
+    /// 화면을 잠갔거나(`true`) 잠금을 풀었다.
+    Locked(bool),
+    /// PC가 절전에 들어가거나(`true`) 절전에서 돌아왔다.
+    Asleep(bool),
 }
 
 thread_local! {
@@ -155,6 +175,8 @@ pub struct MenuState<'a> {
     pub can_call: bool,
     /// 돌려보낼 꽃핀이 있는가.
     pub can_send: bool,
+    /// 꽃핀을 잠깐 숨겨 둔 중이다. "잠깐 숨기기" 자리에 "다시 보이기"를 넣는다.
+    pub hidden: bool,
 }
 
 /// 화면의 `(x, y)`에 메뉴를 띄우고, 고른 것을 돌려준다. 메뉴가 닫힐 때까지 돌아오지 않는다.
@@ -229,6 +251,16 @@ fn build(state: &MenuState) -> Option<HMENU> {
         AppendMenuW(menu, MF_SEPARATOR, 0, null());
         AppendMenuW(menu, MF_POPUP, links as usize, wide("바로 가기").as_ptr());
         AppendMenuW(menu, MF_POPUP, memos as usize, wide("메모").as_ptr());
+        AppendMenuW(menu, MF_SEPARATOR, 0, null());
+        if state.hidden {
+            add(menu, MenuItem::Unhide, "다시 보이기");
+        } else {
+            let hides = CreatePopupMenu();
+            for (index, (name, _)) in HIDES.iter().enumerate() {
+                add(hides, MenuItem::Hide(index), name);
+            }
+            AppendMenuW(menu, MF_POPUP, hides as usize, wide("잠깐 숨기기").as_ptr());
+        }
         AppendMenuW(menu, MF_SEPARATOR, 0, null());
         // 이름 끝의 "..."은 창이 열린다는 뜻이다.
         add(menu, MenuItem::Settings, "설정...");
@@ -347,6 +379,8 @@ impl Tray {
         }
         // 등록해 두어야 탐색기가 다시 시작됐을 때 알 수 있다.
         taskbar_created();
+        // 화면을 잠그고 푸는 것을 알려 달라고 한다. 받아 주지 않아도 앱은 그대로 돈다.
+        unsafe { WTSRegisterSessionNotification(hwnd, NOTIFY_FOR_THIS_SESSION) };
         let tray = Tray { hwnd, icon: make_icon(pixels, size), toast_icon: null_mut(), tip: TIP.to_string() };
         tray.add();
         tray
@@ -424,6 +458,7 @@ impl Drop for Tray {
     fn drop(&mut self) {
         unsafe {
             Shell_NotifyIconW(NIM_DELETE, &self.data());
+            WTSUnRegisterSessionNotification(self.hwnd);
             DestroyIcon(self.icon);
             if !self.toast_icon.is_null() {
                 DestroyIcon(self.toast_icon);
@@ -520,6 +555,23 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
             }
             0
         }
+        WM_WTSSESSION_CHANGE => {
+            match wparam as u32 {
+                WTS_SESSION_LOCK => push(TrayEvent::Locked(true)),
+                WTS_SESSION_UNLOCK => push(TrayEvent::Locked(false)),
+                _ => {}
+            }
+            0
+        }
+        WM_POWERBROADCAST => {
+            match wparam as u32 {
+                PBT_APMSUSPEND => push(TrayEvent::Asleep(true)),
+                PBT_APMRESUMEAUTOMATIC | PBT_APMRESUMESUSPEND => push(TrayEvent::Asleep(false)),
+                _ => {}
+            }
+            // 절전에 들어가도 된다고 답한다.
+            1
+        }
         _ if msg == taskbar_created() => {
             push(TrayEvent::TaskbarCreated);
             0
@@ -588,7 +640,14 @@ mod tests {
     #[test]
     fn the_menu_lists_what_can_be_done_now() {
         let shows = [(Show::Stretch, true), (Show::Sit, false)];
-        let state = |guest, can_call, can_send| MenuState { shows: &shows, live: None, guest, can_call, can_send };
+        let state = |guest, can_call, can_send| MenuState {
+            shows: &shows,
+            live: None,
+            guest,
+            can_call,
+            can_send,
+            hidden: false,
+        };
         let names = |state: &MenuState| {
             let menu = build(state).expect("메뉴");
             let read = lines(menu);
@@ -598,8 +657,23 @@ mod tests {
         // 기본 꽃핀의 메뉴. 보낼 꽃핀이 없으면 "모두 보내기"가 흐리다.
         assert_eq!(
             names(&state(false, true, false)),
-            ["행동", "꽃핀 하나 더", "(모두 보내기)", "-", "바로 가기", "메모", "-", "설정...", "끝내기"]
+            [
+                "행동",
+                "꽃핀 하나 더",
+                "(모두 보내기)",
+                "-",
+                "바로 가기",
+                "메모",
+                "-",
+                "잠깐 숨기기",
+                "-",
+                "설정...",
+                "끝내기"
+            ]
         );
+        // 숨겨 둔 동안에는 "잠깐 숨기기" 자리에 "다시 보이기"가 온다.
+        let hidden = MenuState { hidden: true, ..state(false, false, false) };
+        assert_eq!(names(&hidden)[6..], ["-", "다시 보이기", "-", "설정...", "끝내기"]);
         // 더 부른 꽃핀의 메뉴에는 맨 위에 "이 꽃핀 보내기"가 붙는다. 더 부를 수 없으면 "꽃핀 하나 더"가 흐리다.
         assert_eq!(
             names(&state(true, false, true))[..5],
@@ -616,7 +690,8 @@ mod tests {
         let memos = [MenuItem::MemoNew, MenuItem::MemoShow, MenuItem::MemoTidy];
         let mut items = vec![MenuItem::Quit, MenuItem::Settings, MenuItem::Watch];
         items.extend(memos);
-        items.extend([MenuItem::CallOne, MenuItem::SendAll, MenuItem::SendThis]);
+        items.extend([MenuItem::CallOne, MenuItem::SendAll, MenuItem::SendThis, MenuItem::Unhide]);
+        items.extend((0..HIDES.len()).map(MenuItem::Hide));
         items.extend((0..LINKS.len()).map(MenuItem::Link));
         items.extend(Show::ALL.map(MenuItem::Show));
         for (n, item) in items.iter().enumerate() {
@@ -625,7 +700,7 @@ mod tests {
             assert_eq!(MenuItem::from_id(item.id()), Some(*item));
             assert!(items[..n].iter().all(|other| other.id() != item.id()), "{item:?}");
         }
-        for id in [0, 10, 99, 100 + LINKS.len() as u32, 199, 200 + Show::ALL.len() as u32] {
+        for id in [0, 14, 99, 100 + LINKS.len() as u32, 199, 200 + Show::ALL.len() as u32] {
             assert_eq!(MenuItem::from_id(id), None, "{id}");
         }
     }

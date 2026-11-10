@@ -87,6 +87,7 @@ fn run(options: dev::Options) -> Result<Vec<String>, PackError> {
                     guest: app.menu_on_guest(),
                     can_call: app.can_call(),
                     can_send: app.can_send(),
+                    hidden: app.is_tucked(),
                 };
                 let item = app::run_modal(&mut app, || tray::pick(owner, x, y, &state));
                 let now = Instant::now();

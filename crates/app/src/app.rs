@@ -40,7 +40,7 @@ use crate::tray::{self, MenuItem, Tray, TrayEvent};
 use crate::usage::{self, Meter};
 use crate::watch::{self, Watch, WatchEvent};
 use crate::when::When;
-use crate::win;
+use crate::win::{self, Screen};
 
 /// 누른 뒤 이만큼 움직이거나(px, 그림 1배 기준) 이만큼 누르고 있으면 잡는 것으로 본다. 그 전에 떼면 클릭이다.
 const CLICK_MOVE: f64 = 6.0;
@@ -86,6 +86,18 @@ const WINDOW_LIMIT: usize = 18;
 /// 아무 데나의 위쪽 공중이다.
 const GUEST_ACROSS: (f64, f64) = (0.1, 0.9);
 const GUEST_DOWN: (f64, f64) = (0.2, 0.35);
+/// 화면을 전체 화면 프로그램이 쓰고 있는지 확인하는 간격.
+const SCREEN_CHECK: Duration = Duration::from_secs(5);
+
+/// 사용자가 메뉴에서 고른 "잠깐 숨기기".
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Hide {
+    Off,
+    /// 이 시각까지 숨긴다.
+    Until(Instant),
+    /// 다시 보이라고 할 때까지 숨긴다.
+    UntilAsked,
+}
 
 /// 마우스로 꽃핀에게 하고 있는 일.
 #[derive(Clone, Copy)]
@@ -205,6 +217,19 @@ pub struct App {
     /// 화면에 보이는 다른 창들과, 마지막으로 읽은 시각.
     desktop: Desktop,
     scanned: Option<Instant>,
+    /// 사용자가 고른 "잠깐 숨기기".
+    hide: Hide,
+    /// 화면을 누가 쓰고 있는지와, 다음에 확인할 시각. 스크립트가 정했으면 진짜 화면은 보지 않는다.
+    screen: Screen,
+    screen_forced: bool,
+    next_screen_check: Instant,
+    /// 화면이 잠겨 있는가, PC가 절전에 들어갔는가.
+    locked: bool,
+    asleep: bool,
+    /// 지금 꽃핀을 숨겨 두었는가.
+    out_of_sight: bool,
+    /// 방해하면 안 되는 동안 알릴 때가 된 메모들. 그때가 지나면 포스트잇을 울린다.
+    rings_waiting: Vec<u64>,
     dev: Dev,
 }
 
@@ -339,6 +364,14 @@ impl App {
             bubble: None,
             desktop: Desktop::default(),
             scanned: None,
+            hide: Hide::Off,
+            screen: Screen::Free,
+            screen_forced: false,
+            next_screen_check: started,
+            locked: false,
+            asleep: false,
+            out_of_sight: false,
+            rings_waiting: Vec::new(),
             dev: Dev {
                 pace: dev::Pace::default(),
                 trace: dev::Trace::default(),
@@ -606,10 +639,8 @@ impl App {
         if !fresh {
             return;
         }
-        // 나와 있는 꽃핀이 모두 함께 놀란다. 떠 있거나 잡혀 있는 꽃핀은 건너뛴다.
-        for character in &mut self.characters {
-            character.show(Show::Surprise, &self.motions, &self.stage, now);
-        }
+        // 나와 있는 꽃핀이 모두 함께 놀란다.
+        self.surprise_all(now);
         if how == "bubble_toast" {
             self.toast("꽃핀 방송 시작!", &live.title, true, now);
         }
@@ -623,13 +654,16 @@ impl App {
         if how == "off" {
             return;
         }
-        self.notices.push(Notice {
-            kind: Kind::Live,
-            speech: Speech { title: "오늘 방송 끝!".to_string(), body: "수고했어요.".to_string() },
-            lasts: Some(LIVE_END_LASTS),
-            click: Click::Close,
-            tag: Some(LIVE_TAG),
-        });
+        // 꽃핀을 숨겨 둔 동안에는 말풍선을 줄에 세우지 않는다. 다시 보일 때 띄우면 때늦은 말이 된다.
+        if !self.out_of_sight {
+            self.notices.push(Notice {
+                kind: Kind::Live,
+                speech: Speech { title: "오늘 방송 끝!".to_string(), body: "수고했어요.".to_string() },
+                lasts: Some(LIVE_END_LASTS),
+                click: Click::Close,
+                tag: Some(LIVE_TAG),
+            });
+        }
         if how == "bubble_toast" {
             self.toast("꽃핀 방송 끝", "오늘 방송이 끝났어요.", false, now);
         }
@@ -754,10 +788,96 @@ impl App {
         self.guests().filter_map(leaves).min()
     }
 
+    /// 화면을 쓰지 않는 때인가. 잠겨 있거나, 절전 중이거나, 화면 보호기가 떠 있으면 그렇다.
+    /// 이때는 방송 상태도 묻지 않고 알림 시각도 보지 않는다. 돌아오면 그때 한꺼번에 본다.
+    fn is_paused(&self) -> bool {
+        self.locked || self.asleep || self.screen == Screen::Absent
+    }
+
+    /// 방해하면 안 되는 때인가. 전체 화면 프로그램(게임, 발표, 영상)이 떠 있거나 화면을 쓰지 않는 때다.
+    /// 꽃핀을 숨기고, 메모 알림의 포스트잇도 이때가 지난 뒤에 울린다.
+    fn is_quiet(&self) -> bool {
+        self.is_paused() || (self.screen == Screen::Busy && self.settings.is_on(Key::HideOnFullscreen))
+    }
+
+    /// 전체 화면 프로그램이 떠 있는지를 때맞춰 보는가. 정한 시간만 도는 확인용 실행은 시켰을 때만 본다.
+    fn watches_screen(&self) -> bool {
+        !self.screen_forced && (self.dev.options.run_for.is_none() || self.dev.options.screen_check)
+    }
+
+    /// 꽃핀을 숨길 때가 됐으면 숨기고, 다시 보일 때가 됐으면 보인다. 숨겨 둔 동안에는 꽃핀의 시간이 흐르지 않는다.
+    fn apply_hiding(&mut self, now: Instant) {
+        if let Hide::Until(at) = self.hide
+            && now >= at
+        {
+            self.hide = Hide::Off;
+        }
+        let hidden = self.hide != Hide::Off || self.is_quiet();
+        if hidden != self.out_of_sight {
+            self.out_of_sight = hidden;
+            if hidden {
+                let why = if self.is_paused() {
+                    "화면을 쓰지 않음"
+                } else if self.is_quiet() {
+                    "전체 화면"
+                } else {
+                    "잠깐 숨기기"
+                };
+                self.note(now, format!("꽃핀을 숨김: {why}"));
+                // 잡고 있던 꽃핀은 놓는다.
+                if let Pointer::Dragging { hwnd } = self.pointer
+                    && let Some(index) = self.find(hwnd)
+                {
+                    self.characters[index].actor_mut().release(&self.motions);
+                }
+                if !matches!(self.pointer, Pointer::Idle) {
+                    self.pointer = Pointer::Idle;
+                    character_window::stop_pressing();
+                }
+                self.hover = None;
+                // 떠 있던 말풍선은 닫는다. 클릭해야 닫히는 것은 줄에 다시 세워, 다시 보일 때 띄운다.
+                if let Some(notice) = self.notices.dismiss()
+                    && notice.lasts.is_none()
+                {
+                    self.notices.push(notice);
+                }
+                self.close_bubble(now);
+            } else {
+                self.note(now, "꽃핀을 다시 보임".to_string());
+                // 창들의 앞뒤가 바뀌었을 것이다.
+                self.scanned = None;
+            }
+            for character in &mut self.characters {
+                character.set_visible(!hidden, now);
+            }
+            if !hidden {
+                self.restack();
+            }
+        }
+        // 방해하면 안 되는 동안 미뤄 둔 알림을 울린다.
+        if !self.is_quiet() && !self.rings_waiting.is_empty() {
+            for id in std::mem::take(&mut self.rings_waiting) {
+                self.postits.ring(&mut self.memos, id);
+            }
+            self.surprise_all(now);
+        }
+    }
+
+    /// 나와 있는 꽃핀이 모두 놀란다. 떠 있거나 잡혀 있는 꽃핀은 건너뛴다. 숨겨 둔 동안에는 아무도 놀라지 않는다.
+    fn surprise_all(&mut self, now: Instant) {
+        if self.out_of_sight {
+            return;
+        }
+        for character in &mut self.characters {
+            character.show(Show::Surprise, &self.motions, &self.stage, now);
+        }
+    }
+
     /// 꽃핀을 하나 더 부를 수 있는가. 자리가 없어도 먼저 부른 꽃핀을 돌려보내면 부를 수 있다.
-    /// 한 번에 한 명만 두기로 했으면 부를 수 없다.
+    /// 한 번에 한 명만 두기로 했으면 부를 수 없다. 숨겨 둔 동안에도 부를 수 없다.
     pub fn can_call(&self) -> bool {
         self.quitting.is_none()
+            && !self.out_of_sight
             && self.characters.len() < WINDOW_LIMIT
             && (self.staying() < self.crowd_limit() || self.guests().next().is_some())
     }
@@ -1001,6 +1121,14 @@ impl App {
                 // 앱을 한 번 더 켰다. 꽃핀이 어디 있는지 알려 주는 일은 아직 하지 않는다.
                 TrayEvent::Hello => self.dev.hellos += 1,
                 TrayEvent::ToastClicked => self.toast_clicked(now),
+                TrayEvent::Locked(locked) => {
+                    self.locked = locked;
+                    self.note(now, format!("화면 잠금: {locked}"));
+                }
+                TrayEvent::Asleep(asleep) => {
+                    self.asleep = asleep;
+                    self.note(now, format!("절전: {asleep}"));
+                }
             }
         }
         for event in watch::take_events() {
@@ -1018,6 +1146,8 @@ impl App {
                     }
                     // 창들의 앞뒤가 바뀌었을 것이다. 다음 걸음에서 바로 다시 읽는다.
                     self.scanned = None;
+                    // 전체 화면 프로그램으로 넘어갔거나 거기서 나왔을 수 있다. 바로 다시 본다.
+                    self.next_screen_check = now;
                 }
             }
         }
@@ -1057,6 +1187,20 @@ impl App {
                 }
                 self.characters[i].wake(now);
             }
+            // 새로 만든 창은 보이는 채로 생긴다. 숨겨 둔 중이었으면 다시 숨긴다.
+            if self.out_of_sight {
+                self.characters.iter_mut().for_each(|character| character.set_visible(false, now));
+            }
+        }
+
+        // 전체 화면 프로그램이 떠 있는지 가끔 본다. 떠 있으면 꽃핀을 숨기고 멈춘다. 화면이 잠겼을 때도 그렇다.
+        if self.watches_screen() && now >= self.next_screen_check {
+            self.next_screen_check = now + SCREEN_CHECK;
+            let screen = win::screen();
+            if screen != self.screen {
+                self.screen = screen;
+                self.note(now, format!("화면을 쓰는 쪽이 바뀜: {screen:?}"));
+            }
         }
 
         // 4. 사용자가 자리를 비웠는지 가끔 본다. 비웠으면 꽃핀도 잠들고, 돌아오면 깬다.
@@ -1091,11 +1235,18 @@ impl App {
             self.characters[0].wake(now);
         }
 
-        // 6. 치지직에서 온 답을 받고, 때가 됐으면 방송 상태를 다시 묻는다.
-        self.check_live(now);
+        // 꽃핀을 숨기거나 다시 보인다. 스크립트가 시킨 것도 여기서 반영된다.
+        self.apply_hiding(now);
+
+        // 6. 치지직에서 온 답을 받고, 때가 됐으면 방송 상태를 다시 묻는다. 화면을 쓰지 않는 동안에는 쉰다.
+        if !self.is_paused() {
+            self.check_live(now);
+        }
 
         // 7. 알릴 때가 된 메모를 알린다. 그리고 포스트잇에서 온 일을 처리하고 움직이는 포스트잇을 그린다.
-        self.check_memos(now);
+        if !self.is_paused() {
+            self.check_memos(now);
+        }
         let wall = self.wall(now);
         for outcome in self.postits.frame(&mut self.memos, wall, now) {
             if let Some(next) = self.memo_outcome(outcome, now) {
@@ -1141,6 +1292,10 @@ impl App {
     ///
     /// 메뉴나 물음 창이 떠 있는 동안에도 이것만은 계속 불린다.
     pub fn tick_characters(&mut self, now: Instant) -> Result<bool, PackError> {
+        // 숨겨 둔 동안에는 꽃핀의 시간이 흐르지 않는다.
+        if self.out_of_sight {
+            return Ok(true);
+        }
         // 깨어난 김에 곧 올 박자까지 함께 밟는다.
         let horizon = now + character::LOOKAHEAD;
         // 다음 장을 그리기 바로 전에, 앞 장이 화면에 제대로 나와 있는지 본다. 첫 꽃핀이 멈춰 있을 때만 본다.
@@ -1205,7 +1360,7 @@ impl App {
         };
         let (head, half_body, bounds, dpi) = first.head(&self.stage);
         // 꽃핀이 떠 있거나 잡혀 있는 동안에는 띄우지 않고 기다린다. 끝내는 중에는 새로 띄우지 않는다.
-        let ready = first.actor().can_speak() && self.quitting.is_none();
+        let ready = first.actor().can_speak() && self.quitting.is_none() && !self.out_of_sight;
         if self.bubble.is_none()
             && let Some(notice) = self.notices.next(now, ready)
         {
@@ -1323,13 +1478,16 @@ impl App {
 
     /// 메모 하나를 알린다. 그 메모의 포스트잇이 커지고 빛나며 앞으로 나오고, 나와 있는 꽃핀이 모두 놀란다.
     /// Windows 알림으로도 보여 준다. 포스트잇 아래의 단추로 확인하거나 조금 뒤로 미룬다.
+    ///
+    /// 전체 화면 프로그램을 쓰는 중이면 포스트잇은 그것이 끝난 뒤에 울린다. 그동안에는 Windows 알림만 간다.
     fn remind(&mut self, memo: &Memo, now: Instant) {
         self.note(now, format!("알림: {}", memo.title()));
-        // 떠 있거나 잡혀 있는 꽃핀은 건너뛴다.
-        for character in &mut self.characters {
-            character.show(Show::Surprise, &self.motions, &self.stage, now);
+        if self.is_quiet() {
+            self.rings_waiting.push(memo.id);
+        } else {
+            self.surprise_all(now);
+            self.postits.ring(&mut self.memos, memo.id);
         }
-        self.postits.ring(&mut self.memos, memo.id);
         if self.settings.is_on(Key::ReminderToast) {
             self.toast("꽃핀 알림", &memo.title(), false, now);
         }
@@ -1456,7 +1614,8 @@ impl App {
 
     /// 다음에 할 일이 있을 때까지 잔다. 창 메시지가 오면 그 전에 깬다.
     pub fn sleep(&self) {
-        let mut wake = self.characters.iter().map(Character::due).min();
+        // 숨겨 둔 동안에는 꽃핀 때문에 깨어날 일이 없다.
+        let mut wake = if self.out_of_sight { None } else { self.characters.iter().map(Character::due).min() };
         let mut sooner = |limit: Option<Instant>| {
             if let Some(limit) = limit {
                 wake = Some(wake.map_or(limit, |wake| wake.min(limit)));
@@ -1465,17 +1624,26 @@ impl App {
         if let Pointer::Pressing { since, .. } = self.pointer {
             sooner(Some(since + CLICK_HOLD));
         }
-        if !self.away_forced && self.away_after().is_some() {
+        if !self.away_forced && self.away_after().is_some() && !self.out_of_sight {
             sooner(Some(self.next_away_check));
         }
+        if self.watches_screen() {
+            sooner(Some(self.next_screen_check));
+        }
+        if let Hide::Until(at) = self.hide {
+            sooner(Some(at));
+        }
+        let paused = self.is_paused();
         sooner(self.window.is_some().then_some(self.next_usage));
         sooner(self.store.due());
         sooner(self.notices.closes_at());
-        sooner(self.live_due());
-        sooner((self.memos.has_pending() && self.quitting.is_none()).then_some(self.next_memo_check));
+        sooner(self.live_due().filter(|_| !paused));
+        sooner((self.memos.has_pending() && self.quitting.is_none() && !paused).then_some(self.next_memo_check));
         sooner(self.postits.due());
         sooner(self.guests_due());
         sooner(self.dev.deadline);
+        // 자원을 재기 시작할 때를 놓치지 않는다. 숨겨 둔 동안에는 달리 깨어날 일이 없다.
+        sooner((self.dev.usage.is_none() && self.dev.options.report.is_some()).then_some(self.started + dev::WARM_UP));
         sooner(self.quitting);
         sooner(self.dev.script.front().map(|step| self.started + step.at));
         self.timer.sleep_until(wake);
@@ -1502,6 +1670,17 @@ impl App {
                 if let Some(index) = self.menu_guest() {
                     self.send(index, now);
                 }
+            }
+            Some(MenuItem::Hide(index)) => {
+                self.hide = match tray::HIDES[index].1 {
+                    Some(seconds) => Hide::Until(now + Duration::from_secs(seconds)),
+                    None => Hide::UntilAsked,
+                };
+                self.apply_hiding(now);
+            }
+            Some(MenuItem::Unhide) => {
+                self.hide = Hide::Off;
+                self.apply_hiding(now);
             }
             Some(MenuItem::Settings) => self.open_settings(),
             Some(MenuItem::Watch) => self.watch(now),
@@ -1544,9 +1723,22 @@ impl App {
         }
     }
 
-    /// 메뉴의 "행동" 아래에 넣을 행동과, 지금 고를 수 있는지.
+    /// 메뉴의 "행동" 아래에 넣을 행동과, 지금 고를 수 있는지. 숨겨 둔 동안에는 아무것도 고를 수 없다.
     pub fn menu_shows(&self) -> Vec<(Show, bool)> {
-        self.characters.get(self.menu_character()).map(|character| character.showable(&self.stage)).unwrap_or_default()
+        let mut shows = self
+            .characters
+            .get(self.menu_character())
+            .map(|character| character.showable(&self.stage))
+            .unwrap_or_default();
+        if self.out_of_sight {
+            shows.iter_mut().for_each(|(_, possible)| *possible = false);
+        }
+        shows
+    }
+
+    /// 사용자가 꽃핀을 잠깐 숨겨 둔 중인가. 메뉴에 "다시 보이기"를 넣는다.
+    pub fn is_tucked(&self) -> bool {
+        self.hide != Hide::Off
     }
 
     /// 물음 창의 답을 받아, "예"였으면 설정 창의 그 탭을 기본값으로 되돌린다.
@@ -1567,7 +1759,8 @@ impl App {
 
     /// 끝내기를 고른 것으로 한다. 지금 바로 끝내야 하면 `true`를 돌려준다.
     fn ask_quit(&mut self, now: Instant) -> bool {
-        if self.quitting.is_some() {
+        // 숨겨 둔 동안에는 인사할 꽃핀이 보이지 않는다. 바로 끝낸다.
+        if self.quitting.is_some() || self.out_of_sight {
             return true;
         }
         self.quitting = Some(now + QUIT_LIMIT);
@@ -1728,6 +1921,14 @@ impl App {
                 self.away_forced = true;
                 self.set_away(on, now);
             }
+            dev::Command::Fullscreen(on) => {
+                self.screen_forced = true;
+                self.screen = if on { Screen::Busy } else { Screen::Free };
+            }
+            dev::Command::Lock(on) => self.locked = on,
+            dev::Command::Hide(seconds) => {
+                self.hide = Hide::Until(now + Duration::from_secs_f64(seconds));
+            }
             dev::Command::Say(lasts, title, body) => self.notices.push(Notice {
                 kind: Kind::Note,
                 speech: Speech { title, body },
@@ -1787,7 +1988,11 @@ impl App {
                         Stay::Guest(_) => format!("{index}번"),
                     })
                     .collect();
-                self.note(now, format!("꽃핀 {}명, 앞에서부터 {}", self.characters.len(), names.join(" ")));
+                let seen = self.characters.iter().filter(|character| character.window().is_visible()).count();
+                self.note(
+                    now,
+                    format!("꽃핀 {}명(보이는 창 {seen}개), 앞에서부터 {}", self.characters.len(), names.join(" ")),
+                );
                 self.dev.snaps += 1;
                 if let Some(path) = &self.dev.options.settings_shot {
                     let back_first: Vec<_> =

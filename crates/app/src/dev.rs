@@ -24,6 +24,7 @@
 //! - `--data-dir 폴더`: 설정과 상태 파일을 둘 폴더. `--for`와 함께 쓸 때 이것을 주지 않으면 파일을 읽지도
 //!   쓰지도 않는다. 확인하려고 돌린 것이 진짜 설정을 건드리지 않게 하려는 것이다.
 //! - `--no-open`: 주소나 폴더를 열라고 해도 열지 않고 보고서에 적기만 한다.
+//! - `--screen-check`: `--for`와 함께 쓸 때도 전체 화면 프로그램이 떠 있는지를 진짜로 본다.
 //! - `--settings-dump 파일`, `--settings-shot 파일`: 스크립트의 `settings snap`이 설정 창의 컨트롤 좌표와
 //!   그림(BMP)을 여기에 쓴다.
 //!
@@ -76,6 +77,9 @@ pub struct Options {
     pub greet: bool,
     /// 확인용 실행에서도 Windows 알림을 진짜로 띄운다. 주지 않으면 보고서에 적기만 한다.
     pub toast: bool,
+    /// 확인용 실행에서도 전체 화면 프로그램이 떠 있는지를 진짜로 본다. 주지 않으면 보지 않는다.
+    /// 재는 동안 다른 창 때문에 꽃핀이 숨지 않게 하려는 것이다.
+    pub screen_check: bool,
     /// `--clock "2026-11-12 18:59:50"`: 이 PC의 시계가 시작할 때 이 시각이었던 것으로 친다. 알림을 확인하는 데 쓴다.
     /// 벽시계의 1970-01-01 00:00부터 흐른 초다.
     pub clock: Option<i64>,
@@ -108,6 +112,7 @@ impl Options {
             live_check: args.iter().any(|a| a == "--live-check"),
             greet: args.iter().any(|a| a == "--greet"),
             toast: args.iter().any(|a| a == "--toast"),
+            screen_check: args.iter().any(|a| a == "--screen-check"),
             clock: value("--clock")
                 .map(|s| parse_clock(&s).unwrap_or_else(|| crate::win::fatal("--clock을 읽을 수 없습니다."))),
         }
@@ -139,6 +144,13 @@ pub enum Command {
     /// `away on|off`: 사용자가 자리를 비운 것으로, 또는 돌아온 것으로 친다.
     /// 한 번 쓰면 그 뒤로는 진짜 입력 시각을 보지 않는다.
     Away(bool),
+    /// `fullscreen on|off`: 전체 화면 프로그램이 떠 있는 것으로, 또는 없는 것으로 친다.
+    /// 한 번 쓰면 그 뒤로는 진짜 화면을 보지 않는다.
+    Fullscreen(bool),
+    /// `lock on|off`: 화면을 잠근 것으로, 또는 푼 것으로 친다.
+    Lock(bool),
+    /// `hide 초`: 메뉴에서 "잠깐 숨기기"를 고른 것과 같다. 그 시간이 지나면 다시 보인다.
+    Hide(f64),
     /// `menu 번호`: 메뉴에서 그 항목을 고른 것으로 친다. 번호는 [`crate::tray::MenuItem`]의 값이다.
     Menu(u32),
     /// `target 번호`: 그 번호의 꽃핀(0이 기본 꽃핀)을 오른쪽 클릭해 메뉴를 띄운 것으로 친다.
@@ -290,6 +302,9 @@ pub fn parse_script(text: &str) -> Result<Vec<Step>, String> {
                 _ => return Err(bad()),
             }),
             (Some("away"), 3) if words[2] == "on" || words[2] == "off" => Command::Away(words[2] == "on"),
+            (Some("fullscreen"), 3) if words[2] == "on" || words[2] == "off" => Command::Fullscreen(words[2] == "on"),
+            (Some("lock"), 3) if words[2] == "on" || words[2] == "off" => Command::Lock(words[2] == "on"),
+            (Some("hide"), 3) => Command::Hide(number(2)?),
             (Some("menu"), 3) => Command::Menu(number(2)? as u32),
             (Some("target"), 3) => Command::Target(number(2)? as usize),
             (Some("crowd"), 2) => Command::Crowd,
@@ -666,6 +681,16 @@ mod tests {
         let crowd = parse_script("1 menu 7; 2 target 2; 3 crowd").unwrap();
         let commands: Vec<Command> = crowd.iter().map(|step| step.command.clone()).collect();
         assert_eq!(commands, [Command::Menu(7), Command::Target(2), Command::Crowd]);
+        let quiet = parse_script("1 fullscreen on; 2 fullscreen off; 3 lock on; 4 lock off; 5 hide 2.5").unwrap();
+        let commands: Vec<Command> = quiet.iter().map(|step| step.command.clone()).collect();
+        let wanted = [
+            Command::Fullscreen(true),
+            Command::Fullscreen(false),
+            Command::Lock(true),
+            Command::Lock(false),
+            Command::Hide(2.5),
+        ];
+        assert_eq!(commands, wanted);
         let more = parse_script("1 click; 2 rub 80.5; 3 do jump; 4 away on; 5 away off").unwrap();
         let commands: Vec<Command> = more.iter().map(|step| step.command.clone()).collect();
         assert_eq!(

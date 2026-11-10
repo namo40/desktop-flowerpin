@@ -305,6 +305,14 @@ impl Character {
         self.due = now;
     }
 
+    /// 창을 숨기거나 다시 보인다. 다시 보일 때는 숨어 있던 동안의 시간이 흐르지 않은 것으로 친다.
+    pub fn set_visible(&mut self, visible: bool, now: Instant) {
+        self.window.set_visible(visible);
+        if visible {
+            self.resume(now);
+        }
+    }
+
     /// 상태를 밖에서 바꿨을 때(잡기, 놓기 등) 다음 걸음을 바로 밟게 한다.
     pub fn wake(&mut self, now: Instant) {
         self.due = now;

@@ -8,7 +8,10 @@ use windows_sys::Win32::Foundation::{HWND, POINT};
 use windows_sys::Win32::System::SystemInformation::{GetLocalTime, GetTickCount};
 use windows_sys::Win32::UI::HiDpi::{DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO};
-use windows_sys::Win32::UI::Shell::ShellExecuteW;
+use windows_sys::Win32::UI::Shell::{
+    QUNS_BUSY, QUNS_NOT_PRESENT, QUNS_PRESENTATION_MODE, QUNS_RUNNING_D3D_FULL_SCREEN, SHQueryUserNotificationState,
+    ShellExecuteW,
+};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     GetCursorPos, IDOK, MB_ICONERROR, MB_ICONQUESTION, MB_OK, MB_OKCANCEL, MessageBoxW, SW_SHOWNORMAL,
 };
@@ -22,6 +25,30 @@ pub fn wide(s: &str) -> Vec<u16> {
 pub fn enable_per_monitor_dpi() {
     // 실패해도(오래된 Windows 10) 앱은 돌아가므로 결과는 보지 않는다.
     unsafe { SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
+}
+
+/// 지금 화면을 누가 쓰고 있는지.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Screen {
+    /// 평소대로다.
+    Free,
+    /// 전체 화면 프로그램(게임, 발표, 전체 화면 영상)이 앞에 떠 있다.
+    Busy,
+    /// 화면이 잠겨 있거나 화면 보호기가 떠 있다.
+    Absent,
+}
+
+/// 지금 화면을 누가 쓰고 있는지를 Windows에 묻는다. Windows가 알림을 띄워도 되는지 정할 때 쓰는 것과 같은 답이다.
+pub fn screen() -> Screen {
+    let mut state = 0;
+    if unsafe { SHQueryUserNotificationState(&mut state) } < 0 {
+        return Screen::Free;
+    }
+    match state {
+        QUNS_BUSY | QUNS_RUNNING_D3D_FULL_SCREEN | QUNS_PRESENTATION_MODE => Screen::Busy,
+        QUNS_NOT_PRESENT => Screen::Absent,
+        _ => Screen::Free,
+    }
 }
 
 /// 사용자가 마우스나 키보드를 마지막으로 쓴 뒤 흐른 시간(초). 알 수 없으면 0이다.
