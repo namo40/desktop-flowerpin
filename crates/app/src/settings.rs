@@ -184,6 +184,11 @@ impl Settings {
         if let Stored::Number(value) = self.stored(key) { value } else { 0 }
     }
 
+    /// 값이 글인 항목의 값. 글이 아닌 항목이면 빈 글이다.
+    pub fn word(&self, key: Key) -> &'static str {
+        if let Stored::Word(word) = self.stored(key) { word } else { "" }
+    }
+
     /// 한 탭의 항목을 모두 기본값으로 되돌린다.
     pub fn reset_tab(&mut self, tab: usize) {
         for (value, spec) in self.values.iter_mut().zip(&SPECS) {
@@ -285,6 +290,11 @@ mod tests {
         assert_eq!(settings.number(Key::Stay), 30);
         assert_eq!(spec(Key::LiveStartNotice).picks[settings.get(Key::LiveStartNotice)].label, "말풍선 + Windows 알림");
         assert_eq!(spec(Key::LiveEndNotice).picks[settings.get(Key::LiveEndNotice)].label, "말풍선만");
+        assert_eq!(
+            (settings.word(Key::LiveStartNotice), settings.word(Key::LiveEndNotice)),
+            ("bubble_toast", "bubble")
+        );
+        assert_eq!(settings.word(Key::Size), "");
     }
 
     #[test]

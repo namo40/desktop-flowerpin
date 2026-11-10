@@ -21,11 +21,13 @@ use crate::actor::{Habits, Mode, Show};
 use crate::bubble::{Bubble, Speech};
 use crate::character::{self, Character, Look};
 use crate::character_window::{self, WindowEvent};
+use crate::checker::Checker;
 use crate::clock::WakeTimer;
 use crate::desktop::Desktop;
 use crate::dev;
 use crate::frames::Frames;
 use crate::links::LINKS;
+use crate::live::{self, Event, Live, Reply, Tracker, View};
 use crate::motions::{MotionId, Motions};
 use crate::notices::{Click, Kind, Notice, Notices};
 use crate::settings::{Key, Settings};
@@ -59,6 +61,12 @@ const SCAN_ON_FLOOR: Duration = Duration::from_millis(1000);
 const USAGE_EVERY: Duration = Duration::from_secs(1);
 /// 설정 창 정보 탭에 보여 줄 그림의 한 변(px).
 const ABOUT_ICON: i32 = 32;
+/// 방송 안내 말풍선의 이름. 방송이 끝나거나 새 방송이 시작되면 이 이름으로 버린다.
+const LIVE_TAG: &str = "live";
+/// 방송이 끝났다는 말풍선이 떠 있는 시간.
+const LIVE_END_LASTS: Duration = Duration::from_secs(10);
+/// 메뉴에 적는 방송 제목의 가장 긴 길이(글자 수).
+const MENU_TITLE: usize = 40;
 
 /// 마우스로 꽃핀에게 하고 있는 일.
 #[derive(Clone, Copy)]
@@ -83,6 +91,23 @@ pub enum Flow {
     Menu(i32, i32),
     /// 설정 창의 이 탭을 기본값으로 되돌릴지 묻는다.
     ConfirmReset(usize),
+}
+
+/// 방송 상태 확인에 딸린 것들.
+struct LiveWatch {
+    tracker: Tracker,
+    /// 치지직에 묻는 스레드. 처음 물을 때 만든다. 방송 상태 확인을 꺼 두면 만들지 않는다.
+    checker: Option<Checker>,
+    /// 마지막으로 물은 시각.
+    asked: Option<Instant>,
+    /// 물어 놓고 답을 기다리는 중인가.
+    waiting: bool,
+    /// 마지막으로 방송 상태를 알아낸, 이 PC의 시각(시, 분).
+    checked: Option<(u32, u32)>,
+    /// 트레이 아이콘에 올려 둔 글. 방송 중이 아니면 비어 있다.
+    tip: String,
+    /// Windows 알림을 클릭하면 방송을 여는가. 방송 시작 알림을 띄운 뒤에만 그렇다.
+    toast_opens: bool,
 }
 
 /// 만드는 동안 확인하고 재는 데 쓰는 것들.
@@ -125,6 +150,10 @@ pub struct App {
     next_away_check: Instant,
     quitting: Option<Instant>,
     tray: Tray,
+    /// 트레이 아이콘의 그림과 한 변. 방송 중 표시를 찍거나 지울 때 다시 쓴다.
+    face: Vec<u32>,
+    icon_size: i32,
+    live: LiveWatch,
     window: Option<SettingsWindow>,
     /// 설정 창에 보여 줄 CPU를 재는 도구와, 다음에 고칠 시각.
     meter: Meter,
@@ -205,7 +234,20 @@ impl App {
         // 트레이 아이콘은 서 있는 그림(idle2의 첫 장)의 얼굴로 만든다.
         let icon_size = tray::icon_size();
         let face = frames.portrait(motions.clip(motions.idle2).first_frame, icon_size as usize)?;
-        let tray = Tray::new(&face, icon_size);
+        let mut tray = Tray::new(&face, icon_size);
+        // Windows 알림에는 같은 얼굴을 더 크게 넣는다.
+        let toast_size = tray::toast_icon_size();
+        let toast_face = frames.portrait(motions.clip(motions.idle2).first_frame, toast_size as usize)?;
+        tray.set_toast_icon(&toast_face, toast_size);
+        let live = LiveWatch {
+            tracker: Tracker::new(state.announced_live.clone()),
+            checker: None,
+            asked: None,
+            waiting: false,
+            checked: None,
+            tip: String::new(),
+            toast_opens: false,
+        };
 
         let mut app = App {
             frames,
@@ -223,6 +265,9 @@ impl App {
             next_away_check: started,
             quitting: None,
             tray,
+            face,
+            icon_size,
+            live,
             window: None,
             meter: Meter::start(),
             next_usage: started,
@@ -325,6 +370,13 @@ impl App {
         ));
         lines.push(format!("창 {}x{}", first.window().width(), first.window().height()));
         lines.push(format!("시작할 때 마지막 입력 뒤 {:.1}초", win::idle_seconds()));
+        lines.push(if !self.live_enabled() {
+            "방송 상태 확인: 꺼짐".to_string()
+        } else if self.live_online() {
+            format!("방송 상태 확인: {}분마다 {}에 물음", self.settings.number(Key::LiveCheckInterval), live::HOST)
+        } else {
+            "방송 상태 확인: 켜짐. 확인용 실행이라 인터넷은 쓰지 않음".to_string()
+        });
         lines.push(match self.tray.icon_rect() {
             Some(rect) => format!("트레이 아이콘 등록됨: 자리 ({}, {}) {}x{}", rect.x, rect.y, rect.w, rect.h),
             None => "트레이 아이콘이 등록되지 않음".to_string(),
@@ -349,7 +401,202 @@ impl App {
             bubble.window().set_topmost(look.topmost);
         }
         self.apply_habits();
+        if !self.live_enabled() {
+            // 방송 상태 확인을 껐다. 알던 것을 잊고, 방송 안내를 치운다.
+            if *self.live.tracker.view() != View::Unknown {
+                self.live.tracker = Tracker::new(self.live.tracker.announced().map(str::to_string));
+                self.live.checked = None;
+            }
+            self.drop_live_notices(now);
+        }
+        self.show_live();
         self.store.settings_changed(now);
+    }
+
+    /// 방송 상태 확인이 켜져 있는가.
+    fn live_enabled(&self) -> bool {
+        self.settings.is_on(Key::LiveCheck)
+    }
+
+    /// 치지직에 진짜로 물어도 되는가. 정한 시간만 도는 확인용 실행은 시켰을 때만 묻는다.
+    fn live_online(&self) -> bool {
+        self.live_enabled()
+            && self.quitting.is_none()
+            && (self.dev.options.run_for.is_none() || self.dev.options.live_check)
+    }
+
+    /// 치지직에 다음으로 물을 시각. 묻지 않을 때는 `None`이다.
+    fn live_due(&self) -> Option<Instant> {
+        if !self.live_online() || self.live.waiting {
+            return None;
+        }
+        let interval = Duration::from_secs(self.settings.number(Key::LiveCheckInterval).max(1) as u64 * 60);
+        // 주소가 바뀌었으면 더 묻지 않는다. 실패했으면 간격이 달라진다.
+        let wait = self.live.tracker.wait(interval)?;
+        Some(self.live.asked.map_or(self.started, |asked| asked + wait))
+    }
+
+    /// 치지직에서 온 답을 받고, 때가 됐으면 다시 묻는다.
+    fn check_live(&mut self, now: Instant) {
+        while let Some(reply) = self.live.checker.as_ref().and_then(Checker::take) {
+            self.live.waiting = false;
+            self.live_reply(reply, now);
+        }
+        if self.live_due().is_none_or(|due| now < due) {
+            return;
+        }
+        if self.live.checker.is_none() {
+            self.live.checker = Checker::start(self.tray.hwnd());
+        }
+        // 스레드를 만들지 못했어도 물은 것으로 적어, 다음 때까지 기다리게 한다.
+        self.live.asked = Some(now);
+        if let Some(checker) = &self.live.checker {
+            checker.ask();
+            self.live.waiting = true;
+            self.note(now, "방송 상태를 물음".to_string());
+        }
+    }
+
+    /// 방송 상태에 대한 답 하나를 받아, 알릴 일이 있으면 알린다.
+    fn live_reply(&mut self, reply: Reply, now: Instant) {
+        // 방송 상태 확인을 끈 뒤에 온 답은 버린다.
+        if !self.live_enabled() {
+            return;
+        }
+        self.note(now, format!("방송 상태의 답: {reply:?}"));
+        if matches!(reply, Reply::Open(_) | Reply::Closed) {
+            self.live.checked = Some(win::local_time());
+        }
+        let event = self.live.tracker.feed(reply);
+        // 안내한 방송을 적어 둔다. 앱을 다시 켜도 같은 방송을 또 안내하지 않는다.
+        if self.state.announced_live.as_deref() != self.live.tracker.announced() {
+            self.state.announced_live = self.live.tracker.announced().map(str::to_string);
+            self.store.state_changed(now);
+        }
+        match event {
+            Some(Event::Started(live)) => self.announce_live(&live, true, now),
+            Some(Event::AlreadyLive(live)) => self.announce_live(&live, false, now),
+            Some(Event::Ended) => self.announce_end(now),
+            None => {}
+        }
+        self.show_live();
+    }
+
+    /// 방송이 켜져 있다고 알린다. `fresh`는 앱이 켜져 있는 동안 방송이 시작됐다는 뜻이다.
+    fn announce_live(&mut self, live: &Live, fresh: bool, now: Instant) {
+        let how = self.settings.word(Key::LiveStartNotice);
+        if how == "off" {
+            return;
+        }
+        // 앞선 방송의 안내가 아직 남아 있으면 치운다.
+        self.drop_live_notices(now);
+        let title = if fresh { "방송 시작!" } else { "지금 방송 중이에요!" };
+        self.notices.push(Notice {
+            kind: Kind::Live,
+            speech: Speech { title: title.to_string(), body: live.title.clone() },
+            lasts: None,
+            click: Click::Open(LINKS[0].url.to_string()),
+            tag: Some(LIVE_TAG),
+        });
+        if !fresh {
+            return;
+        }
+        // 나와 있는 꽃핀이 모두 함께 놀란다. 떠 있거나 잡혀 있는 꽃핀은 건너뛴다.
+        for character in &mut self.characters {
+            character.show(Show::Surprise, &self.motions, &self.stage, now);
+        }
+        if how == "bubble_toast" {
+            self.toast("꽃핀 방송 시작!", &live.title, true, now);
+        }
+    }
+
+    /// 방송이 끝났다고 알린다.
+    fn announce_end(&mut self, now: Instant) {
+        // 시작 안내가 아직 떠 있거나 줄에 있으면 때늦은 것이므로 버린다.
+        self.drop_live_notices(now);
+        let how = self.settings.word(Key::LiveEndNotice);
+        if how == "off" {
+            return;
+        }
+        self.notices.push(Notice {
+            kind: Kind::Live,
+            speech: Speech { title: "오늘 방송 끝!".to_string(), body: "수고했어요.".to_string() },
+            lasts: Some(LIVE_END_LASTS),
+            click: Click::Close,
+            tag: Some(LIVE_TAG),
+        });
+        if how == "bubble_toast" {
+            self.toast("꽃핀 방송 끝", "오늘 방송이 끝났어요.", false, now);
+        }
+    }
+
+    /// 떠 있거나 줄에 있는 방송 안내를 치운다.
+    fn drop_live_notices(&mut self, now: Instant) {
+        if self.notices.cancel(LIVE_TAG) {
+            self.close_bubble(now);
+        }
+    }
+
+    /// Windows 알림을 띄운다. `opens`는 클릭하면 방송을 여는지다.
+    fn toast(&mut self, title: &str, body: &str, opens: bool, now: Instant) {
+        self.live.toast_opens = opens;
+        self.note(now, format!("Windows 알림: {title} / {body}"));
+        // 정한 시간만 도는 확인용 실행에서는 시켰을 때만 진짜로 띄운다.
+        if self.dev.options.run_for.is_none() || self.dev.options.toast {
+            let taken = self.tray.notify(title, body);
+            self.note(now, format!("Windows 알림을 띄움: {}", if taken { "받아 줌" } else { "받아 주지 않음" }));
+        }
+    }
+
+    /// Windows 알림을 클릭했다.
+    fn toast_clicked(&mut self, now: Instant) {
+        if self.live.toast_opens {
+            self.watch(now);
+        }
+    }
+
+    /// 방송을 브라우저로 연다. 보러 갔으니 방송 안내 말풍선은 치운다.
+    fn watch(&mut self, now: Instant) {
+        self.drop_live_notices(now);
+        self.open(LINKS[0].url);
+    }
+
+    /// 방송에 대해 아는 것을 트레이 아이콘과 설정 창에 보여 준다.
+    fn show_live(&mut self) {
+        let enabled = self.live_enabled();
+        let tip = self.live.tracker.live().filter(|_| enabled).map(live::tip).unwrap_or_default();
+        if tip != self.live.tip {
+            // 방송 중이면 아이콘에 빨간 점을 찍는다.
+            if tip.is_empty() {
+                self.tray.set(&self.face, self.icon_size, "");
+            } else {
+                self.tray.set(&tray::with_dot(&self.face, self.icon_size), self.icon_size, &tip);
+            }
+            if self.dev.options.report.is_some() {
+                self.dev
+                    .notes
+                    .push(format!("트레이 아이콘: {}", if tip.is_empty() { "방송 중 표시를 지움" } else { &tip }));
+            }
+            self.live.tip = tip;
+        }
+        if let Some(window) = &self.window {
+            window.set_live_status(&live::status_line(self.live.tracker.view(), enabled, self.live.checked));
+        }
+    }
+
+    /// 방송 중이면 메뉴 맨 위에 넣을 방송 제목과 방송 정보 한 줄.
+    pub fn live_menu(&self) -> Option<(String, String)> {
+        let live = self.live.tracker.live().filter(|_| self.live_enabled())?;
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |since| since.as_secs() as i64);
+        Some((live::shorten(&live.title, MENU_TITLE), live::details(live, now)))
+    }
+
+    /// 확인용 보고서에 일어난 일을 시각과 함께 적는다. 보고서를 쓰지 않으면 아무것도 하지 않는다.
+    fn note(&mut self, now: Instant, text: String) {
+        if self.dev.options.report.is_some() {
+            let at = now.saturating_duration_since(self.started).as_secs_f64();
+            self.dev.notes.push(format!("{at:.2}초 {text}"));
+        }
     }
 
     /// 마우스와 키보드를 이만큼 쓰지 않으면 자리를 비운 것으로 친다. 확인용 인자로 껐으면 `None`이다.
@@ -461,6 +708,11 @@ impl App {
                     }
                     self.hover = Some((hwnd, (x, y), now));
                 }
+                // 말풍선을 오른쪽 클릭하면 딸린 일(방송 열기 같은 것)은 하지 않고 닫기만 한다.
+                WindowEvent::Menu { hwnd, .. } if self.is_bubble(hwnd) => {
+                    self.close_bubble(now);
+                    self.notices.dismiss();
+                }
                 // 꽃핀을 오른쪽 클릭해도 트레이 아이콘과 같은 메뉴가 뜬다. 행동은 오른쪽 클릭한 꽃핀이 한다.
                 WindowEvent::Menu { hwnd, x, y } => {
                     self.menu_target = Some(hwnd);
@@ -487,6 +739,7 @@ impl App {
                 TrayEvent::TaskbarCreated => self.tray.add(),
                 // 앱을 한 번 더 켰다. 꽃핀이 어디 있는지 알려 주는 일은 아직 하지 않는다.
                 TrayEvent::Hello => self.dev.hellos += 1,
+                TrayEvent::ToastClicked => self.toast_clicked(now),
             }
         }
         for event in watch::take_events() {
@@ -566,17 +819,20 @@ impl App {
             self.characters[0].wake(now);
         }
 
-        // 6. 끝내기: 꽃핀들이 손을 흔들고 사라진 뒤에 끝낸다. 한 번 더 고르면 바로 끝낸다.
+        // 6. 치지직에서 온 답을 받고, 때가 됐으면 방송 상태를 다시 묻는다.
+        self.check_live(now);
+
+        // 7. 끝내기: 꽃핀들이 손을 흔들고 사라진 뒤에 끝낸다. 한 번 더 고르면 바로 끝낸다.
         if quit_asked && self.ask_quit(now) {
             return Ok(Flow::Quit);
         }
 
-        // 7. 때가 된 꽃핀의 시간을 흘리고 화면에 넘긴다. 한 명도 남지 않으면 끝낸다.
+        // 8. 때가 된 꽃핀의 시간을 흘리고 화면에 넘긴다. 한 명도 남지 않으면 끝낸다.
         if !self.tick_characters(now)? {
             return Ok(Flow::Quit);
         }
 
-        // 8. 기본 꽃핀이 내려앉은 자리를 기억해 둔다. 다시 켜면 그 위에 나타난다.
+        // 9. 기본 꽃핀이 내려앉은 자리를 기억해 둔다. 다시 켜면 그 위에 나타난다.
         let first = self.characters[0].actor();
         if first.mode() == Mode::Ground {
             let spot = Some((first.home().round() as i32, first.position().1.round() as i32));
@@ -586,7 +842,7 @@ impl App {
             }
         }
 
-        // 9. 설정 창이 열려 있으면 "지금 쓰는 자원"을 1초마다 고친다.
+        // 10. 설정 창이 열려 있으면 "지금 쓰는 자원"을 1초마다 고친다.
         if let Some(window) = &self.window
             && now >= self.next_usage
         {
@@ -595,7 +851,7 @@ impl App {
             self.next_usage = now + USAGE_EVERY;
         }
 
-        // 10. 모아 둔 것을 저장한다.
+        // 11. 모아 둔 것을 저장한다.
         self.store.save(Some(now), &self.settings, &self.state);
         Ok(flow)
     }
@@ -734,6 +990,7 @@ impl App {
         sooner(self.window.is_some().then_some(self.next_usage));
         sooner(self.store.due());
         sooner(self.notices.closes_at());
+        sooner(self.live_due());
         sooner(self.dev.deadline);
         sooner(self.quitting);
         sooner(self.dev.script.front().map(|step| self.started + step.at));
@@ -755,6 +1012,7 @@ impl App {
         match item {
             Some(MenuItem::Quit) => return self.ask_quit(now),
             Some(MenuItem::Settings) => self.open_settings(),
+            Some(MenuItem::Watch) => self.watch(now),
             Some(MenuItem::Link(index)) => self.open(LINKS[index].url),
             Some(MenuItem::Show(show)) => {
                 let target = self.menu_character();
@@ -880,6 +1138,7 @@ impl App {
         self.window = SettingsWindow::open(&self.settings, self.state.settings_tab, center, icon, &version);
         self.next_usage = Instant::now();
         self.meter = Meter::start();
+        self.show_live();
     }
 
     fn close_settings(&mut self, now: Instant) {
@@ -975,6 +1234,19 @@ impl App {
                     self.bubble_clicked();
                 }
             }
+            dev::Command::Live(reply) => {
+                let reply = match reply {
+                    dev::LiveReply::Open { opened, title } => {
+                        Reply::Open(Live { title, category: "종합 게임".to_string(), viewers: 1234, opened })
+                    }
+                    dev::LiveReply::Close => Reply::Closed,
+                    dev::LiveReply::Fail => Reply::Failed,
+                    dev::LiveReply::Moved => Reply::Moved,
+                    dev::LiveReply::Refused => Reply::Refused,
+                };
+                self.live_reply(reply, now);
+            }
+            dev::Command::ToastClick => self.toast_clicked(now),
             dev::Command::Menu(id) => {
                 if self.picked(MenuItem::from_id(id), now) {
                     flow = Flow::Quit;

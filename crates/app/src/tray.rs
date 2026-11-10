@@ -20,15 +20,16 @@ use windows_sys::Win32::Graphics::Gdi::{
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::Threading::CreateMutexW;
 use windows_sys::Win32::UI::Shell::{
-    NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NOTIFYICONDATAW, NOTIFYICONIDENTIFIER,
-    Shell_NotifyIconGetRect, Shell_NotifyIconW,
+    NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_TIP, NIIF_LARGE_ICON, NIIF_RESPECT_QUIET_TIME, NIIF_USER, NIM_ADD, NIM_DELETE,
+    NIM_MODIFY, NIN_BALLOONUSERCLICK, NOTIFYICONDATAW, NOTIFYICONIDENTIFIER, Shell_NotifyIconGetRect,
+    Shell_NotifyIconW,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreateIconIndirect, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyIcon, DestroyMenu,
-    DestroyWindow, FindWindowW, GetSystemMetrics, HICON, ICONINFO, KillTimer, MF_GRAYED, MF_POPUP, MF_SEPARATOR,
-    MF_STRING, PostMessageW, RegisterClassExW, RegisterWindowMessageW, SM_CXSMICON, SetForegroundWindow, SetTimer,
-    TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenuEx, WM_APP, WM_CONTEXTMENU, WM_LBUTTONDBLCLK, WM_NULL,
-    WM_RBUTTONUP, WM_TIMER, WNDCLASSEXW, WS_POPUP,
+    DestroyWindow, FindWindowW, GetSystemMetrics, HICON, ICONINFO, KillTimer, MF_DISABLED, MF_GRAYED, MF_POPUP,
+    MF_SEPARATOR, MF_STRING, PostMessageW, RegisterClassExW, RegisterWindowMessageW, SM_CXICON, SM_CXSMICON,
+    SetForegroundWindow, SetTimer, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenuEx, WM_APP,
+    WM_CONTEXTMENU, WM_LBUTTONDBLCLK, WM_NULL, WM_RBUTTONUP, WM_TIMER, WNDCLASSEXW, WS_POPUP,
 };
 
 use crate::actor::Show;
@@ -52,6 +53,8 @@ const TICK_EVERY_MS: u32 = 15;
 pub enum MenuItem {
     Quit,
     Settings,
+    /// 방송 보러 가기. 방송 중일 때만 메뉴에 있다.
+    Watch,
     /// 바로 가기. [`LINKS`]의 몇 번째인지다.
     Link(usize),
     /// 꽃핀에게 시켜서 볼 행동.
@@ -64,6 +67,7 @@ impl MenuItem {
         match self {
             MenuItem::Quit => 1,
             MenuItem::Settings => 2,
+            MenuItem::Watch => 3,
             MenuItem::Link(index) => 100 + index as u32,
             MenuItem::Show(show) => 200 + Show::ALL.iter().position(|&other| other == show).unwrap_or(0) as u32,
         }
@@ -73,6 +77,7 @@ impl MenuItem {
         match id {
             1 => Some(MenuItem::Quit),
             2 => Some(MenuItem::Settings),
+            3 => Some(MenuItem::Watch),
             100.. if ((id - 100) as usize) < LINKS.len() => Some(MenuItem::Link((id - 100) as usize)),
             200.. if ((id - 200) as usize) < Show::ALL.len() => Some(MenuItem::Show(Show::ALL[(id - 200) as usize])),
             _ => None,
@@ -91,6 +96,8 @@ pub enum TrayEvent {
     TaskbarCreated,
     /// 앱을 한 번 더 켰다. 새로 켠 쪽은 이것만 알리고 끝난다.
     Hello,
+    /// Windows 알림을 클릭했다.
+    ToastClicked,
 }
 
 thread_local! {
@@ -116,9 +123,24 @@ pub fn while_modal<T>(owner: HWND, tick: fn(), show: impl FnOnce() -> T) -> T {
 /// `owner`는 메뉴의 주인이 될 창([`Tray::hwnd`])이다.
 ///
 /// `shows`는 "행동" 아래에 넣을 행동과, 지금 고를 수 있는지다. 고를 수 없는 것은 흐리게 보인다.
-pub fn pick(owner: HWND, x: i32, y: i32, shows: &[(Show, bool)]) -> Option<MenuItem> {
+/// `live`는 방송 중일 때의 방송 제목과 방송 정보 한 줄이다. 있으면 맨 위에 "● 방송 중"을 넣는다.
+pub fn pick(owner: HWND, x: i32, y: i32, shows: &[(Show, bool)], live: Option<&(String, String)>) -> Option<MenuItem> {
     unsafe {
         let menu = CreatePopupMenu();
+        if let Some((title, details)) = live {
+            let info = CreatePopupMenu();
+            if !menu.is_null() && !info.is_null() {
+                // 위 두 줄은 읽기만 하는 줄이다. 메뉴에서 &는 밑줄 표시라서, 글자 그대로 보이게 겹쳐 적는다.
+                for line in [title, details] {
+                    let text = wide(&line.replace('&', "&&"));
+                    AppendMenuW(info, MF_STRING | MF_DISABLED, 0, text.as_ptr());
+                }
+                AppendMenuW(info, MF_SEPARATOR, 0, null());
+                AppendMenuW(info, MF_STRING, MenuItem::Watch.id() as usize, wide("보러 가기").as_ptr());
+                AppendMenuW(menu, MF_POPUP, info as usize, wide("● 방송 중").as_ptr());
+                AppendMenuW(menu, MF_SEPARATOR, 0, null());
+            }
+        }
         let links = CreatePopupMenu();
         let actions = CreatePopupMenu();
         if menu.is_null() || links.is_null() || actions.is_null() {
@@ -208,9 +230,18 @@ pub fn icon_size() -> i32 {
     unsafe { GetSystemMetrics(SM_CXSMICON) }.max(16)
 }
 
+/// Windows 알림에 넣는 그림의 한 변 길이(px). 100% 배율에서 48이다.
+pub fn toast_icon_size() -> i32 {
+    unsafe { GetSystemMetrics(SM_CXICON) }.max(32) * 3 / 2
+}
+
 pub struct Tray {
     hwnd: HWND,
     icon: HICON,
+    /// Windows 알림에 넣는 큰 그림. 없으면 트레이 아이콘이 대신 쓰인다.
+    toast_icon: HICON,
+    /// 아이콘에 마우스를 올리면 보이는 글.
+    tip: String,
 }
 
 impl Tray {
@@ -257,7 +288,7 @@ impl Tray {
         }
         // 등록해 두어야 탐색기가 다시 시작됐을 때 알 수 있다.
         taskbar_created();
-        let tray = Tray { hwnd, icon: make_icon(pixels, size) };
+        let tray = Tray { hwnd, icon: make_icon(pixels, size), toast_icon: null_mut(), tip: TIP.to_string() };
         tray.add();
         tray
     }
@@ -270,10 +301,41 @@ impl Tray {
         data.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
         data.uCallbackMessage = WM_TRAY;
         data.hIcon = self.icon;
-        for (slot, unit) in data.szTip.iter_mut().zip(wide(TIP)) {
-            *slot = unit;
-        }
+        put(&mut data.szTip, &self.tip);
         data
+    }
+
+    /// 아이콘 그림과, 마우스를 올리면 보이는 글을 바꾼다. 글을 비우면 앱 이름이 보인다.
+    pub fn set(&mut self, pixels: &[u32], size: i32, tip: &str) {
+        let old = std::mem::replace(&mut self.icon, make_icon(pixels, size));
+        self.tip = if tip.is_empty() { TIP.to_string() } else { tip.to_string() };
+        unsafe {
+            Shell_NotifyIconW(NIM_MODIFY, &self.data());
+            DestroyIcon(old);
+        }
+    }
+
+    /// Windows 알림에 넣을 큰 그림을 정한다. 트레이 아이콘을 늘려 쓰면 흐려 보여서 따로 둔다.
+    pub fn set_toast_icon(&mut self, pixels: &[u32], size: i32) {
+        let old = std::mem::replace(&mut self.toast_icon, make_icon(pixels, size));
+        if !old.is_null() {
+            unsafe { DestroyIcon(old) };
+        }
+    }
+
+    /// Windows 알림을 띄운다. 트레이 아이콘에 딸린 알림이라 앱을 따로 등록하지 않아도 된다.
+    /// 클릭하면 [`TrayEvent::ToastClicked`]가 온다. Windows가 받아 주었으면 `true`를 돌려준다.
+    pub fn notify(&self, title: &str, body: &str) -> bool {
+        let mut data = self.data();
+        data.uFlags |= NIF_INFO;
+        data.dwInfoFlags = NIIF_USER | NIIF_RESPECT_QUIET_TIME;
+        if !self.toast_icon.is_null() {
+            data.dwInfoFlags |= NIIF_LARGE_ICON;
+            data.hBalloonIcon = self.toast_icon;
+        }
+        put(&mut data.szInfoTitle, title);
+        put(&mut data.szInfo, body);
+        unsafe { Shell_NotifyIconW(NIM_MODIFY, &data) != 0 }
     }
 
     /// 아이콘을 트레이에 등록한다. 탐색기가 다시 시작되면 사라지므로 그때 다시 부른다.
@@ -304,9 +366,50 @@ impl Drop for Tray {
         unsafe {
             Shell_NotifyIconW(NIM_DELETE, &self.data());
             DestroyIcon(self.icon);
+            if !self.toast_icon.is_null() {
+                DestroyIcon(self.toast_icon);
+            }
             DestroyWindow(self.hwnd);
         }
     }
+}
+
+/// 정해진 길이의 칸에 글을 넣는다. 끝에 0이 들어갈 자리를 남기고, 넘치는 글은 자른다.
+fn put(slot: &mut [u16], text: &str) {
+    let room = slot.len() - 1;
+    let mut units: Vec<u16> = text.encode_utf16().take(room).collect();
+    // 두 칸짜리 글자의 앞 칸만 남았으면 그것도 뺀다.
+    if units.last().is_some_and(|unit| (0xD800..0xDC00).contains(unit)) {
+        units.pop();
+    }
+    slot[..units.len()].copy_from_slice(&units);
+    slot[units.len()] = 0;
+}
+
+/// 아이콘 그림의 오른쪽 위에 빨간 점을 찍은 그림을 돌려준다. 방송 중이라는 표시다.
+///
+/// `pixels`는 한 변이 `size`인 그림(미리 곱한 알파의 BGRA)이다. 점에는 흰 테를 둘러 어떤 그림 위에서도 보이게 한다.
+pub fn with_dot(pixels: &[u32], size: i32) -> Vec<u32> {
+    let mut marked = pixels.to_vec();
+    let radius = size as f64 * 0.24;
+    let center = (size as f64 - radius - 0.5, radius + 0.5);
+    for y in 0..size {
+        for x in 0..size {
+            let distance = (x as f64 + 0.5 - center.0).hypot(y as f64 + 0.5 - center.1);
+            // 테의 바깥 가장자리와, 점과 테의 경계를 반 픽셀씩 부드럽게 한다.
+            let cover = (radius + 0.5 - distance).clamp(0.0, 1.0);
+            if cover <= 0.0 {
+                continue;
+            }
+            let red = (radius * 0.72 + 0.5 - distance).clamp(0.0, 1.0);
+            let color = (255.0, 255.0 - 207.0 * red, 255.0 - 191.0 * red);
+            let slot = &mut marked[(y * size + x) as usize];
+            let under = |shift: u32| ((*slot >> shift) & 0xFF) as f64 * (1.0 - cover);
+            let part = |value: f64, shift: u32| ((value * cover + under(shift)).round() as u32).min(255) << shift;
+            *slot = part(255.0, 24) | part(color.0, 16) | part(color.1, 8) | part(color.2, 0);
+        }
+    }
+    marked
 }
 
 /// 미리 곱한 알파의 BGRA 그림으로 아이콘을 만든다. 다 쓰면 `DestroyIcon`으로 없애야 한다.
@@ -347,6 +450,7 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                     push(TrayEvent::Menu { x, y });
                 }
                 WM_LBUTTONDBLCLK => push(TrayEvent::Open),
+                NIN_BALLOONUSERCLICK => push(TrayEvent::ToastClicked),
                 _ => {}
             }
             0
@@ -374,8 +478,39 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_live_dot_sits_in_the_top_right_corner() {
+        let size = 16;
+        let plain = vec![0xFF20_4060u32; (size * size) as usize];
+        let marked = with_dot(&plain, size);
+        let at = |x: i32, y: i32| marked[(y * size + x) as usize];
+        // 점의 가운데는 빨갛고, 그 둘레는 희다. 왼쪽 아래는 그대로다.
+        let (red, green) = ((at(12, 3) >> 16) & 0xFF, (at(12, 3) >> 8) & 0xFF);
+        assert!(red > 240 && green < 80, "{:08X}", at(12, 3));
+        let (red, green, blue) = ((at(8, 4) >> 16) & 0xFF, (at(8, 4) >> 8) & 0xFF, at(8, 4) & 0xFF);
+        assert!(red > 240 && green > 220 && blue > 220, "{:08X}", at(8, 4));
+        assert_eq!((at(2, 13), at(0, 0), at(15, 15)), (0xFF20_4060, 0xFF20_4060, 0xFF20_4060));
+        // 투명한 그림 위에서도 점은 불투명하다.
+        let clear = with_dot(&vec![0u32; (size * size) as usize], size);
+        assert_eq!(clear[(3 * size + 12) as usize] >> 24, 255);
+    }
+
+    #[test]
+    fn text_is_cut_to_fit_its_slot() {
+        let mut slot = [0xFFFFu16; 8];
+        put(&mut slot, "방송 중");
+        assert_eq!(String::from_utf16_lossy(&slot[..4]), "방송 중");
+        assert_eq!(slot[4], 0);
+        // 넘치면 자르고, 끝에는 늘 0이 온다.
+        put(&mut slot, "아주 긴 제목입니다");
+        assert_eq!((String::from_utf16_lossy(&slot[..7]), slot[7]), ("아주 긴 제목".to_string(), 0));
+        // 두 칸짜리 글자가 반만 남으면 통째로 뺀다.
+        put(&mut slot, "abcdef😀");
+        assert_eq!((String::from_utf16_lossy(&slot[..6]), slot[6]), ("abcdef".to_string(), 0));
+    }
+
+    #[test]
     fn menu_numbers_are_unique_and_read_back() {
-        let mut items = vec![MenuItem::Quit, MenuItem::Settings];
+        let mut items = vec![MenuItem::Quit, MenuItem::Settings, MenuItem::Watch];
         items.extend((0..LINKS.len()).map(MenuItem::Link));
         items.extend(Show::ALL.map(MenuItem::Show));
         for (n, item) in items.iter().enumerate() {
@@ -384,7 +519,7 @@ mod tests {
             assert_eq!(MenuItem::from_id(item.id()), Some(*item));
             assert!(items[..n].iter().all(|other| other.id() != item.id()), "{item:?}");
         }
-        for id in [0, 3, 99, 100 + LINKS.len() as u32, 199, 200 + Show::ALL.len() as u32] {
+        for id in [0, 4, 99, 100 + LINKS.len() as u32, 199, 200 + Show::ALL.len() as u32] {
             assert_eq!(MenuItem::from_id(id), None, "{id}");
         }
     }

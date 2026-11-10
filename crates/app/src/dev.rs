@@ -68,6 +68,10 @@ pub struct Options {
     pub no_open: bool,
     pub settings_dump: Option<PathBuf>,
     pub settings_shot: Option<PathBuf>,
+    /// 정한 시간만 도는 확인용 실행에서도 치지직에 진짜로 묻는다. 주지 않으면 확인용 실행은 인터넷을 쓰지 않는다.
+    pub live_check: bool,
+    /// 확인용 실행에서도 Windows 알림을 진짜로 띄운다. 주지 않으면 보고서에 적기만 한다.
+    pub toast: bool,
 }
 
 impl Options {
@@ -94,6 +98,8 @@ impl Options {
             no_open: args.iter().any(|a| a == "--no-open"),
             settings_dump: value("--settings-dump").map(PathBuf::from),
             settings_shot: value("--settings-shot").map(PathBuf::from),
+            live_check: args.iter().any(|a| a == "--live-check"),
+            toast: args.iter().any(|a| a == "--toast"),
         }
     }
 }
@@ -132,6 +138,21 @@ pub enum Command {
     Say(f64, String, String),
     /// `bubble click`: 떠 있는 말풍선을 클릭한 것으로 친다.
     BubbleClick,
+    /// `live open 2026-11-10 13:00:00 제목`, `live close`, `live fail`, `live moved`, `live refused`: 치지직에서
+    /// 그런 답을 받은 것으로 친다. 인터넷을 쓰지 않고 방송 안내를 확인하는 데 쓴다. 시작 시각이 같으면 같은 방송이다.
+    Live(LiveReply),
+    /// `toast click`: Windows 알림을 클릭한 것으로 친다.
+    ToastClick,
+}
+
+/// `--script`의 `live` 명령이 흉내 내는 답.
+#[derive(Clone, Debug, PartialEq)]
+pub enum LiveReply {
+    Open { opened: String, title: String },
+    Close,
+    Fail,
+    Moved,
+    Refused,
 }
 
 /// `--script`의 `settings` 명령. 사람이 창에서 하는 일을 흉내 낸다.
@@ -198,6 +219,17 @@ pub fn parse_script(text: &str) -> Result<Vec<Step>, String> {
                 Command::Say(number(2)?, title.trim().to_string(), body.trim().to_string())
             }
             (Some("bubble"), 3) if words[2] == "click" => Command::BubbleClick,
+            (Some("toast"), 3) if words[2] == "click" => Command::ToastClick,
+            (Some("live"), 6..) if words[2] == "open" => {
+                Command::Live(LiveReply::Open { opened: words[3..5].join(" "), title: words[5..].join(" ") })
+            }
+            (Some("live"), 3) => Command::Live(match words[2] {
+                "close" => LiveReply::Close,
+                "fail" => LiveReply::Fail,
+                "moved" => LiveReply::Moved,
+                "refused" => LiveReply::Refused,
+                _ => return Err(bad()),
+            }),
             (Some("settings"), _) => Command::Settings(match (words.get(2).copied(), words.len()) {
                 (Some("open"), 3) => Dialog::Open,
                 (Some("close"), 3) => Dialog::Close,
@@ -465,6 +497,12 @@ mod tests {
             ]
         );
         assert_eq!(parse_script("1 menu 3").unwrap()[0].command, Command::Menu(3));
+        let live =
+            parse_script("1 live open 2026-11-10 13:00:00 꽃핀 방송; 2 live close; 3 live fail; 4 live moved").unwrap();
+        let commands: Vec<Command> = live.iter().map(|step| step.command.clone()).collect();
+        let open = LiveReply::Open { opened: "2026-11-10 13:00:00".to_string(), title: "꽃핀 방송".to_string() };
+        assert_eq!(commands, [open, LiveReply::Close, LiveReply::Fail, LiveReply::Moved].map(Command::Live));
+        assert_eq!(parse_script("1 toast click").unwrap()[0].command, Command::ToastClick);
         let steps = parse_script(" 4 release; 1.5 grab ; 2 drag 300 -400;; 9 leave; 0 roam off; 3 dpi 144 ").unwrap();
         let commands: Vec<Command> = steps.iter().map(|step| step.command.clone()).collect();
         assert_eq!(
@@ -484,7 +522,8 @@ mod tests {
     #[test]
     fn bad_script_is_rejected() {
         let wrong = ["grab", "1 fly", "1 drag 300", "-1 grab", "1 roam maybe", "1 grab extra", "1 do dance", "1 rub"];
-        for text in wrong.into_iter().chain(["1 settings", "1 settings fly", "1 settings pick 1103"]) {
+        let live = ["1 live", "1 live open", "1 live open 2026-11-10 13:00:00", "1 live pause", "1 toast"];
+        for text in wrong.into_iter().chain(["1 settings", "1 settings fly", "1 settings pick 1103"]).chain(live) {
             assert!(parse_script(text).is_err(), "{text}");
         }
         assert_eq!(parse_script("").unwrap(), []);

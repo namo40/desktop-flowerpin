@@ -390,7 +390,7 @@ impl SettingsWindow {
         *settings != before
     }
 
-    /// 다른 항목에 딸린 항목을 흐리게 하거나 되살리고, 방송 탭의 상태 글을 맞춘다.
+    /// 다른 항목에 딸린 항목을 흐리게 하거나 되살린다.
     fn update_dependents(&self, settings: &Settings) {
         for control in &CONTROLS {
             if let Some(needs) = control.needs {
@@ -403,14 +403,13 @@ impl SettingsWindow {
                 }
             }
         }
-        self.set_text(
-            ID_LIVE_STATUS,
-            if settings.is_on(Key::LiveCheck) {
-                "방송 상태 확인은 아직 만드는 중입니다."
-            } else {
-                "방송 상태 확인이 꺼져 있습니다. 인터넷을 쓰지 않습니다."
-            },
-        );
+    }
+
+    /// 방송 탭의 상태 줄을 고친다. 길면 끝이 줄어 보인다.
+    pub fn set_live_status(&self, text: &str) {
+        if self.text(ID_LIVE_STATUS) != text {
+            self.set_text(ID_LIVE_STATUS, text);
+        }
     }
 
     /// 정보 탭의 "지금 쓰는 자원"을 고친다. 메모리는 MiB, CPU는 한 코어를 100으로 본 값이다.

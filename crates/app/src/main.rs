@@ -8,6 +8,7 @@ mod app;
 mod bubble;
 mod character;
 mod character_window;
+mod checker;
 mod clock;
 mod desktop;
 mod dev;
@@ -15,6 +16,7 @@ mod frames;
 mod geom;
 mod key;
 mod links;
+mod live;
 mod motions;
 mod notices;
 mod perch;
@@ -74,7 +76,8 @@ fn run(options: dev::Options) -> Result<Vec<String>, PackError> {
                 let shows = app.menu_shows();
                 // 행동을 고르는 동안에는 그 꽃핀이 멈춰서 기다린다.
                 app.hold_for_menu(&shows);
-                let item = app::run_modal(&mut app, || tray::pick(owner, x, y, &shows));
+                let live = app.live_menu();
+                let item = app::run_modal(&mut app, || tray::pick(owner, x, y, &shows, live.as_ref()));
                 let now = Instant::now();
                 app.release_held(now);
                 if app.picked(item, now) {

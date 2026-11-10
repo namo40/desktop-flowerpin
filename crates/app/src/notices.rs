@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use crate::bubble::Speech;
 
 /// 알릴 것의 종류. 먼저 띄울 것부터 차례로 적었다.
-// 알림, 방송 안내, 메모는 그 기능을 만들 때부터 쓴다.
+// 알림과 메모는 그 기능을 만들 때부터 쓴다.
 #[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Kind {
@@ -28,8 +28,7 @@ pub enum Kind {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Click {
     Close,
-    /// 주소를 기본 브라우저로 연다. 방송 안내를 만들 때부터 쓴다.
-    #[allow(dead_code)]
+    /// 주소를 기본 브라우저로 연다.
     Open(String),
 }
 
@@ -61,8 +60,6 @@ impl Notices {
     }
 
     /// 이름이 `tag`인 것을 모두 버린다. 떠 있던 것을 버렸으면 `true`를 돌려준다(말풍선을 닫아야 한다).
-    // 때늦은 안내를 버리는 일은 방송 안내를 만들 때부터 한다.
-    #[allow(dead_code)]
     pub fn cancel(&mut self, tag: &'static str) -> bool {
         self.waiting.retain(|notice| notice.tag != Some(tag));
         let shown = self.showing.as_ref().is_some_and(|(notice, _)| notice.tag == Some(tag));

@@ -3,7 +3,7 @@
 use std::ptr::{null, null_mut};
 
 use windows_sys::Win32::Foundation::{HWND, POINT};
-use windows_sys::Win32::System::SystemInformation::GetTickCount;
+use windows_sys::Win32::System::SystemInformation::{GetLocalTime, GetTickCount};
 use windows_sys::Win32::UI::HiDpi::{DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO};
 use windows_sys::Win32::UI::Shell::ShellExecuteW;
@@ -30,6 +30,13 @@ pub fn idle_seconds() -> f64 {
     }
     // 둘 다 Windows를 켠 뒤 흐른 밀리초다. 49일마다 0으로 돌아가므로 넘침을 감안해 뺀다.
     unsafe { GetTickCount() }.wrapping_sub(info.dwTime) as f64 / 1000.0
+}
+
+/// 지금 이 PC의 시각(시, 분).
+pub fn local_time() -> (u32, u32) {
+    let mut time = unsafe { std::mem::zeroed() };
+    unsafe { GetLocalTime(&mut time) };
+    (time.wHour as u32, time.wMinute as u32)
 }
 
 /// 마우스 커서의 자리(화면 좌표).
