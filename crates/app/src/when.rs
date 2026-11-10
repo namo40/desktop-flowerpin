@@ -32,6 +32,11 @@ fn days_in_month(year: i64, month: i64) -> i64 {
     days_from_civil(next_year, next_month, 1) - days_from_civil(year, month, 1)
 }
 
+/// 요일의 이름. `day`는 1970-01-01부터의 날수이고, 그날은 목요일이다.
+pub fn weekday(day: i64) -> &'static str {
+    ["일", "월", "화", "수", "목", "금", "토"][(day + 4).rem_euclid(7) as usize]
+}
+
 /// "오후 3:12"처럼 적은 시각.
 pub fn clock_label(hour: u32, minute: u32) -> String {
     let half = if hour < 12 { "오전" } else { "오후" };
@@ -67,6 +72,21 @@ impl When {
         let (year, month, day) = civil_from_days(self.minutes.div_euclid(1_440));
         let of_day = self.minutes.rem_euclid(1_440) as u32;
         (year as i32, month as u32, day as u32, of_day / 60, of_day % 60)
+    }
+
+    /// 날수(1970-01-01부터)와 그날의 시각으로 만든다.
+    pub fn on(day: i64, hour: u32, minute: u32) -> When {
+        When { minutes: day * 1_440 + (hour.min(23) * 60 + minute.min(59)) as i64 }
+    }
+
+    /// 1970-01-01부터의 날수.
+    pub fn day(self) -> i64 {
+        self.minutes.div_euclid(1_440)
+    }
+
+    /// 그날 0시부터 흐른 분.
+    pub fn minute_of_day(self) -> i64 {
+        self.minutes.rem_euclid(1_440)
     }
 
     pub fn plus_minutes(self, minutes: i64) -> When {
@@ -106,12 +126,6 @@ impl When {
     pub fn clock(self) -> String {
         let (_, _, _, hour, minute) = self.parts();
         clock_label(hour, minute)
-    }
-
-    /// "11월 12일 오후 7:00"처럼 적은 날짜와 시각.
-    pub fn label(self) -> String {
-        let (_, month, day, hour, minute) = self.parts();
-        format!("{month}월 {day}일 {}", clock_label(hour, minute))
     }
 }
 
@@ -157,11 +171,20 @@ mod tests {
         assert_eq!(when.text(), "2026-11-12 19:00");
         assert_eq!(When::parse("2026-11-12 19:00"), Some(when));
         assert_eq!(when.parts(), (2026, 11, 12, 19, 0));
-        assert_eq!((when.clock(), when.label()), ("오후 7:00".to_string(), "11월 12일 오후 7:00".to_string()));
+        assert_eq!(when.clock(), "오후 7:00");
         assert_eq!(at("2026-01-05 00:07").clock(), "오전 12:07");
         assert_eq!(at("2026-01-05 12:00").clock(), "오후 12:00");
         // 초로 만들면 초는 버린다.
         assert_eq!(When::from_seconds(20_767 * 86_400 + 19 * 3_600 + 59).text(), "2026-11-10 19:00");
+    }
+
+    #[test]
+    fn a_moment_splits_into_its_day_and_time_of_day() {
+        let moment = at("2026-11-12 19:05");
+        assert_eq!((moment.day(), moment.minute_of_day()), (days_from_civil(2026, 11, 12), 19 * 60 + 5));
+        assert_eq!(When::on(moment.day(), 19, 5), moment);
+        // 2026-11-12는 목요일이다.
+        assert_eq!((weekday(moment.day()), weekday(0), weekday(-1)), ("목", "목", "수"));
     }
 
     #[test]

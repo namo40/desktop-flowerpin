@@ -155,28 +155,47 @@ pub enum Command {
     ToastClick,
     /// `bubble dismiss`: 떠 있는 말풍선을 오른쪽 클릭한 것으로 친다.
     BubbleDismiss,
-    /// `memo ...`: 메모 창을 다룬다.
+    /// `memo ...`: 포스트잇으로 붙은 메모를 다룬다.
     Memo(MemoStep),
 }
 
-/// `--script`의 `memo` 명령. 사람이 메모 창에서 하는 일을 흉내 낸다.
+/// `--script`의 `memo` 명령. 사람이 포스트잇에서 하는 일을 흉내 낸다. 메모는 번호로 가리킨다.
 #[derive(Clone, Debug, PartialEq)]
 pub enum MemoStep {
-    /// `memo open`, `memo close`
-    Open,
-    Close,
-    /// `memo new`, `memo delete`: 버튼을 누른다. 지울지 묻는 창에는 "예"라고 답한 것으로 친다.
-    New,
-    Delete,
-    /// `memo select 줄`: 목록에서 그 줄을 고른다(0부터).
-    Select(usize),
-    /// `memo text 글`: 글을 적는다. `\n`은 줄바꿈이다.
-    Text(String),
-    /// `memo remind none`, `memo remind once 2026-11-12 19:00`, `memo remind daily 23:00`: 알림을 고른다.
-    Remind(Remind),
-    /// `memo hold`: "꽃핀이 들고 있기"를 누른다.
-    Hold,
-    /// `memo snap`: 지금 모습을 `--settings-dump`와 `--settings-shot`에 쓴다.
+    /// `memo new [글]`: 새 메모를 붙인다. `\n`은 줄바꿈이다.
+    New(String),
+    /// `memo text 번호 글`: 글을 적는다.
+    Text(u64, String),
+    /// `memo remind 번호 none`, `memo remind 번호 once 2026-11-12 19:00`, `memo remind 번호 daily 23:00`
+    Remind(u64, Remind),
+    /// `memo hold 번호`: "꽃핀에게 맡기기"를 누른다.
+    Hold(u64),
+    /// `memo tool 번호 단추`: 단추를 누른다(0 색, 1 알림, 2 항상 위, 3 지우기).
+    /// 지울지 묻는 창에는 "예"라고 답한 것으로 친다.
+    Tool(u64, usize),
+    /// `memo hover 번호 [단추]`, `memo leave 번호`: 마우스를 올린 것과 벗어난 것.
+    Hover(u64, Option<usize>),
+    Leave(u64),
+    /// `memo edit 번호`, `memo done`: 글을 적기 시작하고 마친다.
+    Edit(u64),
+    Done,
+    /// `memo move 번호 x y`: 화면의 그 자리로 옮긴다.
+    Move(u64, i32, i32),
+    /// `memo size 번호 너비 높이`
+    Size(u64, u32, u32),
+    /// `memo panel 번호 color|alarm|close`: 판을 띄우거나 닫는다.
+    Panel(u64, String),
+    /// `memo press 무엇 값`: 떠 있는 판에서 누른다(swatch, mode, quick, half, hour, minute, day, week).
+    Press(String, i32),
+    /// `memo custom 색상 진하기 밝기`: 떠 있는 판에서 색을 직접 고른다(0~1).
+    Custom(f32, f32, f32),
+    /// `memo ok 번호`, `memo snooze 번호`: 울리는 알림에 답한다.
+    Answer(u64, bool),
+    /// `memo tidy`: 다시 줄 세운다.
+    Tidy,
+    /// `memo show`: 모두 앞으로 가져온다.
+    Show,
+    /// `memo snap`: 지금 모습을 `--settings-shot`에 그림으로 쓰고, 보고서에 포스트잇마다 한 줄씩 적는다.
     Snap,
 }
 
@@ -273,25 +292,45 @@ pub fn parse_script(text: &str) -> Result<Vec<Step>, String> {
             }
             (Some("bubble"), 3) if words[2] == "click" => Command::BubbleClick,
             (Some("bubble"), 3) if words[2] == "dismiss" => Command::BubbleDismiss,
-            (Some("memo"), _) => Command::Memo(match (words.get(2).copied(), words.len()) {
-                (Some("open"), 3) => MemoStep::Open,
-                (Some("close"), 3) => MemoStep::Close,
-                (Some("new"), 3) => MemoStep::New,
-                (Some("delete"), 3) => MemoStep::Delete,
-                (Some("hold"), 3) => MemoStep::Hold,
-                (Some("snap"), 3) => MemoStep::Snap,
-                (Some("select"), 4) => MemoStep::Select(number(3)? as usize),
-                (Some("text"), 4..) => MemoStep::Text(words[3..].join(" ").replace("\\n", "\n")),
-                (Some("remind"), 4) if words[3] == "none" => MemoStep::Remind(Remind::None),
-                (Some("remind"), 6) if words[3] == "once" => {
-                    MemoStep::Remind(Remind::Once(When::parse(&words[4..6].join(" ")).ok_or_else(bad)?))
-                }
-                (Some("remind"), 5) if words[3] == "daily" => {
-                    let (hour, minute) = crate::when::parse_clock(words[4]).ok_or_else(bad)?;
-                    MemoStep::Remind(Remind::Daily { hour, minute })
-                }
-                _ => return Err(bad()),
-            }),
+            (Some("memo"), _) => {
+                let id = |i: usize| number(i).ok().filter(|id| *id >= 1.0 && id.fract() == 0.0).map(|id| id as u64);
+                let id = |i: usize| id(i).ok_or_else(bad);
+                let text = |from: usize| words[from..].join(" ").replace("\\n", "\n");
+                Command::Memo(match (words.get(2).copied(), words.len()) {
+                    (Some("new"), 3..) => MemoStep::New(text(3)),
+                    (Some("text"), 5..) => MemoStep::Text(id(3)?, text(4)),
+                    (Some("remind"), 5) if words[4] == "none" => MemoStep::Remind(id(3)?, Remind::None),
+                    (Some("remind"), 7) if words[4] == "once" => {
+                        MemoStep::Remind(id(3)?, Remind::Once(When::parse(&words[5..7].join(" ")).ok_or_else(bad)?))
+                    }
+                    (Some("remind"), 6) if words[4] == "daily" => {
+                        let (hour, minute) = crate::when::parse_clock(words[5]).ok_or_else(bad)?;
+                        MemoStep::Remind(id(3)?, Remind::Daily { hour, minute })
+                    }
+                    (Some("hold"), 4) => MemoStep::Hold(id(3)?),
+                    (Some("tool"), 5) if matches!(words[4], "0" | "1" | "2" | "3") => {
+                        MemoStep::Tool(id(3)?, number(4)? as usize)
+                    }
+                    (Some("hover"), 4) => MemoStep::Hover(id(3)?, None),
+                    (Some("hover"), 5) => MemoStep::Hover(id(3)?, Some(number(4)? as usize)),
+                    (Some("leave"), 4) => MemoStep::Leave(id(3)?),
+                    (Some("edit"), 4) => MemoStep::Edit(id(3)?),
+                    (Some("done"), 3) => MemoStep::Done,
+                    (Some("move"), 6) => MemoStep::Move(id(3)?, number(4)? as i32, number(5)? as i32),
+                    (Some("size"), 6) => MemoStep::Size(id(3)?, number(4)? as u32, number(5)? as u32),
+                    (Some("panel"), 5) if matches!(words[4], "color" | "alarm" | "close") => {
+                        MemoStep::Panel(id(3)?, words[4].to_string())
+                    }
+                    (Some("press"), 5) => MemoStep::Press(words[3].to_string(), number(4)? as i32),
+                    (Some("custom"), 6) => MemoStep::Custom(number(3)? as f32, number(4)? as f32, number(5)? as f32),
+                    (Some("ok"), 4) => MemoStep::Answer(id(3)?, false),
+                    (Some("snooze"), 4) => MemoStep::Answer(id(3)?, true),
+                    (Some("tidy"), 3) => MemoStep::Tidy,
+                    (Some("show"), 3) => MemoStep::Show,
+                    (Some("snap"), 3) => MemoStep::Snap,
+                    _ => return Err(bad()),
+                })
+            }
             (Some("toast"), 3) if words[2] == "click" => Command::ToastClick,
             (Some("live"), 6..) if words[2] == "open" => {
                 Command::Live(LiveReply::Open { opened: words[3..5].join(" "), title: words[5..].join(" ") })
@@ -577,23 +616,40 @@ mod tests {
         assert_eq!(commands, [open, LiveReply::Close, LiveReply::Fail, LiveReply::Moved].map(Command::Live));
         assert_eq!(parse_script("1 toast click").unwrap()[0].command, Command::ToastClick);
         let memo = parse_script(
-            "1 memo open; 2 memo new; 3 memo text 약 먹기\\n물도 마시기; 4 memo remind once 2026-11-12 19:00; \
-             5 memo remind daily 23:05; 6 memo remind none; 7 memo hold; 8 memo select 1; 9 memo delete; 10 memo snap",
+            "1 memo new; 2 memo new 약 먹기\\n물도 마시기; 3 memo text 2 우유 사기; \
+             4 memo remind 2 once 2026-11-12 19:00; 5 memo remind 2 daily 23:05; 6 memo remind 2 none; \
+             7 memo hold 1; 8 memo tool 1 3; 9 memo hover 2; 10 memo hover 2 1; 11 memo leave 2; 12 memo edit 2; \
+             13 memo done; 14 memo move 2 300 -40; 15 memo size 2 300 240; 16 memo panel 2 alarm; \
+             17 memo press hour -1; 18 memo custom 0.5 0.25 1; 19 memo ok 2; 20 memo snooze 2; 21 memo tidy; \
+             22 memo show; 23 memo snap",
         )
         .unwrap();
         let commands: Vec<Command> = memo.iter().map(|step| step.command.clone()).collect();
         assert_eq!(
             commands,
             [
-                MemoStep::Open,
-                MemoStep::New,
-                MemoStep::Text("약 먹기\n물도 마시기".to_string()),
-                MemoStep::Remind(Remind::Once(When::new(2026, 11, 12, 19, 0).unwrap())),
-                MemoStep::Remind(Remind::Daily { hour: 23, minute: 5 }),
-                MemoStep::Remind(Remind::None),
-                MemoStep::Hold,
-                MemoStep::Select(1),
-                MemoStep::Delete,
+                MemoStep::New(String::new()),
+                MemoStep::New("약 먹기\n물도 마시기".to_string()),
+                MemoStep::Text(2, "우유 사기".to_string()),
+                MemoStep::Remind(2, Remind::Once(When::new(2026, 11, 12, 19, 0).unwrap())),
+                MemoStep::Remind(2, Remind::Daily { hour: 23, minute: 5 }),
+                MemoStep::Remind(2, Remind::None),
+                MemoStep::Hold(1),
+                MemoStep::Tool(1, 3),
+                MemoStep::Hover(2, None),
+                MemoStep::Hover(2, Some(1)),
+                MemoStep::Leave(2),
+                MemoStep::Edit(2),
+                MemoStep::Done,
+                MemoStep::Move(2, 300, -40),
+                MemoStep::Size(2, 300, 240),
+                MemoStep::Panel(2, "alarm".to_string()),
+                MemoStep::Press("hour".to_string(), -1),
+                MemoStep::Custom(0.5, 0.25, 1.0),
+                MemoStep::Answer(2, false),
+                MemoStep::Answer(2, true),
+                MemoStep::Tidy,
+                MemoStep::Show,
                 MemoStep::Snap
             ]
             .map(Command::Memo)
@@ -629,9 +685,12 @@ mod tests {
         let memo = [
             "1 memo",
             "1 memo fly",
-            "1 memo remind",
-            "1 memo remind once 2026-02-30 10:00",
-            "1 memo remind daily 25:00",
+            "1 memo remind 1",
+            "1 memo remind 1 once 2026-02-30 10:00",
+            "1 memo remind 1 daily 25:00",
+            "1 memo text 0 글",
+            "1 memo tool 1 4",
+            "1 memo panel 1 open",
         ];
         let live = live.into_iter().chain(memo);
         for text in wrong.into_iter().chain(["1 settings", "1 settings fly", "1 settings pick 1103"]).chain(live) {

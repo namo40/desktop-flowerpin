@@ -18,11 +18,11 @@ mod geom;
 mod key;
 mod links;
 mod live;
-mod memo_window;
 mod memos;
 mod motions;
 mod notices;
 mod perch;
+mod postit;
 mod scale;
 mod settings;
 mod settings_window;
@@ -88,10 +88,17 @@ fn run(options: dev::Options) -> Result<Vec<String>, PackError> {
                     break;
                 }
             }
+            Flow::MemoMenu(id, x, y) => {
+                // 포스트잇을 오른쪽 클릭했을 때의 메뉴.
+                let owner = app.menu_owner();
+                let items = app.memo_menu(id);
+                let picked = app::run_modal(&mut app, || postit::menu(owner, (x, y), &items));
+                app.memo_picked(id, picked, (x, y), Instant::now());
+            }
             Flow::ConfirmDelete(id) => {
                 // 글이 적힌 메모는 지우기 전에 한 번 묻는다.
                 let mut yes = app.answers_for_me();
-                if let (false, Some(owner)) = (yes, app.memo_hwnd()) {
+                if let (false, Some(owner)) = (yes, app.memo_hwnd(id)) {
                     yes = app::run_modal(&mut app, || win::confirm(owner, "메모 지우기", "이 메모를 지울까요?"));
                 }
                 app.delete_confirmed(id, yes, Instant::now());

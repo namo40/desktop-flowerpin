@@ -28,7 +28,7 @@ pub enum Click {
     Close,
     /// 주소를 기본 브라우저로 연다.
     Open(String),
-    /// 메모 창을 연다.
+    /// 포스트잇을 모두 다른 창들 앞으로 가져온다.
     Memos,
 }
 
@@ -42,9 +42,6 @@ pub struct Notice {
     pub click: Click,
     /// 나중에 버릴 때 가리키는 이름. 같은 이름을 가진 것이 함께 버려진다. 버릴 일이 없으면 비워 둔다.
     pub tag: Option<&'static str>,
-    /// 알림이 가리키는 메모의 번호. 말풍선을 오른쪽 클릭하면 이 메모를 조금 뒤에 다시 알린다.
-    /// 알림이 아니면 비워 둔다.
-    pub memo: Option<u64>,
 }
 
 /// 알릴 것들의 줄과, 지금 떠 있는 것.
@@ -120,7 +117,7 @@ mod tests {
 
     fn notice(kind: Kind, title: &str) -> Notice {
         let speech = Speech { title: title.to_string(), body: String::new() };
-        Notice { kind, speech, lasts: None, click: Click::Close, tag: None, memo: None }
+        Notice { kind, speech, lasts: None, click: Click::Close, tag: None }
     }
 
     fn title(notice: Option<&Notice>) -> Option<&str> {

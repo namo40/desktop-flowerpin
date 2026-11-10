@@ -1,4 +1,4 @@
-//! 앱 전체. 꽃핀들, 트레이 아이콘, 설정 창, 저장을 한데 묶어 메인 루프를 돌린다.
+//! 앱 전체. 꽃핀들, 포스트잇, 트레이 아이콘, 설정 창, 저장을 한데 묶어 메인 루프를 돌린다.
 //!
 //! 메인 루프는 한 바퀴에 이렇게 한다.
 //! 1. 쌓인 창 메시지를 처리한다([`App::pump`]).
@@ -28,10 +28,10 @@ use crate::dev;
 use crate::frames::Frames;
 use crate::links::LINKS;
 use crate::live::{self, Event, Live, Reply, Tracker, View};
-use crate::memo_window::{self, MemoEvent, MemoWindow};
-use crate::memos::{Memo, Memos, SNOOZE_MINUTES};
+use crate::memos::{COUNT_LIMIT, Memo, Memos, SNOOZE_MINUTES};
 use crate::motions::{MotionId, Motions};
 use crate::notices::{Click, Kind, Notice, Notices};
+use crate::postit::{Outcome, Postits};
 use crate::settings::{Key, Settings};
 use crate::settings_window::{self, DialogEvent, SettingsWindow, TAB_NAMES};
 use crate::stage::Stage;
@@ -106,6 +106,8 @@ pub enum Flow {
     ConfirmReset(usize),
     /// 글이 적힌 이 메모를 지울지 묻는다.
     ConfirmDelete(u64),
+    /// 이 메모의 포스트잇을 오른쪽 클릭했다. 화면의 이 자리에 메뉴를 띄운다.
+    MemoMenu(u64, i32, i32),
 }
 
 /// 방송 상태 확인에 딸린 것들.
@@ -173,7 +175,8 @@ pub struct App {
     greeting: bool,
     window: Option<SettingsWindow>,
     memos: Memos,
-    memo_window: Option<MemoWindow>,
+    /// 메모를 화면에 붙인 포스트잇들.
+    postits: Postits,
     /// 알릴 메모가 있는지 다음에 볼 시각.
     next_memo_check: Instant,
     /// 꽃핀이 들고 있는 메모 가운데 다음에 보여 줄 차례.
@@ -236,7 +239,8 @@ impl App {
         let folder =
             options.data_dir.clone().or_else(|| options.run_for.is_none().then(store::default_folder).flatten());
         let (store, settings, state, mut memos, mut notes) = Store::open(folder);
-        memos.settle(When::from_seconds(options.clock.unwrap_or_else(win::local_seconds)));
+        let wall = When::from_seconds(options.clock.unwrap_or_else(win::local_seconds));
+        memos.settle(wall);
         if let Some(folder) = store.folder() {
             notes.push(format!("설정 폴더 {}", folder.display()));
         }
@@ -273,6 +277,11 @@ impl App {
             toast_opens: false,
         };
 
+        let seed = options
+            .seed
+            .unwrap_or_else(|| SystemTime::now().duration_since(UNIX_EPOCH).map_or(1, |d| d.as_nanos() as u64));
+        // 포스트잇의 크기는 주 모니터의 화면 배율을 따른다.
+        let postit_dpi = options.dpi.unwrap_or(stage.primary().dpi);
         let mut app = App {
             frames,
             motions,
@@ -295,15 +304,14 @@ impl App {
             greeting: false,
             window: None,
             memos,
-            memo_window: None,
+            // 확인용으로 돌릴 때는 글을 적는 칸을 띄워도 쓰던 창에서 키보드 입력을 가져오지 않는다.
+            postits: Postits::new(postit_dpi, options.run_for.is_some(), seed, wall),
             next_memo_check: started,
             held_turn: 0,
             meter: Meter::start(),
             next_usage: started,
             started,
-            seed: options
-                .seed
-                .unwrap_or_else(|| SystemTime::now().duration_since(UNIX_EPOCH).map_or(1, |d| d.as_nanos() as u64)),
+            seed,
             timer: WakeTimer::new(),
             _watch: Watch::start(),
             menu_target: None,
@@ -346,6 +354,11 @@ impl App {
         app.apply_habits();
         app.describe();
         app.greet();
+        // 적어 둔 메모를 포스트잇으로 붙인다. 붙인 적이 없는 메모에 자리를 잡아 줬으면 저장한다.
+        app.postits.attach(&mut app.memos);
+        if !app.postits.commit(&mut app.memos).is_empty() {
+            app.store.memos_changed(started);
+        }
         if app.store.memos_lost() {
             // 사용자가 직접 쓴 것이라, 읽지 못했으면 조용히 넘어가지 않고 알린다.
             app.notices.push(Notice {
@@ -357,7 +370,6 @@ impl App {
                 lasts: None,
                 click: Click::Close,
                 tag: None,
-                memo: None,
             });
         }
         Ok(app)
@@ -473,7 +485,6 @@ impl App {
             lasts,
             click: Click::Close,
             tag: Some(tag),
-            memo: None,
         };
         let hello = "나를 오른쪽 클릭하면 메뉴가 나와요.".to_string();
         self.notices.push(note("안녕!", hello, Some(GREET_LASTS), GREET_TAG));
@@ -572,7 +583,6 @@ impl App {
             lasts: None,
             click: Click::Open(LINKS[0].url.to_string()),
             tag: Some(LIVE_TAG),
-            memo: None,
         });
         if !fresh {
             return;
@@ -600,7 +610,6 @@ impl App {
             lasts: Some(LIVE_END_LASTS),
             click: Click::Close,
             tag: Some(LIVE_TAG),
-            memo: None,
         });
         if how == "bubble_toast" {
             self.toast("꽃핀 방송 끝", "오늘 방송이 끝났어요.", false, now);
@@ -695,11 +704,12 @@ impl App {
             if message.message == WM_QUIT {
                 return false;
             }
-            // 설정 창이나 메모 창이 열려 있으면 키보드 이동(Tab, Alt+글자, Ctrl+Tab)을 먼저 처리하게 한다.
+            // 설정 창이 열려 있으면 키보드 이동(Tab, Alt+글자, Ctrl+Tab)을 먼저 처리하게 한다.
             if self.window.as_mut().is_some_and(|window| window.handles(&message)) {
                 continue;
             }
-            if self.memo_window.as_ref().is_some_and(|window| window.handles(&message)) {
+            // 포스트잇에 글을 적는 중이면 Ctrl+A를 먼저 처리하게 한다.
+            if self.postits.handles(&message) {
                 continue;
             }
             unsafe {
@@ -842,15 +852,12 @@ impl App {
                 flow = Flow::ConfirmReset(tab);
             }
         }
-        for event in memo_window::take_events() {
-            if let Some(id) = self.memo_event(event, now) {
-                flow = Flow::ConfirmDelete(id);
-            }
-        }
 
         // 3. 모니터가 바뀌었으면 무대를 다시 읽는다. 화면 밖에 남은 꽃핀은 주 모니터에 다시 나타난다.
         if stage_changed {
             self.stage = Stage::read();
+            // 화면 밖에 남은 포스트잇도 가까운 화면 안으로 데려온다.
+            self.postits.rescue();
             for i in 0..self.characters.len() {
                 let (x, y) = self.characters[i].actor().position();
                 if !self.stage.contains(x.round() as i32, y.round() as i32 - 1) {
@@ -903,8 +910,14 @@ impl App {
         // 6. 치지직에서 온 답을 받고, 때가 됐으면 방송 상태를 다시 묻는다.
         self.check_live(now);
 
-        // 7. 알릴 때가 된 메모를 알린다.
+        // 7. 알릴 때가 된 메모를 알린다. 그리고 포스트잇에서 온 일을 처리하고 움직이는 포스트잇을 그린다.
         self.check_memos(now);
+        let wall = self.wall(now);
+        for outcome in self.postits.frame(&mut self.memos, wall, now) {
+            if let Some(next) = self.memo_outcome(outcome, now) {
+                flow = next;
+            }
+        }
 
         // 8. 끝내기: 꽃핀들이 손을 흔들고 사라진 뒤에 끝낸다. 한 번 더 고르면 바로 끝낸다.
         if quit_asked && self.ask_quit(now) {
@@ -1034,22 +1047,15 @@ impl App {
         self.close_bubble(now);
         match self.notices.dismiss().map(|notice| notice.click) {
             Some(Click::Open(target)) => self.open(&target),
-            Some(Click::Memos) => self.open_memos(now),
+            Some(Click::Memos) => self.postits.show_all(),
             Some(Click::Close) | None => {}
         }
     }
 
     /// 떠 있는 말풍선을 오른쪽 클릭했다. 딸린 일(방송 열기 같은 것)은 하지 않고 닫는다.
-    /// 알림이면 조금 뒤에 다시 알리게 한다.
     fn bubble_dismissed(&mut self, now: Instant) {
         self.close_bubble(now);
-        if let Some(Notice { memo: Some(id), .. }) = self.notices.dismiss()
-            && self.memos.snooze(id, self.wall(now))
-        {
-            self.store.memos_changed(now);
-            self.note(now, format!("알림을 {SNOOZE_MINUTES}분 뒤로 미룸: 메모 {id}"));
-            self.refresh_memo(id);
-        }
+        self.notices.dismiss();
     }
 
     /// 꽃핀을 짧게 클릭했다.
@@ -1079,7 +1085,6 @@ impl App {
             lasts: Some(HELD_LASTS),
             click: Click::Close,
             tag: Some(HELD_TAG),
-            memo: None,
         };
         self.held_turn = turn + 1;
         // 잇달아 클릭해도 줄에 쌓이지 않게, 앞서 세워 둔 것은 버린다.
@@ -1108,9 +1113,8 @@ impl App {
             return;
         }
         self.store.memos_changed(now);
-        for memo in due.on_time.iter().chain(&due.missed) {
-            self.refresh_memo(memo.id);
-        }
+        // 포스트잇에 적힌 알림 시각을 맞춘다. 한 번 알리는 것은 사라지고, 날마다 알리는 것은 그대로다.
+        self.postits.refresh(&self.memos);
         for memo in &due.on_time {
             self.remind(memo, now);
         }
@@ -1119,29 +1123,20 @@ impl App {
         }
     }
 
-    /// 메모 하나를 알린다. 첫 꽃핀이 뛰고, 말풍선과 Windows 알림으로 보여 준다.
-    /// 말풍선은 클릭하면 닫히고, 오른쪽 클릭하면 조금 뒤에 다시 알린다.
+    /// 메모 하나를 알린다. 그 메모의 포스트잇이 커지고 빛나며 앞으로 나오고, 첫 꽃핀이 뛴다.
+    /// Windows 알림으로도 보여 준다. 포스트잇 아래의 단추로 확인하거나 조금 뒤로 미룬다.
     fn remind(&mut self, memo: &Memo, now: Instant) {
         self.note(now, format!("알림: {}", memo.title()));
         if let Some(first) = self.characters.first_mut() {
             first.show(Show::Jump, &self.motions, &self.stage, now);
         }
-        self.notices.push(Notice {
-            kind: Kind::Reminder,
-            speech: Speech {
-                title: format!("알림 · {}", self.wall(now).clock()), body: memo.text.trim().to_string()
-            },
-            lasts: None,
-            click: Click::Close,
-            tag: None,
-            memo: Some(memo.id),
-        });
+        self.postits.ring(&mut self.memos, memo.id);
         if self.settings.is_on(Key::ReminderToast) {
             self.toast("꽃핀 알림", &memo.title(), false, now);
         }
     }
 
-    /// 앱이나 PC가 꺼져 있던 동안 지나간 알림을 한 번에 알린다. 클릭하면 메모 창이 열린다.
+    /// 앱이나 PC가 꺼져 있던 동안 지나간 알림을 한 번에 알린다. 클릭하면 포스트잇이 모두 앞으로 나온다.
     fn tell_missed(&mut self, missed: &[Memo], now: Instant) {
         let titles = missed.iter().map(Memo::title).collect::<Vec<_>>().join(", ");
         self.note(now, format!("놓친 알림 {}개: {titles}", missed.len()));
@@ -1153,88 +1148,83 @@ impl App {
             lasts: None,
             click: Click::Memos,
             tag: None,
-            memo: None,
         });
     }
 
-    /// 메모 창이 열려 있으면, 바뀐 메모의 줄과 알림 칸을 맞춘다.
-    fn refresh_memo(&mut self, id: u64) {
-        if let (Some(window), Some(memo)) = (&mut self.memo_window, self.memos.get(id)) {
-            window.refresh(memo);
-        }
-    }
-
-    /// 메모 창. 물음 창을 그 위에 띄우는 데 쓴다.
-    pub fn memo_hwnd(&self) -> Option<HWND> {
-        self.memo_window.as_ref().map(MemoWindow::hwnd)
-    }
-
-    /// 메모 창을 연다. 이미 열려 있으면 앞으로 가져온다.
-    fn open_memos(&mut self, now: Instant) {
-        if let Some(window) = &self.memo_window {
-            window.bring_to_front();
-            return;
-        }
-        // 마우스 커서가 있는 모니터의 가운데에 연다.
-        let cursor = win::cursor_position();
-        let work = self.stage.nearest(cursor.0, cursor.1).work;
-        let center = (work.x + work.w / 2, work.y + work.h / 2);
-        self.memo_window = MemoWindow::open(&self.memos, self.wall(now), center);
-    }
-
-    /// 메모 창에서 일어난 일을 처리한다. 지울지 물어야 하면 그 메모의 번호를 돌려준다.
-    fn memo_event(&mut self, event: MemoEvent, now: Instant) -> Option<u64> {
-        let wall = self.wall(now);
-        match event {
-            MemoEvent::Select => {
-                let window = self.memo_window.as_ref()?;
-                window.show(window.selected().and_then(|id| self.memos.get(id)), wall);
-            }
-            MemoEvent::Edited => {
-                // 적거나 고르면 바로 메모에 반영한다. 확인이나 저장 버튼이 없다.
-                let window = self.memo_window.as_mut()?;
-                let memo = self.memos.get_mut(window.selected()?)?;
-                let (draft, before) = (window.read(), memo.clone());
-                memo.text = draft.text;
-                memo.held = draft.held;
-                // 알림을 건드리지 않았으면 다음에 알릴 시각을 그대로 둔다. 미뤄 둔 알림이 지워지지 않게 하려는 것이다.
-                if memo.remind != draft.remind {
-                    memo.set_remind(draft.remind, wall);
-                }
-                if *memo != before {
-                    window.refresh(memo);
+    /// 포스트잇이 알려 온 일을 한다. 메뉴나 물음 창을 띄워야 하면 그것을 돌려준다.
+    fn memo_outcome(&mut self, outcome: Outcome, now: Instant) -> Option<Flow> {
+        match outcome {
+            Outcome::Changed => self.store.memos_changed(now),
+            Outcome::Menu { id, x, y } => return Some(Flow::MemoMenu(id, x, y)),
+            Outcome::AskDelete(id) => return Some(Flow::ConfirmDelete(id)),
+            Outcome::Answered { id, snooze: true } => {
+                if self.memos.snooze(id, self.wall(now)) {
                     self.store.memos_changed(now);
+                    self.note(now, format!("알림을 {SNOOZE_MINUTES}분 뒤로 미룸: 메모 {id}"));
+                    self.postits.refresh(&self.memos);
                 }
             }
-            MemoEvent::New => {
-                let id = self.memos.add(wall)?;
-                self.store.memos_changed(now);
-                let window = self.memo_window.as_mut()?;
-                window.fill(&self.memos, Some(id), wall);
-                window.focus_text();
-            }
-            MemoEvent::Delete => {
-                let id = self.memo_window.as_ref()?.selected()?;
-                // 아무것도 적지 않은 메모는 묻지 않고 지운다.
-                if !self.memos.get(id)?.text.trim().is_empty() {
-                    return Some(id);
-                }
-                self.delete_confirmed(id, true, now);
-            }
-            MemoEvent::Close => self.memo_window = None,
+            Outcome::Answered { id, snooze: false } => self.note(now, format!("알림을 확인함: 메모 {id}")),
         }
         None
     }
 
-    /// 물음 창의 답을 받아, "예"였으면 그 메모를 지운다. 목록에서는 그 자리에 올라온 메모를 고른다.
+    /// 그 메모의 포스트잇 창. 물음 창을 그 위에 띄우는 데 쓴다.
+    pub fn memo_hwnd(&self, id: u64) -> Option<HWND> {
+        self.postits.hwnd(id)
+    }
+
+    /// 새 메모를 `near`(화면 좌표) 가까이에 포스트잇으로 붙인다. 붙으면 바로 글을 적을 수 있다.
+    fn new_memo(&mut self, near: (i32, i32)) {
+        if self.postits.create(&mut self.memos, near, true).is_none() {
+            // 더 둘 수 없다. 까닭을 말풍선으로 알린다.
+            self.notices.push(Notice {
+                kind: Kind::Note,
+                speech: Speech {
+                    title: "메모가 가득 찼어요".to_string(),
+                    body: format!("메모는 {COUNT_LIMIT}개까지 둘 수 있어요. 다 본 메모를 지워 주세요."),
+                },
+                lasts: Some(HELD_LASTS),
+                click: Click::Close,
+                tag: None,
+            });
+        }
+    }
+
+    /// 포스트잇을 오른쪽 클릭했을 때의 메뉴. 항목은 번호, 이름, 표시가 되어 있는지다.
+    pub fn memo_menu(&self, id: u64) -> Vec<(u32, &'static str, bool)> {
+        let held = self.memos.get(id).is_some_and(|memo| memo.held);
+        vec![
+            (1, "새 메모", false),
+            // 맡긴 메모는 꽃핀을 클릭하면 말풍선으로 보여 준다.
+            (2, "꽃핀에게 맡기기", held),
+            (0, "", false),
+            (3, "모두 앞으로 가져오기", false),
+            (4, "다시 줄 세우기", false),
+        ]
+    }
+
+    /// 포스트잇의 메뉴에서 고른 것을 한다. `at`은 메뉴를 띄운 자리다.
+    pub fn memo_picked(&mut self, id: u64, picked: u32, at: (i32, i32), now: Instant) {
+        match picked {
+            1 => self.new_memo(at),
+            2 => {
+                if let Some(memo) = self.memos.get_mut(id) {
+                    memo.held = !memo.held;
+                    self.store.memos_changed(now);
+                }
+            }
+            3 => self.postits.show_all(),
+            4 => self.postits.tidy(),
+            _ => {}
+        }
+    }
+
+    /// 물음 창의 답을 받아, "예"였으면 그 메모를 지운다. 포스트잇은 구겨져 꽃잎으로 흩어진다.
     pub fn delete_confirmed(&mut self, id: u64, yes: bool, now: Instant) {
-        let Some(row) = self.memos.list().iter().position(|memo| memo.id == id).filter(|_| yes) else { return };
-        self.memos.remove(id);
-        self.store.memos_changed(now);
-        let next = self.memos.list().get(row).or(self.memos.list().last()).map(|memo| memo.id);
-        let wall = self.wall(now);
-        if let Some(window) = &mut self.memo_window {
-            window.fill(&self.memos, next, wall);
+        if yes {
+            self.note(now, format!("메모를 지움: 메모 {id}"));
+            self.postits.remove(&mut self.memos, id);
         }
     }
 
@@ -1284,6 +1274,7 @@ impl App {
         sooner(self.notices.closes_at());
         sooner(self.live_due());
         sooner((self.memos.has_pending() && self.quitting.is_none()).then_some(self.next_memo_check));
+        sooner(self.postits.due());
         sooner(self.dev.deadline);
         sooner(self.quitting);
         sooner(self.dev.script.front().map(|step| self.started + step.at));
@@ -1306,7 +1297,9 @@ impl App {
             Some(MenuItem::Quit) => return self.ask_quit(now),
             Some(MenuItem::Settings) => self.open_settings(),
             Some(MenuItem::Watch) => self.watch(now),
-            Some(MenuItem::Memos) => self.open_memos(now),
+            Some(MenuItem::MemoNew) => self.new_memo(win::cursor_position()),
+            Some(MenuItem::MemoShow) => self.postits.show_all(),
+            Some(MenuItem::MemoTidy) => self.postits.tidy(),
             Some(MenuItem::Link(index)) => self.open(LINKS[index].url),
             Some(MenuItem::Show(show)) => {
                 let target = self.menu_character();
@@ -1522,7 +1515,6 @@ impl App {
                 lasts: (lasts > 0.0).then(|| Duration::from_secs_f64(lasts)),
                 click: Click::Close,
                 tag: None,
-                memo: None,
             }),
             dev::Command::BubbleClick => {
                 if self.bubble.is_some() {
@@ -1548,29 +1540,13 @@ impl App {
                 }
             }
             dev::Command::Memo(step) => {
-                if step == dev::MemoStep::Open {
-                    self.open_memos(now);
-                } else if let Some(window) = &self.memo_window {
-                    match step {
-                        dev::MemoStep::Open => {}
-                        dev::MemoStep::Close => memo_window::push_close(),
-                        dev::MemoStep::New => window.press_new(),
-                        dev::MemoStep::Delete => window.press_delete(),
-                        dev::MemoStep::Select(row) => window.select(row),
-                        dev::MemoStep::Text(text) => window.type_text(&text),
-                        dev::MemoStep::Remind(remind) => window.pick_remind(remind, self.wall(now)),
-                        dev::MemoStep::Hold => window.toggle_held(),
-                        dev::MemoStep::Snap => {
-                            self.dev.snaps += 1;
-                            if let Some(path) = &self.dev.options.settings_dump {
-                                window.dump(&dev::numbered(path, self.dev.snaps));
-                            }
-                            if let Some(path) = &self.dev.options.settings_shot {
-                                window.shot(&dev::numbered(path, self.dev.snaps));
-                            }
-                        }
-                    }
+                let mut shot = None;
+                if step == dev::MemoStep::Snap {
+                    self.dev.snaps += 1;
+                    shot = self.dev.options.settings_shot.as_deref().map(|path| dev::numbered(path, self.dev.snaps));
+                    self.dev.notes.extend(self.postits.describe());
                 }
+                self.postits.script(&step, &mut self.memos, shot.as_deref());
             }
             dev::Command::Menu(id) => {
                 if self.picked(MenuItem::from_id(id), now) {
@@ -1623,6 +1599,10 @@ impl App {
             self.state.character = Some((x.round() as i32, y.round() as i32));
         }
         self.store.state_changed(Instant::now());
+        // 포스트잇에 적던 글이 있으면 메모에 옮겨 적고 저장한다.
+        if !self.postits.commit(&mut self.memos).is_empty() {
+            self.store.memos_changed(Instant::now());
+        }
         self.store.save(None, &self.settings, &self.state, &self.memos);
 
         let mut lines = std::mem::take(&mut self.dev.notes);

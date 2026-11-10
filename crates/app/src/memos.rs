@@ -7,7 +7,7 @@
 
 use serde_json::Value;
 
-use crate::when::{When, clock_label, parse_clock};
+use crate::when::{When, parse_clock};
 
 const VERSION: i64 = 1;
 /// 메모 하나에 적을 수 있는 글자 수.
@@ -84,16 +84,6 @@ impl Memo {
     pub fn set_remind(&mut self, remind: Remind, now: When) {
         self.remind = remind;
         self.next = upcoming(remind, now);
-    }
-
-    /// 알림이 어떻게 되어 있는지를 한 줄로 적는다. 메모 창에 보여 준다.
-    pub fn remind_line(&self) -> String {
-        match (self.remind, self.next) {
-            (Remind::None, _) => String::new(),
-            (_, Some(next)) => format!("다음 알림: {}", next.label()),
-            (Remind::Once(_), None) => "지난 시각입니다. 알리지 않습니다.".to_string(),
-            (Remind::Daily { hour, minute }, None) => format!("날마다 {}", clock_label(hour, minute)),
-        }
     }
 }
 
@@ -372,17 +362,16 @@ mod tests {
         assert_eq!(memos.get(3).unwrap().next, Some(at("2026-11-10 23:00")));
         assert_eq!(memos.get(2).unwrap().next, Some(at("2026-11-12 19:00")));
         assert_eq!((memos.get(1).unwrap().next, memos.has_pending()), (None, true));
-        assert_eq!(memos.get(2).unwrap().remind_line(), "다음 알림: 11월 12일 오후 7:00");
         // 이미 지난 시각을 고르면 알리지 않는다.
         let memo = memos.get_mut(2).unwrap();
         memo.set_remind(Remind::Once(at("2026-11-10 20:59")), now);
-        assert_eq!((memo.next, memo.remind_line().as_str()), (None, "지난 시각입니다. 알리지 않습니다."));
+        assert_eq!(memo.next, None);
         memo.set_remind(Remind::Once(now), now);
         assert_eq!(memo.next, None);
         // 알림을 없애면 다음 시각도 없어진다.
         let memo = memos.get_mut(3).unwrap();
         memo.set_remind(Remind::None, now);
-        assert_eq!((memo.next, memo.remind_line().as_str(), memos.has_pending()), (None, "", false));
+        assert_eq!((memo.next, memos.has_pending()), (None, false));
     }
 
     #[test]

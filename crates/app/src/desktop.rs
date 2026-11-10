@@ -102,7 +102,9 @@ fn read(hwnd: HWND) -> Option<Pane> {
     }
     let class = class_of(hwnd);
     // 꽃핀 자신과 바탕화면은 창으로 치지 않는다.
-    if class == character_window::CLASS_NAME || class == "Progman" || class == "WorkerW" {
+    // 포스트잇과 글을 적는 칸도 이 프로그램의 창이다. 꽃핀이 올라설 창으로 치지 않는다.
+    let ours = class == character_window::CLASS_NAME || class.starts_with(crate::postit::NOTE_CLASS);
+    if ours || class == "Progman" || class == "WorkerW" {
         return None;
     }
 
