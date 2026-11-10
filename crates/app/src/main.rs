@@ -165,7 +165,7 @@ fn run(frames: &mut Frames, options: &dev::Options, report: &mut dev::Report) ->
     let face = frames.portrait(motions.clip(motions.idle2).first_frame, icon_size as usize)?;
     let tray = Tray::new(&face, icon_size);
     report.add(match tray.icon_rect() {
-        Some(rect) => format!("트레이 아이콘 {}x{} 등록됨", rect.w, rect.h),
+        Some(rect) => format!("트레이 아이콘 등록됨: 자리 ({}, {}) {}x{}", rect.x, rect.y, rect.w, rect.h),
         None => "트레이 아이콘이 등록되지 않음".to_string(),
     });
 
