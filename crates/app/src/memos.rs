@@ -32,6 +32,33 @@ pub enum Remind {
     },
 }
 
+/// 메모가 포스트잇으로 화면에 붙어 있는 모습.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Sheet {
+    /// 기울이지 않았을 때 종이의 왼쪽 위가 놓이는 화면 좌표(px). 아직 붙인 적이 없으면 `None`이다.
+    pub at: Option<(i32, i32)>,
+    /// 종이의 크기. 화면 배율이 100%일 때의 픽셀이다.
+    pub size: (u32, u32),
+    /// 종이의 색(0xRRGGBB).
+    pub color: u32,
+    /// 붙어 있을 때의 기울기. 10분의 1도이고, 시계 방향이 양수다.
+    pub tilt: i32,
+    /// 다른 창들 위에 늘 떠 있는가.
+    pub top: bool,
+}
+
+impl Sheet {
+    /// 종이의 가장 작은 크기와 가장 큰 크기.
+    pub const SMALLEST: (u32, u32) = (150, 120);
+    pub const LARGEST: (u32, u32) = (420, 420);
+}
+
+impl Default for Sheet {
+    fn default() -> Sheet {
+        Sheet { at: None, size: (196, 196), color: 0xFFF3A6, tilt: 0, top: false }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Memo {
     pub id: u64,
@@ -43,6 +70,7 @@ pub struct Memo {
     pub held: bool,
     /// 다음에 알릴 시각. 알릴 일이 없거나 이미 알렸으면 `None`이다.
     pub next: Option<When>,
+    pub sheet: Sheet,
 }
 
 impl Memo {
@@ -112,7 +140,15 @@ impl Memos {
             return None;
         }
         let id = self.list.iter().map(|memo| memo.id).max().unwrap_or(0) + 1;
-        let memo = Memo { id, text: String::new(), created: now, remind: Remind::None, held: false, next: None };
+        let memo = Memo {
+            id,
+            text: String::new(),
+            created: now,
+            remind: Remind::None,
+            held: false,
+            next: None,
+            sheet: Sheet::default(),
+        };
         self.list.insert(0, memo);
         Some(id)
     }
@@ -186,6 +222,7 @@ impl Memos {
                 format!("\"remind\": {remind}"),
                 format!("\"held\": {}", memo.held),
                 format!("\"next\": {next}"),
+                format!("\"sheet\": {}", sheet_json(&memo.sheet)),
             ];
             let comma = if index == 0 { "" } else { "," };
             text.push_str(&format!("{comma}\n    {{\n      {}\n    }}", lines.join(",\n      ")));
@@ -208,6 +245,44 @@ impl Memos {
         }
         Some(Memos { list })
     }
+}
+
+/// 포스트잇의 모습을 한 줄로 적는다. 아직 붙인 적이 없으면 자리는 적지 않는다.
+fn sheet_json(sheet: &Sheet) -> String {
+    let at = sheet.at.map_or(String::new(), |(x, y)| format!("\"x\": {x}, \"y\": {y}, "));
+    let (tenths, sign) = (sheet.tilt.abs(), if sheet.tilt < 0 { "-" } else { "" });
+    format!(
+        "{{ {at}\"w\": {}, \"h\": {}, \"color\": \"#{:06X}\", \"tilt\": {sign}{}.{}, \"top\": {} }}",
+        sheet.size.0,
+        sheet.size.1,
+        sheet.color & 0xFF_FFFF,
+        tenths / 10,
+        tenths % 10,
+        sheet.top
+    )
+}
+
+/// 포스트잇의 모습을 읽는다. 없거나 읽을 수 없는 값은 처음 값으로 둔다. 적어 둔 글이 더 중요하다.
+fn read_sheet(entry: Option<&Value>) -> Sheet {
+    let mut sheet = Sheet::default();
+    let Some(entry) = entry else { return sheet };
+    let whole = |key: &str| entry.get(key).and_then(Value::as_i64).and_then(|value| i32::try_from(value).ok());
+    if let (Some(x), Some(y)) = (whole("x"), whole("y")) {
+        sheet.at = Some((x, y));
+    }
+    if let (Some(w), Some(h)) = (whole("w"), whole("h")) {
+        let fit = |value: i32, least: u32, most: u32| (value.max(0) as u32).clamp(least, most);
+        sheet.size = (fit(w, Sheet::SMALLEST.0, Sheet::LARGEST.0), fit(h, Sheet::SMALLEST.1, Sheet::LARGEST.1));
+    }
+    let color = entry.get("color").and_then(Value::as_str).and_then(|text| text.strip_prefix('#'));
+    if let Some(color) = color.filter(|hex| hex.len() == 6).and_then(|hex| u32::from_str_radix(hex, 16).ok()) {
+        sheet.color = color;
+    }
+    if let Some(tilt) = entry.get("tilt").and_then(Value::as_f64).filter(|tilt| tilt.abs() <= 45.0) {
+        sheet.tilt = (tilt * 10.0).round() as i32;
+    }
+    sheet.top = entry.get("top").and_then(Value::as_bool).unwrap_or(false);
+    sheet
 }
 
 fn read_memo(entry: &Value) -> Option<Memo> {
@@ -234,6 +309,7 @@ fn read_memo(entry: &Value) -> Option<Memo> {
         remind,
         held: entry.get("held").and_then(Value::as_bool).unwrap_or(false),
         next: if remind == Remind::None { None } else { when(entry.get("next")) },
+        sheet: read_sheet(entry.get("sheet")),
     })
 }
 
@@ -367,11 +443,18 @@ mod tests {
         let mut memos = sample(now);
         memos.get_mut(1).unwrap().text = "따옴표 \" 와 역빗금 \\ 와\n줄바꿈, 그리고 🌸".to_string();
         memos.take_due(at("2026-11-12 19:00"));
+        memos.get_mut(2).unwrap().sheet =
+            Sheet { at: Some((-1200, 340)), size: (300, 240), color: 0xCBE6FB, tilt: -45, top: true };
+        memos.get_mut(3).unwrap().sheet.tilt = 6;
         let text = memos.to_json();
         assert!(text.starts_with(
             "{\n  \"version\": 1,\n  \"memos\": [\n    {\n      \"id\": 3,\n      \"text\": \"스트레칭\","
         ));
-        assert!(text.ends_with("\"next\": null\n    }\n  ]\n}\n"), "{text}");
+        // 붙인 적이 없는 메모는 자리를 적지 않는다.
+        let last = r##""sheet": { "w": 196, "h": 196, "color": "#FFF3A6", "tilt": 0.0, "top": false }"##;
+        assert!(text.ends_with(&format!("\"next\": null,\n      {last}\n    }}\n  ]\n}}\n")), "{text}");
+        let placed = r##"{ "x": -1200, "y": 340, "w": 300, "h": 240, "color": "#CBE6FB", "tilt": -4.5, "top": true }"##;
+        assert!(text.contains(placed) && text.contains(r#""tilt": 0.6,"#), "{text}");
         assert_eq!(Memos::default().to_json(), "{\n  \"version\": 1,\n  \"memos\": []\n}\n");
         assert_eq!(Memos::from_json(&text), Some(memos));
         assert_eq!(Memos::from_json(&Memos::default().to_json()), Some(Memos::default()));
@@ -402,6 +485,11 @@ mod tests {
         assert_eq!((memos.get(7).unwrap().next, memos.get(7).unwrap().held), (None, true));
         memos.settle(at("2026-11-10 21:00"));
         assert_eq!(memos.get(7).unwrap().next, Some(at("2026-11-11 07:30")));
+        // 포스트잇의 모습이 없던 때의 파일은 처음 값으로 읽는다. 이상한 값도 처음 값으로 두거나 한도 안으로 줄인다.
+        assert_eq!(memos.get(5).unwrap().sheet, Sheet::default());
+        let odd = r##"{"memos": [{"id": 1, "text": "가", "sheet": {"x": 10, "w": 9000, "h": 1, "color": "#12", "tilt": 80, "top": 1}}]}"##;
+        let sheet = Memos::from_json(odd).unwrap().get(1).unwrap().sheet;
+        assert_eq!(sheet, Sheet { size: (Sheet::LARGEST.0, Sheet::SMALLEST.1), ..Sheet::default() });
         // 너무 긴 글은 한도까지만 읽는다.
         let long = format!(r#"{{"memos": [{{"id": 1, "text": "{}"}}]}}"#, "가".repeat(TEXT_LIMIT + 50));
         assert_eq!(Memos::from_json(&long).unwrap().get(1).unwrap().text.chars().count(), TEXT_LIMIT);
