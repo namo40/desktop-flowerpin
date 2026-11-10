@@ -79,6 +79,8 @@ pub struct Look {
     pub size_percent: u32,
     /// 모니터의 DPI 대신 쓸 값. 배율이 큰 모니터가 없어도 그 배율의 그림을 확인하려고 둔다.
     pub dpi_override: Option<u32>,
+    /// 다른 창들보다 늘 위에 있는다.
+    pub topmost: bool,
 }
 
 impl Look {
@@ -213,7 +215,7 @@ impl Character {
     ) -> Result<Character, PackError> {
         let layout = Layout::new(frames, scale);
         let (x, y) = layout.window_position(actor.foot(motions));
-        let window = CharacterWindow::new(layout.size.0, layout.size.1, x, y);
+        let window = CharacterWindow::new(layout.size.0, layout.size.1, x, y, look.topmost);
         let mut character = Character {
             window,
             layout,
@@ -265,6 +267,9 @@ impl Character {
 
     /// 보여 주는 설정을 바꾼다. 배율은 다음 걸음에서 다시 잡는다.
     pub fn set_look(&mut self, look: Look, now: Instant) {
+        if look.topmost != self.look.topmost {
+            self.window.set_topmost(look.topmost);
+        }
         self.look = look;
         self.wake(now);
     }
@@ -350,7 +355,7 @@ impl Character {
         self.layout = Layout::new(frames, scale);
         self.actor.set_scale(scale.factor());
         let (x, y) = self.layout.window_position(self.actor.foot(motions));
-        self.window = CharacterWindow::new(self.layout.size.0, self.layout.size.1, x, y);
+        self.window = CharacterWindow::new(self.layout.size.0, self.layout.size.1, x, y, self.look.topmost);
         self.shown = None;
         self.drawn = Rect::EMPTY;
     }

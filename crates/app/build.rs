@@ -19,11 +19,17 @@
 //! # 공식 빌드
 //!
 //! `DFP_RELEASE=1`이면 공식 빌드다. 개발 키, 개발 키 번호로 만든 팩, 대체 그림 팩이면 빌드가 실패한다.
+//!
+//! # 그 밖에
+//!
+//! - 설정 창의 틀(`res/app.rc`)과 manifest를 exe에 넣는다. Windows SDK의 rc.exe가 있어야 한다.
+//! - 어느 커밋에서 빌드했는지를 `DFP_COMMIT`으로 넘긴다. 설정 창의 정보 탭에 보여 준다.
 
 use std::env;
 use std::fmt::Write;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use dfp_pack::{DEV_KEY, Header, KEY_LEN, Pack, key};
 
@@ -78,6 +84,20 @@ fn main() {
         writeln!(code, "static {name}: [u8; {KEY_LEN}] = {part:?};").expect("문자열에 쓰기");
     }
     fs::write(out.join("key_parts.rs"), code).expect("키 조각 쓰기");
+
+    println!("cargo::rerun-if-changed=res/app.rc");
+    println!("cargo::rerun-if-changed=res/app.manifest");
+    embed_resource::compile("res/app.rc", embed_resource::NONE)
+        .manifest_required()
+        .expect("설정 창의 틀(res/app.rc)을 넣지 못했습니다. Windows SDK의 rc.exe가 필요합니다");
+
+    // git이 없거나 저장소가 아니면 빈 글로 둔다.
+    let commit = Command::new("git").args(["rev-parse", "--short", "HEAD"]).current_dir(&root).output();
+    let commit = commit.ok().filter(|output| output.status.success());
+    let commit = commit.map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string()).unwrap_or_default();
+    println!("cargo::rustc-env=DFP_COMMIT={commit}");
+    // 커밋할 때마다 바뀌는 파일이다.
+    println!("cargo::rerun-if-changed={}", root.join(".git/logs/HEAD").display());
 }
 
 /// 진짜 그림 팩의 키를 읽는다. 환경 변수가 먼저고, 없으면 팩 옆의 키 파일을 본다.

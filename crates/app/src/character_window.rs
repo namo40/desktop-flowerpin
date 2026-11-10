@@ -20,11 +20,12 @@ use windows_sys::Win32::Graphics::Gdi::{
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetCapture, ReleaseCapture, SetCapture};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, HTCLIENT, IDC_HAND, LoadCursorW, MA_NOACTIVATE, RegisterClassExW,
-    SW_SHOWNOACTIVATE, SetCursor, ShowWindow, ULW_ALPHA, UPDATELAYEREDWINDOWINFO, UpdateLayeredWindowIndirect,
-    WM_CAPTURECHANGED, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE,
-    WM_RBUTTONUP, WM_SETCURSOR, WM_SETTINGCHANGE, WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
-    WS_EX_TOPMOST, WS_POPUP,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, HTCLIENT, HWND_NOTOPMOST, HWND_TOPMOST, IDC_HAND, LoadCursorW,
+    MA_NOACTIVATE, RegisterClassExW, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SetCursor,
+    SetWindowPos, ShowWindow, ULW_ALPHA, UPDATELAYEREDWINDOWINFO, UpdateLayeredWindowIndirect, WM_CAPTURECHANGED,
+    WM_DISPLAYCHANGE, WM_DPICHANGED, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_RBUTTONUP,
+    WM_SETCURSOR, WM_SETTINGCHANGE, WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+    WS_POPUP,
 };
 
 use crate::geom::Rect;
@@ -83,11 +84,12 @@ pub struct CharacterWindow {
 
 impl CharacterWindow {
     /// 크기가 `width`×`height`이고 왼쪽 위가 화면 `(x, y)`에 오는 창을 만든다. 처음에는 보이지 않는다.
-    pub fn new(width: i32, height: i32, x: i32, y: i32) -> CharacterWindow {
+    /// `topmost`면 다른 창들보다 늘 위에 있다.
+    pub fn new(width: i32, height: i32, x: i32, y: i32, topmost: bool) -> CharacterWindow {
         register_class();
         let class = wide(CLASS_NAME);
         // 작업표시줄과 Alt+Tab에 나오지 않고, 눌러도 다른 창의 포커스를 빼앗지 않는다.
-        let ex_style = WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE;
+        let ex_style = WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | if topmost { WS_EX_TOPMOST } else { 0 };
         let hwnd = unsafe {
             CreateWindowExW(
                 ex_style,
@@ -152,6 +154,12 @@ impl CharacterWindow {
     /// 창이 화면에서 차지하는 범위.
     pub fn screen_rect(&self) -> Rect {
         Rect::new(self.pos.0, self.pos.1, self.width, self.height)
+    }
+
+    /// 다른 창들보다 늘 위에 있게 하거나, 보통 창처럼 다른 창 뒤로 갈 수 있게 한다.
+    pub fn set_topmost(&self, topmost: bool) {
+        let after = if topmost { HWND_TOPMOST } else { HWND_NOTOPMOST };
+        unsafe { SetWindowPos(self.hwnd, after, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE) };
     }
 
     /// 창의 왼쪽 위를 화면의 `(x, y)`로 옮긴다. 다음 `present` 때 화면에 반영된다.

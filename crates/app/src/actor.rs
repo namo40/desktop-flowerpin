@@ -320,6 +320,11 @@ impl Actor {
         (self.x, self.y)
     }
 
+    /// 둘레를 돌아다니는 자리의 가운데. 마지막으로 내려앉은 곳이다.
+    pub fn home(&self) -> f64 {
+        self.home
+    }
+
     /// 끌려가는 목표. 잡혀 있을 때만 뜻이 있다.
     pub fn drag_target(&self) -> (f64, f64) {
         self.drag

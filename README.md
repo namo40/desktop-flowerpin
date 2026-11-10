@@ -8,11 +8,12 @@
 
 - 하루 종일 켜 둬도 부담이 없게, 메모리와 CPU를 적게 쓰는 것을 먼저 챙깁니다.
 - 관리자 권한을 쓰지 않습니다. 설치 없이 exe 하나로 실행합니다.
+- 설정은 `%APPDATA%\DesktopFlowerpin` 폴더에만 저장합니다.
 - 인터넷은 꽃핀 방송 상태를 확인할 때만 쓰고, 설정에서 끌 수 있습니다. (아직 만들지 않은 기능입니다.)
 
 ## 빌드
 
-Windows 10 이상(64비트)과 Rust stable이 필요합니다.
+Windows 10 이상(64비트), Rust stable, Windows SDK가 필요합니다. 설정 창의 틀을 exe에 넣을 때 SDK의 `rc.exe`를 씁니다. Visual Studio Build Tools에서 "C++를 사용한 데스크톱 개발"을 고르면 함께 설치됩니다.
 
 ```
 cargo build --release

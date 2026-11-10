@@ -6,7 +6,7 @@
 //! 아이콘 그림은 파일로 두지 않는다. 실행할 때 그림 팩의 한 장에서 만든다. 그래서 공식 빌드는
 //! 꽃핀 얼굴이, 이 저장소만 받아 빌드한 것은 대체 그림이 아이콘이 된다.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
 use std::ptr::{null, null_mut};
 use std::sync::OnceLock;
@@ -25,12 +25,14 @@ use windows_sys::Win32::UI::Shell::{
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreateIconIndirect, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyIcon, DestroyMenu,
-    DestroyWindow, FindWindowW, GetSystemMetrics, HICON, ICONINFO, MF_STRING, PostMessageW, RegisterClassExW,
-    RegisterWindowMessageW, SM_CXSMICON, SetForegroundWindow, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON,
-    TrackPopupMenuEx, WM_APP, WM_CONTEXTMENU, WM_NULL, WM_RBUTTONUP, WNDCLASSEXW, WS_POPUP,
+    DestroyWindow, FindWindowW, GetSystemMetrics, HICON, ICONINFO, KillTimer, MF_POPUP, MF_SEPARATOR, MF_STRING,
+    PostMessageW, RegisterClassExW, RegisterWindowMessageW, SM_CXSMICON, SetForegroundWindow, SetTimer, TPM_NONOTIFY,
+    TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenuEx, WM_APP, WM_CONTEXTMENU, WM_LBUTTONDBLCLK, WM_NULL, WM_RBUTTONUP,
+    WM_TIMER, WNDCLASSEXW, WS_POPUP,
 };
 
 use crate::geom::Rect;
+use crate::links::LINKS;
 use crate::win::{cursor_position, fatal, wide};
 
 const CLASS_NAME: &str = "DesktopFlowerpinMain";
@@ -40,11 +42,37 @@ const INSTANCE_NAME: &str = "Local\\DesktopFlowerpin.Running";
 const WM_TRAY: u32 = WM_APP + 1;
 const ICON_ID: u32 = 1;
 const TIP: &str = "DesktopFlowerpin";
+/// 메뉴나 물음 창이 떠 있는 동안 꽃핀을 움직이게 하는 타이머의 번호와 간격(ms).
+const TICK_TIMER: usize = 1;
+const TICK_EVERY_MS: u32 = 15;
 
 /// 메뉴에서 고를 수 있는 것.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MenuItem {
-    Quit = 1,
+    Quit,
+    Settings,
+    /// 바로 가기. [`LINKS`]의 몇 번째인지다.
+    Link(usize),
+}
+
+impl MenuItem {
+    /// 메뉴 항목의 번호. 0은 "아무것도 고르지 않음"이라 쓰지 않는다.
+    pub fn id(self) -> u32 {
+        match self {
+            MenuItem::Quit => 1,
+            MenuItem::Settings => 2,
+            MenuItem::Link(index) => 100 + index as u32,
+        }
+    }
+
+    pub fn from_id(id: u32) -> Option<MenuItem> {
+        match id {
+            1 => Some(MenuItem::Quit),
+            2 => Some(MenuItem::Settings),
+            100.. if ((id - 100) as usize) < LINKS.len() => Some(MenuItem::Link((id - 100) as usize)),
+            _ => None,
+        }
+    }
 }
 
 /// 트레이 쪽에서 일어난 일.
@@ -52,6 +80,8 @@ pub enum MenuItem {
 pub enum TrayEvent {
     /// 트레이 아이콘을 오른쪽 클릭했다. 좌표는 메뉴를 띄울 화면 위치다.
     Menu { x: i32, y: i32 },
+    /// 트레이 아이콘을 두 번 클릭했다. 설정 창을 연다.
+    Open,
     /// 작업표시줄이 새로 만들어졌다(탐색기가 다시 시작됨). 아이콘을 다시 등록해야 한다.
     TaskbarCreated,
     /// 앱을 한 번 더 켰다. 새로 켠 쪽은 이것만 알리고 끝난다.
@@ -60,6 +90,53 @@ pub enum TrayEvent {
 
 thread_local! {
     static EVENTS: RefCell<Vec<TrayEvent>> = const { RefCell::new(Vec::new()) };
+    /// 메뉴나 물음 창이 떠 있는 동안 타이머가 불러 줄 것.
+    static TICK: Cell<Option<fn()>> = const { Cell::new(None) };
+}
+
+/// `show`가 돌아올 때까지 `tick`을 자주 불러 준다.
+///
+/// 메뉴와 물음 창은 닫힐 때까지 돌아오지 않고 그 안에서 창 메시지를 돌린다. 그동안 메인 루프가 멈추므로
+/// 꽃핀도 멈춘다. 그래서 `owner` 창에 타이머를 걸어, 그 안에서도 꽃핀을 계속 움직이게 한다.
+pub fn while_modal<T>(owner: HWND, tick: fn(), show: impl FnOnce() -> T) -> T {
+    TICK.set(Some(tick));
+    unsafe { SetTimer(owner, TICK_TIMER, TICK_EVERY_MS, None) };
+    let result = show();
+    unsafe { KillTimer(owner, TICK_TIMER) };
+    TICK.set(None);
+    result
+}
+
+/// 화면의 `(x, y)`에 메뉴를 띄우고, 고른 것을 돌려준다. 메뉴가 닫힐 때까지 돌아오지 않는다.
+/// `owner`는 메뉴의 주인이 될 창([`Tray::hwnd`])이다.
+pub fn pick(owner: HWND, x: i32, y: i32) -> Option<MenuItem> {
+    unsafe {
+        let menu = CreatePopupMenu();
+        let links = CreatePopupMenu();
+        if menu.is_null() || links.is_null() {
+            return None;
+        }
+        let add = |menu, item: MenuItem, label: &str| {
+            AppendMenuW(menu, MF_STRING, item.id() as usize, wide(label).as_ptr());
+        };
+        for (index, link) in LINKS.iter().enumerate() {
+            add(links, MenuItem::Link(index), link.name);
+        }
+        // 이름 끝의 "..."은 창이 열린다는 뜻이다.
+        AppendMenuW(menu, MF_POPUP, links as usize, wide("바로 가기").as_ptr());
+        AppendMenuW(menu, MF_SEPARATOR, 0, null());
+        add(menu, MenuItem::Settings, "설정...");
+        add(menu, MenuItem::Quit, "끝내기");
+        // 메뉴를 띄우기 전에 주인 창을 앞으로 가져오고, 닫힌 뒤에 빈 메시지를 보낸다.
+        // 이렇게 하지 않으면 메뉴 밖을 눌러도 메뉴가 닫히지 않는다.
+        SetForegroundWindow(owner);
+        let flags = TPM_RIGHTBUTTON | TPM_RETURNCMD | TPM_NONOTIFY;
+        let picked = TrackPopupMenuEx(menu, flags, x, y, owner, null());
+        PostMessageW(owner, WM_NULL, 0, 0);
+        // 딸린 메뉴는 큰 메뉴와 함께 없어진다.
+        DestroyMenu(menu);
+        MenuItem::from_id(picked as u32)
+    }
 }
 
 /// 지난번에 꺼낸 뒤로 쌓인 일을 모두 꺼낸다.
@@ -199,23 +276,9 @@ impl Tray {
             .then(|| Rect::new(r.left, r.top, r.right - r.left, r.bottom - r.top))
     }
 
-    /// 화면의 `(x, y)`에 메뉴를 띄우고, 고른 것을 돌려준다. 메뉴가 닫힐 때까지 돌아오지 않는다.
-    pub fn pick(&self, x: i32, y: i32) -> Option<MenuItem> {
-        unsafe {
-            let menu = CreatePopupMenu();
-            if menu.is_null() {
-                return None;
-            }
-            AppendMenuW(menu, MF_STRING, MenuItem::Quit as usize, wide("끝내기").as_ptr());
-            // 메뉴를 띄우기 전에 주인 창을 앞으로 가져오고, 닫힌 뒤에 빈 메시지를 보낸다.
-            // 이렇게 하지 않으면 메뉴 밖을 눌러도 메뉴가 닫히지 않는다.
-            SetForegroundWindow(self.hwnd);
-            let flags = TPM_RIGHTBUTTON | TPM_RETURNCMD | TPM_NONOTIFY;
-            let picked = TrackPopupMenuEx(menu, flags, x, y, self.hwnd, null());
-            PostMessageW(self.hwnd, WM_NULL, 0, 0);
-            DestroyMenu(menu);
-            (picked == MenuItem::Quit as i32).then_some(MenuItem::Quit)
-        }
+    /// 메뉴와 물음 창의 주인이 되는, 화면에 보이지 않는 창.
+    pub fn hwnd(&self) -> HWND {
+        self.hwnd
     }
 }
 
@@ -229,8 +292,8 @@ impl Drop for Tray {
     }
 }
 
-/// 미리 곱한 알파의 BGRA 그림으로 아이콘을 만든다.
-fn make_icon(pixels: &[u32], size: i32) -> HICON {
+/// 미리 곱한 알파의 BGRA 그림으로 아이콘을 만든다. 다 쓰면 `DestroyIcon`으로 없애야 한다.
+pub fn make_icon(pixels: &[u32], size: i32) -> HICON {
     let mut info: BITMAPINFO = unsafe { std::mem::zeroed() };
     info.bmiHeader.biSize = size_of::<BITMAPINFOHEADER>() as u32;
     info.bmiHeader.biWidth = size;
@@ -261,9 +324,19 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
     match msg {
         WM_TRAY => {
             // 아이콘에서 일어난 마우스 일이 lparam에 들어 있다.
-            if matches!(lparam as u32, WM_RBUTTONUP | WM_CONTEXTMENU) {
-                let (x, y) = cursor_position();
-                push(TrayEvent::Menu { x, y });
+            match lparam as u32 {
+                WM_RBUTTONUP | WM_CONTEXTMENU => {
+                    let (x, y) = cursor_position();
+                    push(TrayEvent::Menu { x, y });
+                }
+                WM_LBUTTONDBLCLK => push(TrayEvent::Open),
+                _ => {}
+            }
+            0
+        }
+        WM_TIMER if wparam == TICK_TIMER => {
+            if let Some(tick) = TICK.get() {
+                tick();
             }
             0
         }

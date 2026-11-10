@@ -1,14 +1,14 @@
 //! Win32를 부를 때 여러 곳에서 쓰는 작은 도구.
 
-use std::ptr::null_mut;
+use std::ptr::{null, null_mut};
 
-use windows_sys::Win32::Foundation::POINT;
+use windows_sys::Win32::Foundation::{HWND, POINT};
 use windows_sys::Win32::System::SystemInformation::GetTickCount;
 use windows_sys::Win32::UI::HiDpi::{DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO};
+use windows_sys::Win32::UI::Shell::ShellExecuteW;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    DispatchMessageW, GetCursorPos, MB_ICONERROR, MB_OK, MSG, MessageBoxW, PM_REMOVE, PeekMessageW, TranslateMessage,
-    WM_QUIT,
+    GetCursorPos, IDOK, MB_ICONERROR, MB_ICONQUESTION, MB_OK, MB_OKCANCEL, MessageBoxW, SW_SHOWNORMAL,
 };
 
 /// Win32에 넘길 수 있게, 끝에 0을 붙인 UTF-16 문자열로 바꾼다.
@@ -39,19 +39,16 @@ pub fn cursor_position() -> (i32, i32) {
     (point.x, point.y)
 }
 
-/// 쌓여 있는 창 메시지를 모두 처리한다. 끝내라는 메시지(`WM_QUIT`)를 받으면 `false`를 돌려준다.
-pub fn pump_messages() -> bool {
-    let mut msg: MSG = unsafe { std::mem::zeroed() };
-    while unsafe { PeekMessageW(&mut msg, null_mut(), 0, 0, PM_REMOVE) } != 0 {
-        if msg.message == WM_QUIT {
-            return false;
-        }
-        unsafe {
-            TranslateMessage(&msg);
-            DispatchMessageW(&msg);
-        }
-    }
-    true
+/// 주소는 기본 브라우저로, 폴더는 탐색기로 연다.
+pub fn open(target: &str) {
+    let (verb, target) = (wide("open"), wide(target));
+    unsafe { ShellExecuteW(null_mut(), verb.as_ptr(), target.as_ptr(), null(), null(), SW_SHOWNORMAL) };
+}
+
+/// `owner` 창 위에 예·아니요를 묻는 창을 띄운다. 답할 때까지 돌아오지 않는다.
+pub fn confirm(owner: HWND, title: &str, question: &str) -> bool {
+    let (title, question) = (wide(title), wide(question));
+    unsafe { MessageBoxW(owner, question.as_ptr(), title.as_ptr(), MB_OKCANCEL | MB_ICONQUESTION) == IDOK }
 }
 
 /// 더 진행할 수 없는 오류를 알리고 끝낸다. 콘솔이 없는 프로그램이라 메시지 상자로 보여 준다.

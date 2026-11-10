@@ -3,7 +3,7 @@
 //! ```text
 //! DesktopFlowerpin.exe [--for 초] [--report 파일] [--check-screen] [--size 퍼센트] [--dpi 값] [--characters 수]
 //!                      [--play 동작,동작] [--script "초 명령; 초 명령"] [--seed 수] [--still]
-//!                      [--away-after 초]
+//!                      [--away-after 초] [--data-dir 폴더] [--no-open] [--settings-dump 파일] [--settings-shot 파일]
 //! ```
 //!
 //! - `--for 초`: 정한 시간이 지나면 스스로 끝낸다.
@@ -20,13 +20,19 @@
 //! - `--seed 수`: 쉬는 시간과 걷는 방향을 고르는 난수의 씨앗. 같은 수면 같은 순서로 움직인다.
 //! - `--still`: 모든 꽃핀이 돌아다니지 않고 제자리에 서 있는다. 가만히 있을 때의 자원을 재는 데 쓴다.
 //! - `--away-after 초`: 마우스와 키보드를 이만큼 쓰지 않으면 자리를 비운 것으로 친다. 0이면 끈다.
+//!   주면 설정 파일의 값 대신 이 값을 쓴다.
+//! - `--data-dir 폴더`: 설정과 상태 파일을 둘 폴더. `--for`와 함께 쓸 때 이것을 주지 않으면 파일을 읽지도
+//!   쓰지도 않는다. 확인하려고 돌린 것이 진짜 설정을 건드리지 않게 하려는 것이다.
+//! - `--no-open`: 주소나 폴더를 열라고 해도 열지 않고 보고서에 적기만 한다.
+//! - `--settings-dump 파일`, `--settings-shot 파일`: 스크립트의 `settings snap`이 설정 창의 컨트롤 좌표와
+//!   그림(BMP)을 여기에 쓴다.
 //!
 //! 보고서에는 첫 꽃핀이 거친 상태와 동작이 시각과 함께 적힌다.
 //!
 //! `--for`를 [`WARM_UP`]보다 길게 주면, 그 뒤부터 끝날 때까지 쓴 메모리와 CPU를 보고서에 적는다.
 
 use std::ffi::c_void;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::ptr::null_mut;
 use std::time::{Duration, Instant};
 
@@ -35,17 +41,13 @@ use windows_sys::Win32::Graphics::Gdi::{
     BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BitBlt, CAPTUREBLT, CreateCompatibleDC, CreateDIBSection, DIB_RGB_COLORS,
     DeleteDC, DeleteObject, GetDC, ReleaseDC, SRCCOPY, SelectObject,
 };
-use windows_sys::Win32::System::ProcessStatus::{
-    K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS, PROCESS_MEMORY_COUNTERS_EX2,
-};
-use windows_sys::Win32::System::Threading::GetCurrentProcess;
-use windows_sys::Win32::System::WindowsProgramming::QueryProcessCycleTime;
 use windows_sys::Win32::UI::WindowsAndMessaging::WindowFromPoint;
 
 use crate::actor::{Actor, Mode, Whim};
 use crate::character_window::CharacterWindow;
 use crate::geom::Rect;
 use crate::motions::{MotionId, Motions};
+use crate::usage::{self, Meter};
 
 pub struct Options {
     pub run_for: Option<Duration>,
@@ -60,8 +62,12 @@ pub struct Options {
     pub script: Vec<Step>,
     pub seed: Option<u64>,
     pub still: bool,
-    /// 자리를 비운 것으로 치는 시간. 설정 창이 생기기 전까지 바꿔 보는 방법이다.
+    /// 자리를 비운 것으로 치는 시간. 주면 설정의 값 대신 쓴다.
     pub away_after: Option<Duration>,
+    pub data_dir: Option<PathBuf>,
+    pub no_open: bool,
+    pub settings_dump: Option<PathBuf>,
+    pub settings_shot: Option<PathBuf>,
 }
 
 impl Options {
@@ -84,6 +90,10 @@ impl Options {
             seed: value("--seed").and_then(|s| s.parse().ok()),
             still: args.iter().any(|a| a == "--still"),
             away_after: value("--away-after").and_then(|s| s.parse::<f64>().ok()).map(Duration::from_secs_f64),
+            data_dir: value("--data-dir").map(PathBuf::from),
+            no_open: args.iter().any(|a| a == "--no-open"),
+            settings_dump: value("--settings-dump").map(PathBuf::from),
+            settings_shot: value("--settings-shot").map(PathBuf::from),
         }
     }
 }
@@ -112,6 +122,30 @@ pub enum Command {
     /// `away on|off`: 사용자가 자리를 비운 것으로, 또는 돌아온 것으로 친다.
     /// 한 번 쓰면 그 뒤로는 진짜 입력 시각을 보지 않는다.
     Away(bool),
+    /// `menu 번호`: 메뉴에서 그 항목을 고른 것으로 친다. 번호는 [`crate::tray::MenuItem`]의 값이다.
+    Menu(u32),
+    /// `settings ...`: 설정 창을 다룬다.
+    Settings(Dialog),
+}
+
+/// `--script`의 `settings` 명령. 사람이 창에서 하는 일을 흉내 낸다.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Dialog {
+    /// `settings open`, `settings close`
+    Open,
+    Close,
+    /// `settings tab 번호`: 탭을 바꾼다(0부터).
+    Tab(usize),
+    /// `settings pick 컨트롤 순번`: 콤보 상자에서 그 순번을 고른다.
+    Pick(i32, usize),
+    /// `settings toggle 컨트롤`: 체크 상자를 누른다.
+    Toggle(i32),
+    /// `settings press 컨트롤`: 버튼을 누른다.
+    Press(i32),
+    /// `settings reset`: "기본값으로"를 누르고, 묻는 창에는 "예"라고 답한 것으로 친다.
+    Reset,
+    /// `settings snap`: 지금 모습을 `--settings-dump`와 `--settings-shot`에 쓴다.
+    Snap,
 }
 
 /// `--script`의 한 줄. 시작하고 `at`이 지났을 때 `command`를 한다.
@@ -147,6 +181,18 @@ pub fn parse_script(text: &str) -> Result<Vec<Step>, String> {
                 _ => return Err(bad()),
             }),
             (Some("away"), 3) if words[2] == "on" || words[2] == "off" => Command::Away(words[2] == "on"),
+            (Some("menu"), 3) => Command::Menu(number(2)? as u32),
+            (Some("settings"), _) => Command::Settings(match (words.get(2).copied(), words.len()) {
+                (Some("open"), 3) => Dialog::Open,
+                (Some("close"), 3) => Dialog::Close,
+                (Some("reset"), 3) => Dialog::Reset,
+                (Some("snap"), 3) => Dialog::Snap,
+                (Some("tab"), 4) => Dialog::Tab(number(3)? as usize),
+                (Some("toggle"), 4) => Dialog::Toggle(number(3)? as i32),
+                (Some("press"), 4) => Dialog::Press(number(3)? as i32),
+                (Some("pick"), 5) => Dialog::Pick(number(3)? as i32, number(4)? as usize),
+                _ => return Err(bad()),
+            }),
             _ => return Err(bad()),
         };
         steps.push(Step { at, command });
@@ -192,22 +238,11 @@ impl Trace {
     }
 }
 
-/// 보고서에 적을 줄을 모았다가 끝날 때 파일로 쓴다.
-#[derive(Default)]
-pub struct Report {
-    lines: Vec<String>,
-}
-
-impl Report {
-    pub fn add(&mut self, line: impl Into<String>) {
-        self.lines.push(line.into());
-    }
-
-    pub fn write(&self, options: &Options) {
-        if let Some(path) = &options.report {
-            // 재는 데 쓰는 보조 기능이라, 쓰지 못해도 앱을 멈추지 않는다.
-            let _ = std::fs::write(path, self.lines.join("\n") + "\n");
-        }
+/// 보고서를 파일로 쓴다. 콘솔이 없는 프로그램이라 파일로 남긴다.
+pub fn write_report(path: Option<&Path>, lines: &[String]) {
+    if let Some(path) = path {
+        // 재는 데 쓰는 보조 기능이라, 쓰지 못해도 앱을 멈추지 않는다.
+        let _ = std::fs::write(path, lines.join("\n") + "\n");
     }
 }
 
@@ -368,57 +403,24 @@ fn capture_screen(rect: Rect) -> Option<Vec<u32>> {
 pub const WARM_UP: Duration = Duration::from_secs(3);
 
 /// 앱이 쓴 메모리와 CPU를 재는 도구. 만든 때부터 [`Usage::summary`]를 부를 때까지를 잰다.
-///
-/// CPU는 프로세스가 실제로 쓴 CPU 사이클 수로 잰다. 흔히 쓰는 `GetProcessTimes`는 약 15.6ms마다
-/// 그 순간 돌고 있던 프로세스에 시간을 매기는데, 이 앱은 타이머에 맞춰 깨어나 잠깐 일하고 바로
-/// 자므로 그 순간에 거의 걸리지 않아 0%로 나온다.
-pub struct Usage {
-    since: Instant,
-    process_cycles: u64,
-    clock_cycles: u64,
-}
+pub struct Usage(Meter);
 
 impl Usage {
     pub fn start() -> Usage {
-        Usage { since: Instant::now(), process_cycles: process_cycles(), clock_cycles: clock_cycles() }
+        Usage(Meter::start())
     }
 
     /// 메모리는 작업 관리자의 "메모리(활성 개인 작업 집합)"와 같은 값이다. CPU는 한 코어를 100%로 본다.
     pub fn summary(&self) -> String {
-        let (private, working_set) = memory();
-        let elapsed = self.since.elapsed().as_secs_f64();
-        // 같은 동안 프로세스가 쓴 사이클 수를 시계가 센 사이클 수로 나누면 한 코어에서 차지한 몫이다.
-        let used = (process_cycles() - self.process_cycles) as f64;
-        let passed = (clock_cycles() - self.clock_cycles).max(1) as f64;
-        let cpu = used / passed * 100.0;
-        const MIB: f64 = 1024.0 * 1024.0;
+        let (private, working_set) = usage::memory();
         format!(
-            "메모리(개인 작업 집합) {:.2}MiB, 작업 집합 {:.2}MiB, CPU {cpu:.2}% (한 코어 대비, {elapsed:.1}초 동안)",
-            private as f64 / MIB,
-            working_set as f64 / MIB
+            "메모리(개인 작업 집합) {:.2}MiB, 작업 집합 {:.2}MiB, CPU {:.2}% (한 코어 대비, {:.1}초 동안)",
+            private as f64 / usage::MIB,
+            working_set as f64 / usage::MIB,
+            self.0.cpu_percent(),
+            self.0.seconds()
         )
     }
-}
-
-/// 이 프로세스의 모든 스레드가 지금까지 쓴 CPU 사이클 수(커널에서 쓴 것도 들어간다).
-fn process_cycles() -> u64 {
-    let mut cycles = 0;
-    unsafe { QueryProcessCycleTime(GetCurrentProcess(), &mut cycles) };
-    cycles
-}
-
-/// CPU의 사이클 시계. 프로세스가 쓴 사이클 수와 같은 단위로 흐른다.
-fn clock_cycles() -> u64 {
-    unsafe { std::arch::x86_64::_rdtsc() }
-}
-
-/// 이 프로세스의 개인 작업 집합과 작업 집합(바이트).
-fn memory() -> (usize, usize) {
-    let mut counters: PROCESS_MEMORY_COUNTERS_EX2 = unsafe { std::mem::zeroed() };
-    counters.cb = size_of::<PROCESS_MEMORY_COUNTERS_EX2>() as u32;
-    let pointer = &mut counters as *mut PROCESS_MEMORY_COUNTERS_EX2 as *mut PROCESS_MEMORY_COUNTERS;
-    unsafe { K32GetProcessMemoryInfo(GetCurrentProcess(), pointer, counters.cb) };
-    (counters.PrivateWorkingSetSize, counters.WorkingSetSize)
 }
 
 #[cfg(test)]
@@ -433,6 +435,19 @@ mod tests {
             commands,
             [Command::Click, Command::Rub(80.5), Command::Do(Whim::Jump), Command::Away(true), Command::Away(false)]
         );
+        let dialog =
+            parse_script("1 settings open; 2 settings tab 1; 3 settings pick 1103 2; 4 settings toggle 1201").unwrap();
+        let commands: Vec<Command> = dialog.iter().map(|step| step.command).collect();
+        assert_eq!(
+            commands,
+            [
+                Command::Settings(Dialog::Open),
+                Command::Settings(Dialog::Tab(1)),
+                Command::Settings(Dialog::Pick(1103, 2)),
+                Command::Settings(Dialog::Toggle(1201))
+            ]
+        );
+        assert_eq!(parse_script("1 menu 3").unwrap()[0].command, Command::Menu(3));
         let steps = parse_script(" 4 release; 1.5 grab ; 2 drag 300 -400;; 9 leave; 0 roam off; 3 dpi 144 ").unwrap();
         let commands: Vec<Command> = steps.iter().map(|step| step.command).collect();
         assert_eq!(
@@ -451,7 +466,8 @@ mod tests {
 
     #[test]
     fn bad_script_is_rejected() {
-        for text in ["grab", "1 fly", "1 drag 300", "-1 grab", "1 roam maybe", "1 grab extra", "1 do dance", "1 rub"] {
+        let wrong = ["grab", "1 fly", "1 drag 300", "-1 grab", "1 roam maybe", "1 grab extra", "1 do dance", "1 rub"];
+        for text in wrong.into_iter().chain(["1 settings", "1 settings fly", "1 settings pick 1103"]) {
             assert!(parse_script(text).is_err(), "{text}");
         }
         assert_eq!(parse_script("").unwrap(), []);
