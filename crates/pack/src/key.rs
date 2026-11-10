@@ -88,7 +88,7 @@ mod tests {
     const REAL_KEY: [u8; KEY_LEN] = [0x5A; KEY_LEN];
 
     fn header(key: &[u8; KEY_LEN], key_id: u16, placeholder: bool) -> Header {
-        let character = Character { cell: 16, foot: (8, 14), ledge_top: 0, ledge_front: 0 };
+        let character = Character { cell: 16, pivot: (8, 13), foot_y: 14, hold: (8, 7), ledge_top: 0, ledge_front: 0 };
         let source = PackSource { character, placeholder, motions: Vec::new() };
         let options = WriteOptions { key_id, zstd_level: 3, dict_size: 0 };
         Header::parse(&write_pack(&source, key, &options).unwrap().0).unwrap()

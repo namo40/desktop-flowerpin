@@ -37,8 +37,8 @@ impl Frames {
 
     /// 발바닥이 놓이는 점(칸 좌표). 이 점을 바닥 위의 서 있을 자리에 맞춘다.
     pub fn foot(&self) -> (i32, i32) {
-        let (x, y) = self.pack.character().foot;
-        (x as i32, y as i32)
+        let character = self.pack.character();
+        (character.pivot.0 as i32, character.foot_y as i32)
     }
 
     /// 이름으로 동작을 찾아, 그 동작의 장 번호들을 재생 순서대로 돌려준다.

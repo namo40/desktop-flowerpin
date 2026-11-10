@@ -43,8 +43,12 @@ impl Header {
 pub struct Character {
     /// 칸 한 변의 길이. 모든 장은 이 칸 안의 좌표로 자리가 정해져 있다.
     pub cell: u16,
-    /// 발바닥이 놓이는 점. 이 점을 바닥 위의 서 있을 자리에 맞춘다.
-    pub foot: (u16, u16),
+    /// 바닥 점. 발밑 가운데이고, 바닥에 지는 그림자의 가운데다.
+    pub pivot: (u16, u16),
+    /// 서 있을 때 발바닥의 y. 바닥선(작업표시줄의 윗변 등)에 맞춘다.
+    pub foot_y: u16,
+    /// 잡는 점(뒷덜미). 잡아 올리면 이 점이 커서에 온다.
+    pub hold: (u16, u16),
     /// 걸터앉는 그림이 올라앉은 단의 윗면이 시작하는 y.
     pub ledge_top: u16,
     /// 그 단의 앞 모서리 y.
@@ -63,6 +67,10 @@ pub struct Motion {
     pub frame_count: usize,
     /// 몸을 띄우기 시작하는 시각(ms). 점프 동작에만 있다.
     pub launch_ms: Option<u16>,
+    /// 발 자리 보정(px). 그림을 이만큼 옆으로 옮겨 그려야 발이 서 있을 때와 같은 자리에 온다.
+    pub foot_shift: i8,
+    /// 한 바퀴를 재생하는 동안 가는 거리(px). 걷는 동작에만 있고, 제자리 동작은 0이다.
+    pub stride: u16,
     /// 이 동작의 팔레트. 미리 곱한 알파의 BGRA(0xAARRGGBB)라, 창 버퍼에 그대로 쓸 수 있다.
     pub palette: [u32; 256],
 }
@@ -156,7 +164,9 @@ impl<'a> Pack<'a> {
         let mut reader = Reader { bytes: &toc, at: 0 };
         let character = Character {
             cell: reader.u16()?,
-            foot: (reader.u16()?, reader.u16()?),
+            pivot: (reader.u16()?, reader.u16()?),
+            foot_y: reader.u16()?,
+            hold: (reader.u16()?, reader.u16()?),
             ledge_top: reader.u16()?,
             ledge_front: reader.u16()?,
         };
@@ -173,11 +183,23 @@ impl<'a> Pack<'a> {
             let next = Some(reader.u16()?).filter(|&next| next != NO_MOTION);
             let count = reader.u16()? as usize;
             let launch_ms = Some(reader.u16()?).filter(|&ms| ms != 0);
+            let foot_shift = reader.u8()? as i8;
+            let stride = reader.u16()?;
             if next.is_some_and(|next| next as usize >= motion_count) {
                 return Err(PackError::BadFormat);
             }
             let looping = flags & MOTION_FLAG_LOOP != 0;
-            motions.push(Motion { name, looping, next, first_frame, frame_count: count, launch_ms, palette: [0; 256] });
+            motions.push(Motion {
+                name,
+                looping,
+                next,
+                first_frame,
+                frame_count: count,
+                launch_ms,
+                foot_shift,
+                stride,
+                palette: [0; 256],
+            });
             first_frame += count;
         }
         // 동작들의 장 수를 더하면 장 표의 길이와 같아야 한다.

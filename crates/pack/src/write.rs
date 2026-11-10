@@ -33,6 +33,10 @@ pub struct MotionSource {
     /// 이 동작 뒤에 이어지는 동작의 이름.
     pub next: Option<String>,
     pub launch_ms: Option<u16>,
+    /// 발 자리 보정(px). 그림을 이만큼 옆으로 옮겨 그려야 발이 서 있을 때와 같은 자리에 온다.
+    pub foot_shift: i8,
+    /// 한 바퀴를 재생하는 동안 가는 거리(px). 제자리 동작은 0이다.
+    pub stride: u16,
     /// 256색 팔레트. 색마다 R, G, B, A이고 알파를 곱하지 않은 값이다.
     pub palette: [[u8; 4]; 256],
     pub frames: Vec<FrameSource>,
@@ -198,7 +202,17 @@ pub fn write_pack(
 
     let mut toc = Vec::new();
     let character = &source.character;
-    for value in [character.cell, character.foot.0, character.foot.1, character.ledge_top, character.ledge_front] {
+    let character_values = [
+        character.cell,
+        character.pivot.0,
+        character.pivot.1,
+        character.foot_y,
+        character.hold.0,
+        character.hold.1,
+        character.ledge_top,
+        character.ledge_front,
+    ];
+    for value in character_values {
         toc.extend_from_slice(&value.to_le_bytes());
     }
     toc.extend_from_slice(&(source.motions.len() as u16).to_le_bytes());
@@ -220,6 +234,8 @@ pub fn write_pack(
         toc.extend_from_slice(&next.to_le_bytes());
         toc.extend_from_slice(&(motion.frames.len() as u16).to_le_bytes());
         toc.extend_from_slice(&motion.launch_ms.unwrap_or(0).to_le_bytes());
+        toc.push(motion.foot_shift as u8);
+        toc.extend_from_slice(&motion.stride.to_le_bytes());
     }
     for motion in &source.motions {
         toc.extend(motion.palette.iter().flatten());
@@ -270,7 +286,7 @@ mod tests {
     const OPTIONS: WriteOptions = WriteOptions { key_id: 7, zstd_level: 3, dict_size: 0 };
 
     fn character() -> Character {
-        Character { cell: 16, foot: (8, 14), ledge_top: 10, ledge_front: 13 }
+        Character { cell: 16, pivot: (8, 13), foot_y: 14, hold: (8, 7), ledge_top: 10, ledge_front: 13 }
     }
 
     /// 번호가 곧 색인 팔레트. `seed`에 따라 색이 다르다.
@@ -290,6 +306,8 @@ mod tests {
             looping: true,
             next: None,
             launch_ms: None,
+            foot_shift: -4,
+            stride: 40,
             palette: palette(1),
             frames: vec![frame(2, 3, 5, 6, 41, 0), frame(1, 1, 8, 9, 42, 1), frame(2, 3, 5, 6, 250, 0)],
         };
@@ -298,6 +316,8 @@ mod tests {
             looping: false,
             next: Some("landing".into()),
             launch_ms: Some(750),
+            foot_shift: 0,
+            stride: 0,
             palette: palette(2),
             frames: vec![frame(0, 0, 16, 16, 42, 9)],
         };
@@ -306,6 +326,8 @@ mod tests {
             looping: false,
             next: Some("stand".into()),
             launch_ms: None,
+            foot_shift: 5,
+            stride: 0,
             palette: palette(3),
             frames: vec![frame(4, 4, 3, 3, 83, 5), frame(15, 15, 1, 1, 208, 6)],
         };
@@ -331,6 +353,7 @@ mod tests {
             assert_eq!(motion.looping, expected.looping);
             assert_eq!(motion.next.map(|next| pack.motions()[next as usize].name.clone()), expected.next);
             assert_eq!(motion.launch_ms, expected.launch_ms);
+            assert_eq!((motion.foot_shift, motion.stride), (expected.foot_shift, expected.stride));
             assert_eq!(motion.first_frame, frame_id);
             assert_eq!(motion.frame_count, expected.frames.len());
             assert!(motion.palette.iter().zip(&expected.palette).all(|(&read, &raw)| read == premultiply(raw)));
@@ -405,8 +428,8 @@ mod tests {
         other_magic[0] = b'X';
         assert_eq!(Pack::open(&other_magic, &DEV_KEY).err(), Some(PackError::BadFormat));
         let mut other_version = bytes.clone();
-        other_version[4] = 2;
-        assert_eq!(Pack::open(&other_version, &DEV_KEY).err(), Some(PackError::UnsupportedVersion(2)));
+        other_version[4] = 1;
+        assert_eq!(Pack::open(&other_version, &DEV_KEY).err(), Some(PackError::UnsupportedVersion(1)));
         // 덩어리 구역이 잘린 팩은 장 표가 가리키는 자리가 없으므로 열리지 않는다.
         assert_eq!(Pack::open(&bytes[..bytes.len() - 1], &DEV_KEY).err(), Some(PackError::BadFormat));
     }
@@ -459,11 +482,20 @@ mod tests {
             looping: true,
             next: None,
             launch_ms: None,
+            foot_shift: 0,
+            stride: 0,
             palette: palette(4),
             frames,
         };
         let source = PackSource {
-            character: Character { cell: 64, foot: (32, 60), ledge_top: 0, ledge_front: 0 },
+            character: Character {
+                cell: 64,
+                pivot: (32, 56),
+                foot_y: 60,
+                hold: (32, 30),
+                ledge_top: 0,
+                ledge_front: 0,
+            },
             placeholder: true,
             motions: vec![motion],
         };
