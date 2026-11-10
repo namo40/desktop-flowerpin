@@ -11,35 +11,28 @@
 //! 그때 저장된 값으로 고쳐 적는다([`SettingsWindow::tidy`]).
 
 use std::cell::RefCell;
-use std::ffi::c_void;
 use std::fmt::Write as _;
 use std::path::Path;
 use std::ptr::{null, null_mut};
-use std::sync::Once;
 
-use windows_sys::Win32::Foundation::{HWND, LPARAM, POINT, RECT, WPARAM};
-use windows_sys::Win32::Graphics::Gdi::{
-    BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CreateCompatibleDC, CreateDIBSection, DIB_RGB_COLORS, DeleteDC, DeleteObject,
-    GetDC, MapWindowPoints, ReleaseDC, SelectObject,
-};
-use windows_sys::Win32::Storage::Xps::PrintWindow;
+use windows_sys::Win32::Foundation::{HWND, LPARAM, RECT, WPARAM};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::Controls::{
-    EnableThemeDialogTexture, ICC_STANDARD_CLASSES, ICC_TAB_CLASSES, INITCOMMONCONTROLSEX, InitCommonControlsEx, NMHDR,
-    TCIF_TEXT, TCITEMW, TCM_ADJUSTRECT, TCM_GETCURSEL, TCM_INSERTITEMW, TCM_SETCURSEL, TCN_SELCHANGE,
+    EnableThemeDialogTexture, NMHDR, TCIF_TEXT, TCITEMW, TCM_ADJUSTRECT, TCM_GETCURSEL, TCM_INSERTITEMW, TCM_SETCURSEL,
+    TCN_SELCHANGE,
 };
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     EnableWindow, GetKeyState, SetFocus, VK_CONTROL, VK_SHIFT, VK_TAB,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     BM_GETCHECK, BM_SETCHECK, BN_CLICKED, CB_ADDSTRING, CB_GETCURSEL, CB_RESETCONTENT, CB_SETCURSEL, CBN_SELCHANGE,
-    CreateDialogParamW, DestroyIcon, DestroyWindow, EN_CHANGE, EN_KILLFOCUS, GW_CHILD, GW_HWNDNEXT, GetClassNameW,
-    GetClientRect, GetDlgCtrlID, GetDlgItem, GetNextDlgTabItem, GetWindow, GetWindowRect, GetWindowTextW, HICON,
-    IsDialogMessageW, MSG, MapDialogRect, STM_SETICON, SW_HIDE, SW_SHOW, SW_SHOWNA, SWP_NOACTIVATE, SWP_NOSIZE,
-    SWP_NOZORDER, SendDlgItemMessageW, SendMessageW, SetDlgItemTextW, SetForegroundWindow, SetWindowPos, ShowWindow,
-    WM_CLOSE, WM_COMMAND, WM_KEYDOWN, WM_NOTIFY,
+    CreateDialogParamW, DestroyIcon, DestroyWindow, EN_CHANGE, EN_KILLFOCUS, GetClientRect, GetDlgCtrlID, GetDlgItem,
+    GetNextDlgTabItem, GetWindowRect, GetWindowTextW, HICON, IsDialogMessageW, MSG, MapDialogRect, STM_SETICON,
+    SW_HIDE, SW_SHOW, SW_SHOWNA, SWP_NOACTIVATE, SendDlgItemMessageW, SendMessageW, SetDlgItemTextW,
+    SetForegroundWindow, SetWindowPos, ShowWindow, WM_CLOSE, WM_COMMAND, WM_KEYDOWN, WM_NOTIFY,
 };
 
+use crate::dialog::{self, rect_in, resource};
 use crate::links::LINKS;
 use crate::settings::{self, Key, Settings};
 use crate::win::wide;
@@ -164,21 +157,6 @@ pub fn take_events() -> Vec<DialogEvent> {
     EVENTS.with(|events| std::mem::take(&mut *events.borrow_mut()))
 }
 
-/// 리소스 번호를 Win32가 받는 모양으로 바꾼다.
-fn resource(id: u16) -> *const u16 {
-    id as usize as *const u16
-}
-
-/// `child`가 `parent` 안에서 차지하는 범위.
-fn rect_in(parent: HWND, child: HWND) -> RECT {
-    let mut r = RECT { left: 0, top: 0, right: 0, bottom: 0 };
-    unsafe {
-        GetWindowRect(child, &mut r);
-        MapWindowPoints(null_mut(), parent, &mut r as *mut RECT as *mut POINT, 2);
-    }
-    r
-}
-
 pub struct SettingsWindow {
     hwnd: HWND,
     tabs: HWND,
@@ -199,15 +177,7 @@ impl SettingsWindow {
         version: &str,
     ) -> Option<SettingsWindow> {
         // 탭 컨트롤을 쓰려면 공용 컨트롤을 한 번 준비시켜야 한다.
-        static ONCE: Once = Once::new();
-        ONCE.call_once(|| {
-            let classes = INITCOMMONCONTROLSEX {
-                dwSize: size_of::<INITCOMMONCONTROLSEX>() as u32,
-                dwICC: ICC_TAB_CLASSES | ICC_STANDARD_CLASSES,
-            };
-            unsafe { InitCommonControlsEx(&classes) };
-        });
-
+        dialog::prepare();
         let instance = unsafe { GetModuleHandleW(null()) };
         // 주인 창을 두지 않는다. 그래야 작업표시줄에 보이고, 다른 창 뒤로 가도 다시 찾기 쉽다.
         let hwnd = unsafe { CreateDialogParamW(instance, resource(DIALOG), null_mut(), Some(main_proc), 0) };
@@ -272,12 +242,7 @@ impl SettingsWindow {
             EnableWindow(window.item(ID_OPEN_PROJECT), 0);
         }
 
-        // 창의 가운데를 `center`에 맞춘다.
-        let mut frame = RECT { left: 0, top: 0, right: 0, bottom: 0 };
-        unsafe { GetWindowRect(hwnd, &mut frame) };
-        let (x, y) = (center.0 - (frame.right - frame.left) / 2, center.1 - (frame.bottom - frame.top) / 2);
-        unsafe { SetWindowPos(hwnd, null_mut(), x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE) };
-
+        dialog::center_on(hwnd, center);
         window.show_tab(tab.min(TAB_NAMES.len() - 1));
         unsafe {
             ShowWindow(hwnd, SW_SHOW);
@@ -509,70 +474,14 @@ impl SettingsWindow {
             writeln!(text, "지금 탭 {} ({}), Tab 순서: {}", self.current, TAB_NAMES[self.current], order.join(" > "));
         for (i, page) in self.pages.iter().enumerate() {
             let _ = writeln!(text, "[{}]", TAB_NAMES[i]);
-            let mut child = unsafe { GetWindow(*page, GW_CHILD) };
-            while !child.is_null() {
-                let r = rect_in(*page, child);
-                let (mut class, mut label) = ([0u16; 32], [0u16; 96]);
-                let (class_len, label_len) = unsafe {
-                    (
-                        GetClassNameW(child, class.as_mut_ptr(), 32) as usize,
-                        GetWindowTextW(child, label.as_mut_ptr(), 96) as usize,
-                    )
-                };
-                let _ = writeln!(
-                    text,
-                    "{}\t{}\t{}\t{}\t{}\t{}\t{}",
-                    String::from_utf16_lossy(&class[..class_len]),
-                    unsafe { GetDlgCtrlID(child) },
-                    r.left,
-                    r.top,
-                    r.right - r.left,
-                    r.bottom - r.top,
-                    String::from_utf16_lossy(&label[..label_len])
-                );
-                child = unsafe { GetWindow(child, GW_HWNDNEXT) };
-            }
+            dialog::describe_children(*page, &mut text);
         }
         let _ = std::fs::write(path, text);
     }
 
-    /// 창을 그림(BMP)으로 저장한다. 다른 창에 가려 있어도 된다. 만드는 동안 눈으로 확인하는 데 쓴다.
+    /// 창을 그림(BMP)으로 저장한다. 만드는 동안 눈으로 확인하는 데 쓴다.
     pub fn shot(&self, path: &Path) {
-        let mut frame = RECT { left: 0, top: 0, right: 0, bottom: 0 };
-        unsafe { GetWindowRect(self.hwnd, &mut frame) };
-        let (width, height) = (frame.right - frame.left, frame.bottom - frame.top);
-        let mut info: BITMAPINFO = unsafe { std::mem::zeroed() };
-        info.bmiHeader.biSize = size_of::<BITMAPINFOHEADER>() as u32;
-        info.bmiHeader.biWidth = width;
-        info.bmiHeader.biHeight = -height;
-        info.bmiHeader.biPlanes = 1;
-        info.bmiHeader.biBitCount = 32;
-        info.bmiHeader.biCompression = BI_RGB;
-        unsafe {
-            let screen = GetDC(null_mut());
-            let mut bits: *mut c_void = null_mut();
-            let bitmap = CreateDIBSection(screen, &info, DIB_RGB_COLORS, &mut bits, null_mut(), 0);
-            let memory = CreateCompatibleDC(screen);
-            if !bitmap.is_null() && !bits.is_null() {
-                let old = SelectObject(memory, bitmap);
-                // 2는 화면에 그려진 그대로(테마 포함) 찍으라는 뜻이다(PW_RENDERFULLCONTENT).
-                PrintWindow(self.hwnd, memory, 2);
-                let pixels = std::slice::from_raw_parts(bits as *const u8, (width * height * 4) as usize);
-                let header = std::slice::from_raw_parts(&info.bmiHeader as *const BITMAPINFOHEADER as *const u8, 40);
-                let mut file = Vec::with_capacity(54 + pixels.len());
-                file.extend_from_slice(b"BM");
-                file.extend_from_slice(&(54 + pixels.len() as u32).to_le_bytes());
-                file.extend_from_slice(&0u32.to_le_bytes());
-                file.extend_from_slice(&54u32.to_le_bytes());
-                file.extend_from_slice(header);
-                file.extend_from_slice(pixels);
-                let _ = std::fs::write(path, file);
-                SelectObject(memory, old);
-                DeleteObject(bitmap);
-            }
-            DeleteDC(memory);
-            ReleaseDC(null_mut(), screen);
-        }
+        dialog::shot(self.hwnd, path);
     }
 }
 

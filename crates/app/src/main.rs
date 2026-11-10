@@ -12,6 +12,7 @@ mod checker;
 mod clock;
 mod desktop;
 mod dev;
+mod dialog;
 mod frames;
 mod geom;
 mod key;
