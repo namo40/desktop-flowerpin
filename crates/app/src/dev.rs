@@ -1,7 +1,7 @@
 //! 만드는 동안 확인하고 재는 데 쓰는 실행 인자. 배포판의 기능이 아니다.
 //!
 //! ```text
-//! DesktopFlowerpin.exe [--for 초] [--report 파일] [--check-screen] [--size 퍼센트] [--dpi 값]
+//! DesktopFlowerpin.exe [--for 초] [--report 파일] [--check-screen] [--size 퍼센트] [--dpi 값] [--characters 수]
 //! ```
 //!
 //! - `--for 초`: 정한 시간이 지나면 스스로 끝낸다.
@@ -11,6 +11,9 @@
 //! - `--size 퍼센트`: 꽃핀 크기(75, 100, 125). 설정 창이 생기기 전까지 크기를 바꿔 보는 방법이다.
 //! - `--dpi 값`: 모니터 DPI를 이 값으로 친다(144면 배율 150%). 배율이 큰 모니터가 없어도
 //!   그 배율의 그림을 확인할 수 있다.
+//! - `--characters 수`: 꽃핀을 여러 명 띄운다. 여러 명일 때의 메모리와 CPU를 재는 데 쓴다.
+//!
+//! `--for`를 [`WARM_UP`]보다 길게 주면, 그 뒤부터 끝날 때까지 쓴 메모리와 CPU를 보고서에 적는다.
 
 use std::ffi::c_void;
 use std::path::PathBuf;
@@ -22,6 +25,11 @@ use windows_sys::Win32::Graphics::Gdi::{
     BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BitBlt, CAPTUREBLT, CreateCompatibleDC, CreateDIBSection, DIB_RGB_COLORS,
     DeleteDC, DeleteObject, GetDC, ReleaseDC, SRCCOPY, SelectObject,
 };
+use windows_sys::Win32::System::ProcessStatus::{
+    K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS, PROCESS_MEMORY_COUNTERS_EX2,
+};
+use windows_sys::Win32::System::Threading::GetCurrentProcess;
+use windows_sys::Win32::System::WindowsProgramming::QueryProcessCycleTime;
 use windows_sys::Win32::UI::WindowsAndMessaging::WindowFromPoint;
 
 use crate::character_window::CharacterWindow;
@@ -33,6 +41,7 @@ pub struct Options {
     pub check_screen: bool,
     pub size: u32,
     pub dpi: Option<u32>,
+    pub characters: usize,
 }
 
 impl Options {
@@ -45,6 +54,7 @@ impl Options {
             check_screen: args.iter().any(|a| a == "--check-screen"),
             size: value("--size").and_then(|s| s.parse().ok()).unwrap_or(100),
             dpi: value("--dpi").and_then(|s| s.parse().ok()),
+            characters: value("--characters").and_then(|s| s.parse().ok()).unwrap_or(1).max(1),
         }
     }
 }
@@ -74,11 +84,12 @@ pub fn receives_click(hwnd: HWND, screen_x: i32, screen_y: i32) -> bool {
 }
 
 /// 장이 제때 넘어가는지 재는 도구. 장을 넘길 때마다 시각과 걸린 시간을 받아 모은다.
+/// 여러 명이면 모든 꽃핀의 장을 한 번 넘기는 것을 하나로 센다.
 #[derive(Default)]
 pub struct Pace {
     last: Option<Instant>,
     intervals_ms: Vec<f64>,
-    /// 장 하나를 꺼내 그려 화면에 넘기는 데 걸린 시간(µs).
+    /// 장을 꺼내 그려 화면에 넘기는 데 걸린 시간(µs). 여러 명이면 모든 꽃핀의 몫을 더한 값이다.
     costs_us: Vec<f64>,
 }
 
@@ -100,7 +111,10 @@ impl Pace {
         let mut sorted = self.costs_us.clone();
         sorted.sort_by(f64::total_cmp);
         let mean = sorted.iter().sum::<f64>() / sorted.len() as f64;
-        format!("장 하나를 꺼내 그려 넘기는 데 가운데 값 {:.0} / 평균 {mean:.0} µs", sorted[sorted.len() / 2])
+        format!(
+            "장을 꺼내 그려 넘기는 데(모든 꽃핀의 몫) 가운데 값 {:.0} / 평균 {mean:.0} µs",
+            sorted[sorted.len() / 2]
+        )
     }
 
     /// 넘긴 장 수와 장 사이 간격(가장 짧은 것, 평균, 가장 긴 것)을 한 줄로 적는다.
@@ -200,4 +214,61 @@ fn capture_screen(rect: Rect) -> Option<Vec<u32>> {
         ReleaseDC(null_mut(), screen);
         pixels
     }
+}
+
+/// 시작하고 이만큼 지난 뒤부터 CPU를 잰다. 창을 만들고 처음 그리는 몫을 빼려는 것이다.
+pub const WARM_UP: Duration = Duration::from_secs(3);
+
+/// 앱이 쓴 메모리와 CPU를 재는 도구. 만든 때부터 [`Usage::summary`]를 부를 때까지를 잰다.
+///
+/// CPU는 프로세스가 실제로 쓴 CPU 사이클 수로 잰다. 흔히 쓰는 `GetProcessTimes`는 약 15.6ms마다
+/// 그 순간 돌고 있던 프로세스에 시간을 매기는데, 이 앱은 타이머에 맞춰 깨어나 잠깐 일하고 바로
+/// 자므로 그 순간에 거의 걸리지 않아 0%로 나온다.
+pub struct Usage {
+    since: Instant,
+    process_cycles: u64,
+    clock_cycles: u64,
+}
+
+impl Usage {
+    pub fn start() -> Usage {
+        Usage { since: Instant::now(), process_cycles: process_cycles(), clock_cycles: clock_cycles() }
+    }
+
+    /// 메모리는 작업 관리자의 "메모리(활성 개인 작업 집합)"와 같은 값이다. CPU는 한 코어를 100%로 본다.
+    pub fn summary(&self) -> String {
+        let (private, working_set) = memory();
+        let elapsed = self.since.elapsed().as_secs_f64();
+        // 같은 동안 프로세스가 쓴 사이클 수를 시계가 센 사이클 수로 나누면 한 코어에서 차지한 몫이다.
+        let used = (process_cycles() - self.process_cycles) as f64;
+        let passed = (clock_cycles() - self.clock_cycles).max(1) as f64;
+        let cpu = used / passed * 100.0;
+        const MIB: f64 = 1024.0 * 1024.0;
+        format!(
+            "메모리(개인 작업 집합) {:.2}MiB, 작업 집합 {:.2}MiB, CPU {cpu:.2}% (한 코어 대비, {elapsed:.1}초 동안)",
+            private as f64 / MIB,
+            working_set as f64 / MIB
+        )
+    }
+}
+
+/// 이 프로세스의 모든 스레드가 지금까지 쓴 CPU 사이클 수(커널에서 쓴 것도 들어간다).
+fn process_cycles() -> u64 {
+    let mut cycles = 0;
+    unsafe { QueryProcessCycleTime(GetCurrentProcess(), &mut cycles) };
+    cycles
+}
+
+/// CPU의 사이클 시계. 프로세스가 쓴 사이클 수와 같은 단위로 흐른다.
+fn clock_cycles() -> u64 {
+    unsafe { std::arch::x86_64::_rdtsc() }
+}
+
+/// 이 프로세스의 개인 작업 집합과 작업 집합(바이트).
+fn memory() -> (usize, usize) {
+    let mut counters: PROCESS_MEMORY_COUNTERS_EX2 = unsafe { std::mem::zeroed() };
+    counters.cb = size_of::<PROCESS_MEMORY_COUNTERS_EX2>() as u32;
+    let pointer = &mut counters as *mut PROCESS_MEMORY_COUNTERS_EX2 as *mut PROCESS_MEMORY_COUNTERS;
+    unsafe { K32GetProcessMemoryInfo(GetCurrentProcess(), pointer, counters.cb) };
+    (counters.PrivateWorkingSetSize, counters.WorkingSetSize)
 }

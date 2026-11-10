@@ -29,17 +29,16 @@ fn main() {
     let mut report = dev::Report::default();
     win::enable_per_monitor_dpi();
 
-    // 서 있을 자리: 작업표시줄 바로 위, 화면 가운데.
+    // 서 있을 바닥: 작업표시줄 바로 위.
     let work = win::primary_work_area();
-    let floor = (work.x + work.w / 2, work.bottom());
 
     match Frames::load() {
         Ok(Some(mut frames)) => {
-            if let Err(error) = run(&mut frames, floor, &options, &mut report) {
+            if let Err(error) = run(&mut frames, work, &options, &mut report) {
                 win::fatal(&format!("{error}."));
             }
         }
-        Ok(None) => run_test_pattern(floor, &options, &mut report),
+        Ok(None) => run_test_pattern((work.x + work.w / 2, work.bottom()), &options, &mut report),
         Err(error) => win::fatal(&format!("{error}.")),
     }
     report.write(&options);
@@ -48,7 +47,7 @@ fn main() {
 /// 꽃핀을 띄우고, 끝내라고 할 때까지 idle2를 되풀이해 재생한다.
 fn run(
     frames: &mut Frames,
-    floor: (i32, i32),
+    work: Rect,
     options: &dev::Options,
     report: &mut dev::Report,
 ) -> Result<(), dfp_pack::temp::PackError> {
@@ -56,14 +55,24 @@ fn run(
     let dpi = options.dpi.unwrap_or_else(win::system_dpi);
     let scale = Scale::new(options.size, dpi);
     let idle2 = frames.motion_frames(frames::MOTION_IDLE2);
-    let mut character = Character::new(frames, idle2, 0, scale, floor, Instant::now())?;
-    report.add(format!("배율 {scale} (크기 {}%, DPI {dpi})", options.size));
-    report.add(format!("창 {}x{}", character.window().width(), character.window().height()));
+
+    // 바닥에 고르게 늘어세운다. 모두 같은 시각에 장을 넘기게 해서, 장마다 한 번만 깨어난다.
+    // 꽃핀마다 다른 장에서 시작해 서로 다른 그림을 보여 준다.
+    let started = Instant::now();
+    let count = options.characters as i32;
+    let mut characters = Vec::new();
+    for i in 0..count {
+        let floor = (work.x + work.w * (i + 1) / (count + 1), work.bottom());
+        characters.push(Character::new(frames, idle2.clone(), i as usize * 5, scale, floor, started)?);
+    }
+    report.add(format!("꽃핀 {count}명, 배율 {scale} (크기 {}%, DPI {dpi})", options.size));
+    report.add(format!("창 {}x{}", characters[0].window().width(), characters[0].window().height()));
 
     let timer = WakeTimer::new();
     let mut pace = dev::Pace::default();
-    let mut screen_check = options.check_screen.then(|| dev::ScreenCheck::new(Instant::now()));
-    let deadline = options.run_for.map(|d| Instant::now() + d);
+    let mut screen_check = options.check_screen.then(|| dev::ScreenCheck::new(started));
+    let mut usage = None;
+    let deadline = options.run_for.map(|d| started + d);
     loop {
         if !win::pump_messages() {
             break;
@@ -72,24 +81,34 @@ fn run(
         if deadline.is_some_and(|d| now >= d) {
             break;
         }
-        // 다음 장을 그리기 바로 전에, 앞 장이 화면에 제대로 나와 있는지 본다.
-        if let Some(check) = &mut screen_check
-            && now >= character.due()
-        {
-            check.sample(character.window(), now);
+        if usage.is_none() && now >= started + dev::WARM_UP {
+            usage = Some(dev::Usage::start());
         }
-        let started = Instant::now();
-        if character.tick(frames, now)? {
-            pace.frame_shown(now, started.elapsed());
+        // 다음 장을 그리기 바로 전에, 앞 장이 화면에 제대로 나와 있는지 본다. 첫 꽃핀만 본다.
+        if let Some(check) = &mut screen_check
+            && now >= characters[0].due()
+        {
+            check.sample(characters[0].window(), now);
+        }
+        let tick_started = Instant::now();
+        let mut shown = false;
+        for character in &mut characters {
+            shown |= character.tick(frames, now)?;
+        }
+        if shown {
+            pace.frame_shown(now, tick_started.elapsed());
         }
         // 다음 장 시각까지 잔다. 끝낼 시각이 더 이르면 그때 깬다.
-        let wake = deadline.map_or(character.due(), |d| d.min(character.due()));
-        timer.sleep_until(Some(wake));
+        let due = characters.iter().map(Character::due).min().expect("꽃핀은 한 명 이상이다");
+        timer.sleep_until(Some(deadline.map_or(due, |d| d.min(due))));
     }
     report.add(pace.summary());
     report.add(pace.cost_summary());
     if let Some(check) = &screen_check {
         report.add(check.summary());
+    }
+    if let Some(usage) = &usage {
+        report.add(usage.summary());
     }
     Ok(())
 }
