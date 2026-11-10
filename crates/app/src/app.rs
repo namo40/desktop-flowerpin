@@ -17,9 +17,9 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     DispatchMessageW, MSG, PM_REMOVE, PeekMessageW, TranslateMessage, WM_QUIT,
 };
 
-use crate::actor::{Habits, Mode, Show};
+use crate::actor::{Habits, Mode, Rng, Show};
 use crate::bubble::{Bubble, Speech};
-use crate::character::{self, Character, Look};
+use crate::character::{self, Character, Look, Stay};
 use crate::character_window::{self, WindowEvent};
 use crate::checker::Checker;
 use crate::clock::WakeTimer;
@@ -80,6 +80,12 @@ const GREET_TAG: &str = "greet";
 const GREET_LIVE_TAG: &str = "greet-live";
 /// 처음 켰을 때의 인사가 떠 있는 시간. 인터넷을 쓴다는 안내는 클릭할 때까지 떠 있다.
 const GREET_LASTS: Duration = Duration::from_secs(12);
+/// 손을 흔들며 돌아가는 중인 꽃핀까지 쳐서, 꽃핀은 이만큼만 둔다. 잇달아 불러도 창이 끝없이 늘지 않는다.
+const WINDOW_LIMIT: usize = 18;
+/// 더 부른 꽃핀이 나타나는 자리. 모니터 작업 영역의 너비와 높이를 1로 볼 때, 양 끝에서 조금 떨어진
+/// 아무 데나의 위쪽 공중이다.
+const GUEST_ACROSS: (f64, f64) = (0.1, 0.9);
+const GUEST_DOWN: (f64, f64) = (0.2, 0.35);
 
 /// 마우스로 꽃핀에게 하고 있는 일.
 #[derive(Clone, Copy)]
@@ -200,6 +206,19 @@ pub struct App {
     desktop: Desktop,
     scanned: Option<Instant>,
     dev: Dev,
+}
+
+/// 꽃핀들을 뒤에 설 것부터 앞에 설 것까지 차례로 늘어놓는다. `guests`는 꽃핀마다 더 부른 꽃핀인지다.
+///
+/// 더 부른 꽃핀은 먼저 부른 것일수록 뒤에 서고, 기본 꽃핀은 그 앞에 선다. 잡고 있는 꽃핀은 맨 앞이다.
+fn stack_order(guests: &[bool], dragged: Option<usize>) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..guests.len()).filter(|&index| guests[index]).collect();
+    order.extend((0..guests.len()).rev().filter(|&index| !guests[index]));
+    if let Some(dragged) = dragged.filter(|&dragged| dragged < guests.len()) {
+        order.retain(|&index| index != dragged);
+        order.push(dragged);
+    }
+    order
 }
 
 thread_local! {
@@ -697,6 +716,160 @@ impl App {
         self.characters.iter().position(|character| character.window().hwnd() == hwnd)
     }
 
+    /// 기본 꽃핀. 끝내는 중에 먼저 사라졌으면 없다.
+    fn home(&self) -> Option<&Character> {
+        self.characters.first().filter(|character| character.stay() == Stay::Home)
+    }
+
+    /// 머무르고 있는, 더 부른 꽃핀들이 몇 번째인지. 먼저 부른 것부터다. 돌아가는 중인 꽃핀은 치지 않는다.
+    fn guests(&self) -> impl Iterator<Item = usize> + '_ {
+        let staying =
+            |character: &Character| matches!(character.stay(), Stay::Guest(_)) && !character.actor().is_leaving();
+        (0..self.characters.len()).filter(move |&index| staying(&self.characters[index]))
+    }
+
+    /// 머무르고 있는 꽃핀의 수. 기본 꽃핀도 세고, 돌아가는 중인 꽃핀은 세지 않는다.
+    fn staying(&self) -> usize {
+        self.characters.iter().filter(|character| !character.actor().is_leaving()).count()
+    }
+
+    /// 한 번에 나와 있을 수 있는 꽃핀의 수. 기본 꽃핀도 센다.
+    fn crowd_limit(&self) -> usize {
+        self.settings.number(Key::MaxCharacters).clamp(1, 9) as usize
+    }
+
+    /// 더 부른 꽃핀이 머무르는 시간. 보낼 때까지 머무르면 `None`이다.
+    fn stay_time(&self) -> Option<Duration> {
+        let seconds = self.settings.number(Key::Stay);
+        (seconds > 0).then(|| Duration::from_secs(seconds as u64))
+    }
+
+    /// 머무를 시간이 가장 먼저 끝나는 꽃핀의 그 시각.
+    fn guests_due(&self) -> Option<Instant> {
+        let stay = self.stay_time()?;
+        let leaves = |index: usize| match self.characters[index].stay() {
+            Stay::Guest(since) => Some(since + stay),
+            Stay::Home => None,
+        };
+        self.guests().filter_map(leaves).min()
+    }
+
+    /// 꽃핀을 하나 더 부를 수 있는가. 자리가 없어도 먼저 부른 꽃핀을 돌려보내면 부를 수 있다.
+    /// 한 번에 한 명만 두기로 했으면 부를 수 없다.
+    pub fn can_call(&self) -> bool {
+        self.quitting.is_none()
+            && self.characters.len() < WINDOW_LIMIT
+            && (self.staying() < self.crowd_limit() || self.guests().next().is_some())
+    }
+
+    /// 돌려보낼 꽃핀이 있는가.
+    pub fn can_send(&self) -> bool {
+        self.guests().next().is_some()
+    }
+
+    /// 메뉴를 띄운 꽃핀이 더 부른 꽃핀인가.
+    pub fn menu_on_guest(&self) -> bool {
+        self.menu_guest().is_some()
+    }
+
+    /// 메뉴를 띄운 꽃핀이 머무르고 있는, 더 부른 꽃핀이면 그 꽃핀이 몇 번째인지.
+    fn menu_guest(&self) -> Option<usize> {
+        let index = self.menu_target.and_then(|hwnd| self.find(hwnd))?;
+        self.guests().find(|&guest| guest == index)
+    }
+
+    /// 꽃핀을 하나 더 부른다. 메뉴를 띄운 꽃핀이 있는 모니터의 위쪽 공중에 나타나 떨어진다.
+    /// 트레이에서 불렀으면 기본 꽃핀이 있는 모니터다.
+    fn call_guest(&mut self, now: Instant) -> Result<(), PackError> {
+        if !self.can_call() {
+            return Ok(());
+        }
+        // 자리가 없으면 가장 먼저 부른 꽃핀부터 손을 흔들며 돌아간다.
+        while self.staying() >= self.crowd_limit() {
+            let Some(oldest) = self.guests().next() else { break };
+            self.send(oldest, now);
+        }
+        let work = match self.characters.get(self.menu_character()).map(|character| character.actor().position()) {
+            Some((x, y)) => self.stage.nearest(x.round() as i32, y.round() as i32 - 1).work,
+            None => self.stage.primary().work,
+        };
+        let mut rng = Rng::new(self.next_seed());
+        let spot = (
+            work.x as f64 + work.w as f64 * rng.range(GUEST_ACROSS),
+            work.y as f64 + work.h as f64 * rng.range(GUEST_DOWN),
+        );
+        let seed = self.next_seed();
+        let beats = (now, self.started);
+        let mut guest = Character::appear(&mut self.frames, &self.motions, &self.stage, self.look, spot, beats, seed)?;
+        guest.set_guest(now);
+        guest.actor_mut().set_away(self.away);
+        self.characters.push(guest);
+        self.apply_habits();
+        self.note(
+            now,
+            format!("꽃핀을 더 부름: 자리 ({:.0}, {:.0}), 모두 {}명", spot.0, spot.1, self.characters.len()),
+        );
+        Ok(())
+    }
+
+    /// 꽃핀 하나를 돌려보낸다. 손을 흔들고 사라진다. 공중에 있으면 내려와 선 뒤에 사라진다.
+    fn send(&mut self, index: usize, now: Instant) {
+        self.characters[index].actor_mut().leave(&self.motions);
+        self.characters[index].wake(now);
+        self.note(now, format!("꽃핀을 돌려보냄: {index}번"));
+    }
+
+    /// 더 부른 꽃핀을 모두 돌려보낸다.
+    fn send_all(&mut self, now: Instant) {
+        for index in self.guests().collect::<Vec<_>>() {
+            self.send(index, now);
+        }
+    }
+
+    /// 머무를 시간이 다 된 꽃핀을 돌려보낸다. 정해 둔 수보다 많이 나와 있으면 먼저 부른 꽃핀부터 돌려보낸다.
+    fn tend_guests(&mut self, now: Instant) {
+        if let Some(stay) = self.stay_time() {
+            for index in self.guests().collect::<Vec<_>>() {
+                if matches!(self.characters[index].stay(), Stay::Guest(since) if now >= since + stay) {
+                    self.send(index, now);
+                }
+            }
+        }
+        while self.staying() > self.crowd_limit() {
+            let Some(oldest) = self.guests().next() else { break };
+            self.send(oldest, now);
+        }
+    }
+
+    /// 꽃핀끼리의 앞뒤 차례를 맞춘다. 차례는 [`stack_order`]가 정한다.
+    fn restack(&mut self) {
+        let dragged = match self.pointer {
+            Pointer::Dragging { hwnd } => self.find(hwnd),
+            _ => None,
+        };
+        let guests: Vec<bool> =
+            self.characters.iter().map(|character| matches!(character.stay(), Stay::Guest(_))).collect();
+        let order = stack_order(&guests, dragged);
+        if self.look.topmost {
+            // 뒤에 설 꽃핀부터 차례로 맨 앞으로 올린다. 마지막에 올린 꽃핀이 맨 앞에 온다.
+            for &index in &order {
+                self.characters[index].keep_on_top();
+            }
+            if let Some(bubble) = &self.bubble {
+                bubble.window().set_topmost(true);
+            }
+        } else {
+            // 다른 창들 사이에서의 높이는 건드리지 않는다. 맨 앞에 설 꽃핀의 뒤로 나머지를 차례로 세운다.
+            for pair in order.windows(2).rev() {
+                let front = self.characters[pair[1]].window().hwnd();
+                self.characters[pair[0]].window().place_behind(front);
+            }
+        }
+        for character in &mut self.characters {
+            character.take_raised();
+        }
+    }
+
     /// 쌓여 있는 창 메시지를 모두 처리한다. 끝내라는 메시지를 받으면 `false`를 돌려준다.
     pub fn pump(&mut self) -> bool {
         let mut message: MSG = unsafe { std::mem::zeroed() };
@@ -774,6 +947,8 @@ impl App {
                             self.characters[i].wake(now);
                         }
                         self.pointer = Pointer::Idle;
+                        // 잡고 있던 꽃핀이 제 차례로 돌아간다.
+                        self.restack();
                     }
                     // 짧게 눌렀다 뗐다. 클릭이다.
                     Pointer::Pressing { hwnd: pressed, .. } if pressed == hwnd => {
@@ -838,9 +1013,8 @@ impl App {
                         let at = now.saturating_duration_since(self.started).as_secs_f64();
                         self.dev.notes.push(format!("{at:.2}초 맨 앞 창이 바뀌었다는 알림"));
                     }
-                    self.characters.iter().for_each(Character::keep_on_top);
-                    if let (Some(bubble), true) = (&self.bubble, self.look.topmost) {
-                        bubble.window().set_topmost(true);
+                    if self.look.topmost {
+                        self.restack();
                     }
                     // 창들의 앞뒤가 바뀌었을 것이다. 다음 걸음에서 바로 다시 읽는다.
                     self.scanned = None;
@@ -864,7 +1038,8 @@ impl App {
                     let work = self.stage.primary().work;
                     let spot = ((work.x + work.w / 2) as f64, (work.y + work.h * 3 / 10) as f64);
                     let seed = self.next_seed();
-                    let character = Character::appear(
+                    let stay = self.characters[i].stay();
+                    let mut character = Character::appear(
                         &mut self.frames,
                         &self.motions,
                         &self.stage,
@@ -873,6 +1048,10 @@ impl App {
                         (now, self.started),
                         seed,
                     )?;
+                    // 더 부른 꽃핀이었으면 머무를 시간은 그대로 이어진다.
+                    if let Stay::Guest(since) = stay {
+                        character.set_guest(since);
+                    }
                     self.characters[i] = character;
                     self.apply_habits();
                 }
@@ -888,6 +1067,11 @@ impl App {
             if away != self.away {
                 self.set_away(away, now);
             }
+        }
+
+        // 더 부른 꽃핀 가운데 머무를 시간이 다 된 것을 돌려보낸다.
+        if self.quitting.is_none() {
+            self.tend_guests(now);
         }
 
         // 5. 만드는 동안 확인용: 정한 시각에 시킨 일과 차례로 보여 줄 동작.
@@ -930,13 +1114,12 @@ impl App {
         }
 
         // 10. 기본 꽃핀이 내려앉은 자리를 기억해 둔다. 다시 켜면 그 위에 나타난다.
-        let first = self.characters[0].actor();
-        if first.mode() == Mode::Ground {
-            let spot = Some((first.home().round() as i32, first.position().1.round() as i32));
-            if self.state.character != spot {
-                self.state.character = spot;
-                self.store.state_changed(now);
-            }
+        let landed = self.home().map(Character::actor).filter(|home| home.mode() == Mode::Ground);
+        if let Some(spot) = landed.map(|home| (home.home().round() as i32, home.position().1.round() as i32))
+            && self.state.character != Some(spot)
+        {
+            self.state.character = Some(spot);
+            self.store.state_changed(now);
         }
 
         // 11. 설정 창이 열려 있으면 "지금 쓰는 자원"을 1초마다 고친다.
@@ -990,7 +1173,18 @@ impl App {
             self.dev.click_checked = true;
             self.dev.notes.push(dev::click_check(first.window()));
         }
+        let before = self.characters.len();
         self.characters.retain(|character| !character.actor().is_gone());
+        if self.characters.len() != before {
+            self.note(
+                now,
+                format!("꽃핀 {}명이 사라져 {}명 남음", before - self.characters.len(), self.characters.len()),
+            );
+        }
+        // 새로 나타났거나 걸터앉으려고 앞으로 나온 꽃핀이 있으면, 꽃핀끼리의 앞뒤 차례를 다시 맞춘다.
+        if self.characters.iter_mut().fold(false, |any, character| character.take_raised() | any) {
+            self.restack();
+        }
         self.update_bubble(now);
         Ok(!self.characters.is_empty())
     }
@@ -999,13 +1193,13 @@ impl App {
         self.bubble.as_ref().is_some_and(|bubble| bubble.window().hwnd() == hwnd)
     }
 
-    /// 말풍선을 때맞춰 띄우고 닫는다. 떠 있으면 첫 꽃핀의 머리를 따라가게 한다.
+    /// 말풍선을 때맞춰 띄우고 닫는다. 떠 있으면 기본 꽃핀의 머리를 따라가게 한다.
     fn update_bubble(&mut self, now: Instant) {
         if self.notices.is_over(now) {
             self.notices.dismiss();
             self.close_bubble(now);
         }
-        let Some(first) = self.characters.first() else {
+        let Some(first) = self.home() else {
             self.bubble = None;
             return;
         };
@@ -1060,7 +1254,9 @@ impl App {
 
     /// 꽃핀을 짧게 클릭했다.
     fn clicked(&mut self, index: usize, now: Instant) {
-        if self.bubble.is_some() {
+        // 말풍선은 기본 꽃핀의 것이다. 더 부른 꽃핀을 클릭했을 때는 그 꽃핀이 반응하기만 한다.
+        let home = index == 0 && self.home().is_some();
+        if home && self.bubble.is_some() {
             // 말풍선이 떠 있으면 클릭은 "봤다"는 뜻이다. 딸린 일(방송 열기 같은 것)은 하지 않고 닫는다.
             self.close_bubble(now);
             self.notices.dismiss();
@@ -1068,7 +1264,9 @@ impl App {
         }
         self.characters[index].actor_mut().poke(&self.motions);
         self.characters[index].wake(now);
-        self.show_held_memo();
+        if home {
+            self.show_held_memo();
+        }
     }
 
     /// 꽃핀이 들고 있는 메모를 말풍선으로 보여 준다. 여럿이면 클릭할 때마다 다음 것을 보여 준다.
@@ -1276,6 +1474,7 @@ impl App {
         sooner(self.live_due());
         sooner((self.memos.has_pending() && self.quitting.is_none()).then_some(self.next_memo_check));
         sooner(self.postits.due());
+        sooner(self.guests_due());
         sooner(self.dev.deadline);
         sooner(self.quitting);
         sooner(self.dev.script.front().map(|step| self.started + step.at));
@@ -1293,9 +1492,17 @@ impl App {
     }
 
     /// 메뉴에서 고른 것을 한다. 끝내야 하면 `true`를 돌려준다.
-    pub fn picked(&mut self, item: Option<MenuItem>, now: Instant) -> bool {
+    pub fn picked(&mut self, item: Option<MenuItem>, now: Instant) -> Result<bool, PackError> {
         match item {
-            Some(MenuItem::Quit) => return self.ask_quit(now),
+            Some(MenuItem::Quit) => return Ok(self.ask_quit(now)),
+            Some(MenuItem::CallOne) => self.call_guest(now)?,
+            Some(MenuItem::SendAll) => self.send_all(now),
+            // 고르는 사이에 그 꽃핀이 돌아갔으면 아무 일도 하지 않는다.
+            Some(MenuItem::SendThis) => {
+                if let Some(index) = self.menu_guest() {
+                    self.send(index, now);
+                }
+            }
             Some(MenuItem::Settings) => self.open_settings(),
             Some(MenuItem::Watch) => self.watch(now),
             Some(MenuItem::MemoNew) => self.new_memo(win::cursor_position()),
@@ -1310,7 +1517,7 @@ impl App {
             }
             None => {}
         }
-        false
+        Ok(false)
     }
 
     /// 메뉴에서 고른 행동을 할 꽃핀. 메뉴를 띄운 꽃핀이고, 트레이에서 띄웠거나 그 꽃핀이 없어졌으면 첫 꽃핀이다.
@@ -1387,6 +1594,8 @@ impl App {
             if self.characters[i].actor_mut().grab(&self.motions, target) {
                 self.characters[i].wake(now);
                 self.pointer = Pointer::Dragging { hwnd };
+                // 잡은 꽃핀이 다른 꽃핀들보다 앞에 보인다.
+                self.restack();
                 return;
             }
         }
@@ -1481,18 +1690,27 @@ impl App {
     /// 스크립트가 시킨 일을 한다. 만드는 동안 확인용이다.
     fn scripted(&mut self, command: dev::Command, now: Instant) -> Result<Flow, PackError> {
         let mut flow = Flow::Continue;
+        // 잡기, 끌기, 놓기, 클릭은 `target`으로 고른 꽃핀에게 한다. 고르지 않았으면 첫 꽃핀이다.
+        let who = self.menu_character();
         match command {
             dev::Command::Grab => {
-                self.dev.script_origin = self.characters[0].actor().position();
+                self.dev.script_origin = self.characters[who].actor().position();
                 let origin = self.dev.script_origin;
-                self.characters[0].actor_mut().grab(&self.motions, origin);
+                if self.characters[who].actor_mut().grab(&self.motions, origin) {
+                    self.pointer = Pointer::Dragging { hwnd: self.characters[who].window().hwnd() };
+                    self.restack();
+                }
             }
             dev::Command::Drag(dx, dy) => {
                 let wanted = (self.dev.script_origin.0 + dx, self.dev.script_origin.1 + dy);
-                let target = self.characters[0].drag_to_foot(wanted, &self.stage);
-                self.characters[0].actor_mut().drag_to(target);
+                let target = self.characters[who].drag_to_foot(wanted, &self.stage);
+                self.characters[who].actor_mut().drag_to(target);
             }
-            dev::Command::Release => self.characters[0].actor_mut().release(&self.motions),
+            dev::Command::Release => {
+                self.characters[who].actor_mut().release(&self.motions);
+                self.pointer = Pointer::Idle;
+                self.restack();
+            }
             dev::Command::Leave => flow = Flow::Quit,
             dev::Command::Roam(roam) => {
                 let habits = Habits { roam, ..self.characters[0].actor().habits() };
@@ -1503,7 +1721,7 @@ impl App {
                 let look = self.look;
                 self.characters.iter_mut().for_each(|character| character.set_look(look, now));
             }
-            dev::Command::Click => self.clicked(0, now),
+            dev::Command::Click => self.clicked(who, now),
             dev::Command::Rub(distance) => self.characters[0].actor_mut().rub(&self.motions, distance),
             dev::Command::Do(whim) => self.characters[0].actor_mut().start(whim, &self.motions),
             dev::Command::Away(on) => {
@@ -1550,8 +1768,31 @@ impl App {
                 self.postits.script(&step, &mut self.memos, shot.as_deref());
             }
             dev::Command::Menu(id) => {
-                if self.picked(MenuItem::from_id(id), now) {
+                if self.picked(MenuItem::from_id(id), now)? {
                     flow = Flow::Quit;
+                }
+            }
+            dev::Command::Target(index) => {
+                self.menu_target = self.characters.get(index).map(|character| character.window().hwnd());
+            }
+            dev::Command::Crowd => {
+                // 화면에서 앞에 있는 꽃핀부터 차례로 적는다. 창의 순서를 직접 읽은 것이다.
+                let windows: Vec<HWND> = self.characters.iter().map(|character| character.window().hwnd()).collect();
+                let front_first = dev::stacking(&windows);
+                let names: Vec<String> = front_first
+                    .iter()
+                    .map(|&index| match self.characters[index].stay() {
+                        Stay::Home => format!("{index}번(기본)"),
+                        Stay::Guest(_) if self.characters[index].actor().is_leaving() => format!("{index}번(가는 중)"),
+                        Stay::Guest(_) => format!("{index}번"),
+                    })
+                    .collect();
+                self.note(now, format!("꽃핀 {}명, 앞에서부터 {}", self.characters.len(), names.join(" ")));
+                self.dev.snaps += 1;
+                if let Some(path) = &self.dev.options.settings_shot {
+                    let back_first: Vec<_> =
+                        front_first.iter().rev().map(|&index| self.characters[index].window()).collect();
+                    dev::crowd_shot(&back_first, &dev::numbered(path, self.dev.snaps));
                 }
             }
             dev::Command::Settings(dialog) => {
@@ -1584,16 +1825,15 @@ impl App {
                 }
             }
         }
-        if let Some(first) = self.characters.first_mut() {
-            first.wake(now);
-        }
+        // 시킨 일이 바로 보이게 모두 깨운다.
+        self.characters.iter_mut().for_each(|character| character.wake(now));
         Ok(flow)
     }
 
     /// 끝낸다. 미뤄 둔 저장을 하고, 보고서에 적을 줄을 돌려준다.
     pub fn finish(mut self) -> Vec<String> {
         // 끌 때 꽃핀이 있던 자리를 기억한다. 공중에 있었으면 마지막으로 내려앉은 자리를 둔다.
-        if let Some(first) = self.characters.first().map(Character::actor)
+        if let Some(first) = self.home().map(Character::actor)
             && first.mode() == Mode::Ground
         {
             let (x, y) = first.position();
@@ -1632,5 +1872,36 @@ impl App {
         }
         lines.extend(self.dev.trace.lines());
         lines
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_home_character_stands_in_front_of_guests() {
+        // 기본 꽃핀 하나와 더 부른 꽃핀 셋. 먼저 부른 꽃핀일수록 뒤에 서고, 기본 꽃핀이 맨 앞이다.
+        let crowd = [false, true, true, true];
+        assert_eq!(stack_order(&crowd, None), [1, 2, 3, 0]);
+        // 잡고 있는 꽃핀은 누구든 맨 앞으로 나온다.
+        assert_eq!(stack_order(&crowd, Some(2)), [1, 3, 0, 2]);
+        assert_eq!(stack_order(&crowd, Some(0)), [1, 2, 3, 0]);
+        // 없는 꽃핀을 잡고 있다고 해도 차례가 흐트러지지 않는다.
+        assert_eq!(stack_order(&crowd, Some(9)), [1, 2, 3, 0]);
+        assert_eq!(stack_order(&[false], None), [0]);
+        assert!(stack_order(&[], None).is_empty());
+    }
+
+    #[test]
+    fn everyone_appears_once_in_the_order() {
+        // 확인용으로 처음부터 여러 명을 띄우면 모두 기본 꽃핀이다. 첫 꽃핀이 맨 앞에 선다.
+        assert_eq!(stack_order(&[false, false, false], None), [2, 1, 0]);
+        for dragged in [None, Some(0), Some(1), Some(4)] {
+            let mut order = stack_order(&[false, true, false, true, true], dragged);
+            assert_eq!(order.last().copied(), dragged.or(Some(0)));
+            order.sort_unstable();
+            assert_eq!(order, [0, 1, 2, 3, 4]);
+        }
     }
 }

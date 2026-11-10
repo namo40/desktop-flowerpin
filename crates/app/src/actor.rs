@@ -277,7 +277,7 @@ impl Rng {
         (self.next() >> 11) as f64 / (1u64 << 53) as f64
     }
 
-    fn range(&mut self, (low, high): (f64, f64)) -> f64 {
+    pub fn range(&mut self, (low, high): (f64, f64)) -> f64 {
         low + (high - low) * self.unit()
     }
 
@@ -794,6 +794,11 @@ impl Actor {
             Mode::Sit => self.stand_up(motions),
             _ => {}
         }
+    }
+
+    /// 사라지라는 말을 들었는가. 아직 손을 흔들기 전일 수도 있다.
+    pub fn is_leaving(&self) -> bool {
+        self.leaving
     }
 
     /// 동작 하나를 보여 준다. 끝나면 "다음 동작"을 따라가다 idle2로 돌아온다.

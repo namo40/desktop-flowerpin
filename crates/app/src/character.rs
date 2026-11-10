@@ -74,6 +74,15 @@ fn due_after(origin: Instant, from: Instant, wait: f64, smooth: bool) -> Instant
     }
 }
 
+/// 꽃핀이 어떻게 와 있는지.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Stay {
+    /// 기본 꽃핀. 앱을 끝낼 때까지 있다.
+    Home,
+    /// 더 부른 꽃핀과, 부른 시각. 머무를 시간이 지나거나 보내면 돌아간다.
+    Guest(Instant),
+}
+
 /// 꽃핀을 어떻게 보여 줄지에 대한 설정.
 #[derive(Clone, Copy, Debug)]
 pub struct Look {
@@ -162,6 +171,7 @@ pub struct Character {
     layout: Layout,
     look: Look,
     actor: Actor,
+    stay: Stay,
     shown: Option<Drawn>,
     /// 지금 창 버퍼에 그려져 있는 범위(창 좌표). 다음에 그리기 전에 여기만 지운다.
     drawn: Rect,
@@ -174,6 +184,8 @@ pub struct Character {
     moved: bool,
     /// 마지막 걸음에서 걸터앉아 있었는가.
     sitting: bool,
+    /// 창이 다른 꽃핀들보다 앞으로 나왔다. 꽃핀끼리의 앞뒤 차례를 다시 맞춰야 한다.
+    raised: bool,
     /// 올라설 수 있는 다른 창의 윗변들과, 그것을 계산했을 때의 조건. 조건이 달라졌을 때만 다시 계산한다.
     perches: Vec<Perch>,
     perches_for: Option<(u64, Rect, Body, bool)>,
@@ -228,6 +240,7 @@ impl Character {
             layout,
             look,
             actor,
+            stay: Stay::Home,
             shown: None,
             drawn: Rect::EMPTY,
             last: now,
@@ -235,6 +248,8 @@ impl Character {
             beat,
             moved: false,
             sitting: false,
+            // 새로 만든 창은 맨 앞에 놓인다.
+            raised: true,
             perches: Vec::new(),
             perches_for: None,
         };
@@ -258,6 +273,20 @@ impl Character {
 
     pub fn scale(&self) -> Scale {
         self.layout.scale
+    }
+
+    pub fn stay(&self) -> Stay {
+        self.stay
+    }
+
+    /// 더 부른 꽃핀으로 삼는다. `since`는 부른 시각이다.
+    pub fn set_guest(&mut self, since: Instant) {
+        self.stay = Stay::Guest(since);
+    }
+
+    /// 창이 다른 꽃핀들보다 앞으로 나온 적이 있는지 묻고, 물은 것으로 적는다.
+    pub fn take_raised(&mut self) -> bool {
+        std::mem::take(&mut self.raised)
     }
 
     /// 다음에 [`Character::tick`]을 불러야 할 시각.
@@ -295,6 +324,7 @@ impl Character {
     pub fn set_look(&mut self, look: Look, now: Instant) {
         if look.topmost != self.look.topmost {
             self.window.set_topmost(look.topmost);
+            self.raised = true;
         }
         self.look = look;
         self.wake(now);
@@ -411,6 +441,7 @@ impl Character {
         if sitting && !self.sitting {
             // 다리가 단 아래로 내려온다. 단(작업표시줄)보다 앞에 있어야 보인다.
             self.keep_on_top();
+            self.raised = true;
         }
         self.sitting = sitting;
         let rendered = self.render(frames, motions, &around);
@@ -439,6 +470,7 @@ impl Character {
         self.window = CharacterWindow::new(self.layout.size.0, self.layout.size.1, x, y, self.look.topmost);
         self.shown = None;
         self.drawn = Rect::EMPTY;
+        self.raised = true;
     }
 
     /// 지금 모습이 창에 그려진 것과 다르면 다시 그리고, 자리와 함께 화면에 넘긴다.

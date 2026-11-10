@@ -81,10 +81,17 @@ fn run(options: dev::Options) -> Result<Vec<String>, PackError> {
                 // 행동을 고르는 동안에는 그 꽃핀이 멈춰서 기다린다.
                 app.hold_for_menu(&shows);
                 let live = app.live_menu();
-                let item = app::run_modal(&mut app, || tray::pick(owner, x, y, &shows, live.as_ref()));
+                let state = tray::MenuState {
+                    shows: &shows,
+                    live: live.as_ref(),
+                    guest: app.menu_on_guest(),
+                    can_call: app.can_call(),
+                    can_send: app.can_send(),
+                };
+                let item = app::run_modal(&mut app, || tray::pick(owner, x, y, &state));
                 let now = Instant::now();
                 app.release_held(now);
-                if app.picked(item, now) {
+                if app.picked(item, now)? {
                     break;
                 }
             }

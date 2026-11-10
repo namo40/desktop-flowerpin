@@ -26,7 +26,7 @@ use windows_sys::Win32::UI::Shell::{
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreateIconIndirect, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyIcon, DestroyMenu,
-    DestroyWindow, FindWindowW, GetSystemMetrics, HICON, ICONINFO, KillTimer, MF_DISABLED, MF_GRAYED, MF_POPUP,
+    DestroyWindow, FindWindowW, GetSystemMetrics, HICON, HMENU, ICONINFO, KillTimer, MF_DISABLED, MF_GRAYED, MF_POPUP,
     MF_SEPARATOR, MF_STRING, PostMessageW, RegisterClassExW, RegisterWindowMessageW, SM_CXICON, SM_CXSMICON,
     SetForegroundWindow, SetTimer, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenuEx, WM_APP,
     WM_CONTEXTMENU, WM_LBUTTONDBLCLK, WM_NULL, WM_RBUTTONUP, WM_TIMER, WNDCLASSEXW, WS_POPUP,
@@ -61,6 +61,12 @@ pub enum MenuItem {
     MemoShow,
     /// 포스트잇을 다시 줄 세운다.
     MemoTidy,
+    /// 꽃핀을 하나 더 부른다.
+    CallOne,
+    /// 더 부른 꽃핀을 모두 돌려보낸다.
+    SendAll,
+    /// 메뉴를 띄운 꽃핀을 돌려보낸다. 더 부른 꽃핀의 메뉴에만 있다.
+    SendThis,
     /// 바로 가기. [`LINKS`]의 몇 번째인지다.
     Link(usize),
     /// 꽃핀에게 시켜서 볼 행동.
@@ -77,6 +83,9 @@ impl MenuItem {
             MenuItem::MemoNew => 4,
             MenuItem::MemoShow => 5,
             MenuItem::MemoTidy => 6,
+            MenuItem::CallOne => 7,
+            MenuItem::SendAll => 8,
+            MenuItem::SendThis => 9,
             MenuItem::Link(index) => 100 + index as u32,
             MenuItem::Show(show) => 200 + Show::ALL.iter().position(|&other| other == show).unwrap_or(0) as u32,
         }
@@ -90,6 +99,9 @@ impl MenuItem {
             4 => Some(MenuItem::MemoNew),
             5 => Some(MenuItem::MemoShow),
             6 => Some(MenuItem::MemoTidy),
+            7 => Some(MenuItem::CallOne),
+            8 => Some(MenuItem::SendAll),
+            9 => Some(MenuItem::SendThis),
             100.. if ((id - 100) as usize) < LINKS.len() => Some(MenuItem::Link((id - 100) as usize)),
             200.. if ((id - 200) as usize) < Show::ALL.len() => Some(MenuItem::Show(Show::ALL[(id - 200) as usize])),
             _ => None,
@@ -131,15 +143,46 @@ pub fn while_modal<T>(owner: HWND, tick: fn(), show: impl FnOnce() -> T) -> T {
     result
 }
 
+/// 메뉴를 띄울 때의 상황. 넣을 항목과 흐리게 할 항목이 여기에 달려 있다.
+pub struct MenuState<'a> {
+    /// "행동" 아래에 넣을 행동과, 지금 고를 수 있는지. 고를 수 없는 것은 흐리게 보인다.
+    pub shows: &'a [(Show, bool)],
+    /// 방송 중일 때의 방송 제목과 방송 정보 한 줄. 있으면 "● 방송 중"을 넣는다.
+    pub live: Option<&'a (String, String)>,
+    /// 더 부른 꽃핀을 오른쪽 클릭해서 띄웠다. 맨 위에 "이 꽃핀 보내기"를 넣는다.
+    pub guest: bool,
+    /// 꽃핀을 더 부를 수 있는가.
+    pub can_call: bool,
+    /// 돌려보낼 꽃핀이 있는가.
+    pub can_send: bool,
+}
+
 /// 화면의 `(x, y)`에 메뉴를 띄우고, 고른 것을 돌려준다. 메뉴가 닫힐 때까지 돌아오지 않는다.
 /// `owner`는 메뉴의 주인이 될 창([`Tray::hwnd`])이다.
-///
-/// `shows`는 "행동" 아래에 넣을 행동과, 지금 고를 수 있는지다. 고를 수 없는 것은 흐리게 보인다.
-/// `live`는 방송 중일 때의 방송 제목과 방송 정보 한 줄이다. 있으면 맨 위에 "● 방송 중"을 넣는다.
-pub fn pick(owner: HWND, x: i32, y: i32, shows: &[(Show, bool)], live: Option<&(String, String)>) -> Option<MenuItem> {
+pub fn pick(owner: HWND, x: i32, y: i32, state: &MenuState) -> Option<MenuItem> {
+    let menu = build(state)?;
+    unsafe {
+        // 메뉴를 띄우기 전에 주인 창을 앞으로 가져오고, 닫힌 뒤에 빈 메시지를 보낸다.
+        // 이렇게 하지 않으면 메뉴 밖을 눌러도 메뉴가 닫히지 않는다.
+        SetForegroundWindow(owner);
+        let flags = TPM_RIGHTBUTTON | TPM_RETURNCMD | TPM_NONOTIFY;
+        let picked = TrackPopupMenuEx(menu, flags, x, y, owner, null());
+        PostMessageW(owner, WM_NULL, 0, 0);
+        // 딸린 메뉴는 큰 메뉴와 함께 없어진다.
+        DestroyMenu(menu);
+        MenuItem::from_id(picked as u32)
+    }
+}
+
+/// 메뉴를 만든다. 다 쓰면 `DestroyMenu`로 없애야 한다.
+fn build(state: &MenuState) -> Option<HMENU> {
     unsafe {
         let menu = CreatePopupMenu();
-        if let Some((title, details)) = live {
+        if state.guest && !menu.is_null() {
+            AppendMenuW(menu, MF_STRING, MenuItem::SendThis.id() as usize, wide("이 꽃핀 보내기").as_ptr());
+            AppendMenuW(menu, MF_SEPARATOR, 0, null());
+        }
+        if let Some((title, details)) = state.live {
             let info = CreatePopupMenu();
             if !menu.is_null() && !info.is_null() {
                 // 위 두 줄은 읽기만 하는 줄이다. 메뉴에서 &는 밑줄 표시라서, 글자 그대로 보이게 겹쳐 적는다.
@@ -162,13 +205,17 @@ pub fn pick(owner: HWND, x: i32, y: i32, shows: &[(Show, bool)], live: Option<&(
         let add = |menu, item: MenuItem, label: &str| {
             AppendMenuW(menu, MF_STRING, item.id() as usize, wide(label).as_ptr());
         };
-        for (index, &(show, possible)) in shows.iter().enumerate() {
+        // 지금 할 수 없는 것은 흐리게 넣는다.
+        let add_if = |menu, possible: bool, item: MenuItem, label: &str| {
+            let flags = if possible { MF_STRING } else { MF_STRING | MF_GRAYED };
+            AppendMenuW(menu, flags, item.id() as usize, wide(label).as_ptr());
+        };
+        for (index, &(show, possible)) in state.shows.iter().enumerate() {
             // 혼자서도 하는 행동, 창을 오르내리는 행동, 사용자가 건드렸을 때의 반응을 줄로 나눈다.
             if index > 0 && matches!(show, Show::Climb | Show::Surprise) {
                 AppendMenuW(actions, MF_SEPARATOR, 0, null());
             }
-            let flags = if possible { MF_STRING } else { MF_STRING | MF_GRAYED };
-            AppendMenuW(actions, flags, MenuItem::Show(show).id() as usize, wide(show.label()).as_ptr());
+            add_if(actions, possible, MenuItem::Show(show), show.label());
         }
         for (index, link) in LINKS.iter().enumerate() {
             add(links, MenuItem::Link(index), link.name);
@@ -177,21 +224,16 @@ pub fn pick(owner: HWND, x: i32, y: i32, shows: &[(Show, bool)], live: Option<&(
         add(memos, MenuItem::MemoShow, "모두 앞으로 가져오기");
         add(memos, MenuItem::MemoTidy, "다시 줄 세우기");
         AppendMenuW(menu, MF_POPUP, actions as usize, wide("행동").as_ptr());
+        add_if(menu, state.can_call, MenuItem::CallOne, "꽃핀 하나 더");
+        add_if(menu, state.can_send, MenuItem::SendAll, "모두 보내기");
+        AppendMenuW(menu, MF_SEPARATOR, 0, null());
         AppendMenuW(menu, MF_POPUP, links as usize, wide("바로 가기").as_ptr());
         AppendMenuW(menu, MF_POPUP, memos as usize, wide("메모").as_ptr());
         AppendMenuW(menu, MF_SEPARATOR, 0, null());
         // 이름 끝의 "..."은 창이 열린다는 뜻이다.
         add(menu, MenuItem::Settings, "설정...");
         add(menu, MenuItem::Quit, "끝내기");
-        // 메뉴를 띄우기 전에 주인 창을 앞으로 가져오고, 닫힌 뒤에 빈 메시지를 보낸다.
-        // 이렇게 하지 않으면 메뉴 밖을 눌러도 메뉴가 닫히지 않는다.
-        SetForegroundWindow(owner);
-        let flags = TPM_RIGHTBUTTON | TPM_RETURNCMD | TPM_NONOTIFY;
-        let picked = TrackPopupMenuEx(menu, flags, x, y, owner, null());
-        PostMessageW(owner, WM_NULL, 0, 0);
-        // 딸린 메뉴는 큰 메뉴와 함께 없어진다.
-        DestroyMenu(menu);
-        MenuItem::from_id(picked as u32)
+        Some(menu)
     }
 }
 
@@ -525,11 +567,56 @@ mod tests {
         assert_eq!((String::from_utf16_lossy(&slot[..6]), slot[6]), ("abcdef".to_string(), 0));
     }
 
+    /// 메뉴의 줄을 위에서부터 읽는다. 줄마다 이름과, 흐린지다. 나누는 줄은 이름이 "-"다.
+    fn lines(menu: HMENU) -> Vec<(String, bool)> {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            GetMenuItemCount, GetMenuState, GetMenuStringW, MF_BYPOSITION,
+        };
+        let count = unsafe { GetMenuItemCount(menu) }.max(0) as u32;
+        (0..count)
+            .map(|at| {
+                let mut text = [0u16; 64];
+                let length = unsafe { GetMenuStringW(menu, at, text.as_mut_ptr(), text.len() as i32, MF_BYPOSITION) };
+                let state = unsafe { GetMenuState(menu, at, MF_BYPOSITION) };
+                let name = String::from_utf16_lossy(&text[..length.max(0) as usize]);
+                // 나누는 줄은 늘 흐린 것으로 읽힌다. 흐린 줄로 치지 않는다.
+                if state & MF_SEPARATOR != 0 { ("-".to_string(), false) } else { (name, state & MF_GRAYED != 0) }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_menu_lists_what_can_be_done_now() {
+        let shows = [(Show::Stretch, true), (Show::Sit, false)];
+        let state = |guest, can_call, can_send| MenuState { shows: &shows, live: None, guest, can_call, can_send };
+        let names = |state: &MenuState| {
+            let menu = build(state).expect("메뉴");
+            let read = lines(menu);
+            unsafe { DestroyMenu(menu) };
+            read.into_iter().map(|(name, grayed)| if grayed { format!("({name})") } else { name }).collect::<Vec<_>>()
+        };
+        // 기본 꽃핀의 메뉴. 보낼 꽃핀이 없으면 "모두 보내기"가 흐리다.
+        assert_eq!(
+            names(&state(false, true, false)),
+            ["행동", "꽃핀 하나 더", "(모두 보내기)", "-", "바로 가기", "메모", "-", "설정...", "끝내기"]
+        );
+        // 더 부른 꽃핀의 메뉴에는 맨 위에 "이 꽃핀 보내기"가 붙는다. 더 부를 수 없으면 "꽃핀 하나 더"가 흐리다.
+        assert_eq!(
+            names(&state(true, false, true))[..5],
+            ["이 꽃핀 보내기", "-", "행동", "(꽃핀 하나 더)", "모두 보내기"]
+        );
+        // 방송 중이면 방송 정보가 그 아래에 들어간다.
+        let live = ("제목 & 제목".to_string(), "게임 · 시청자 10명".to_string());
+        let on_air = MenuState { live: Some(&live), ..state(true, true, true) };
+        assert_eq!(names(&on_air)[..4], ["이 꽃핀 보내기", "-", "● 방송 중", "-"]);
+    }
+
     #[test]
     fn menu_numbers_are_unique_and_read_back() {
         let memos = [MenuItem::MemoNew, MenuItem::MemoShow, MenuItem::MemoTidy];
         let mut items = vec![MenuItem::Quit, MenuItem::Settings, MenuItem::Watch];
         items.extend(memos);
+        items.extend([MenuItem::CallOne, MenuItem::SendAll, MenuItem::SendThis]);
         items.extend((0..LINKS.len()).map(MenuItem::Link));
         items.extend(Show::ALL.map(MenuItem::Show));
         for (n, item) in items.iter().enumerate() {
@@ -538,7 +625,7 @@ mod tests {
             assert_eq!(MenuItem::from_id(item.id()), Some(*item));
             assert!(items[..n].iter().all(|other| other.id() != item.id()), "{item:?}");
         }
-        for id in [0, 7, 99, 100 + LINKS.len() as u32, 199, 200 + Show::ALL.len() as u32] {
+        for id in [0, 10, 99, 100 + LINKS.len() as u32, 199, 200 + Show::ALL.len() as u32] {
             assert_eq!(MenuItem::from_id(id), None, "{id}");
         }
     }

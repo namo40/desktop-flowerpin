@@ -41,7 +41,7 @@ use windows_sys::Win32::Graphics::Gdi::{
     BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BitBlt, CAPTUREBLT, CreateCompatibleDC, CreateDIBSection, DIB_RGB_COLORS,
     DeleteDC, DeleteObject, GetDC, ReleaseDC, SRCCOPY, SelectObject,
 };
-use windows_sys::Win32::UI::WindowsAndMessaging::WindowFromPoint;
+use windows_sys::Win32::UI::WindowsAndMessaging::{GW_HWNDNEXT, GetTopWindow, GetWindow, WindowFromPoint};
 
 use crate::actor::{Actor, Mode, Whim};
 use crate::character_window::CharacterWindow;
@@ -141,6 +141,12 @@ pub enum Command {
     Away(bool),
     /// `menu 번호`: 메뉴에서 그 항목을 고른 것으로 친다. 번호는 [`crate::tray::MenuItem`]의 값이다.
     Menu(u32),
+    /// `target 번호`: 그 번호의 꽃핀(0이 기본 꽃핀)을 오른쪽 클릭해 메뉴를 띄운 것으로 친다.
+    /// 뒤따르는 `menu`가 그 꽃핀에게 간다.
+    Target(usize),
+    /// `crowd`: 꽃핀이 몇 명인지와, 화면에서 앞에 있는 차례를 보고서에 적는다. `--settings-shot`을 줬으면
+    /// 꽃핀들을 그 차례대로 겹쳐 그린 그림도 쓴다.
+    Crowd,
     /// `settings ...`: 설정 창을 다룬다.
     Settings(Dialog),
     /// `say 초 제목 | 내용`: 말풍선으로 알릴 것을 줄에 세운다. 초가 0이면 클릭할 때까지 떠 있다.
@@ -285,6 +291,8 @@ pub fn parse_script(text: &str) -> Result<Vec<Step>, String> {
             }),
             (Some("away"), 3) if words[2] == "on" || words[2] == "off" => Command::Away(words[2] == "on"),
             (Some("menu"), 3) => Command::Menu(number(2)? as u32),
+            (Some("target"), 3) => Command::Target(number(2)? as usize),
+            (Some("crowd"), 2) => Command::Crowd,
             (Some("say"), 4..) => {
                 let text = words[3..].join(" ");
                 let (title, body) = text.split_once(" | ").unwrap_or((&text, ""));
@@ -405,6 +413,71 @@ pub fn write_report(path: Option<&Path>, lines: &[String]) {
         // 재는 데 쓰는 보조 기능이라, 쓰지 못해도 앱을 멈추지 않는다.
         let _ = std::fs::write(path, lines.join("\n") + "\n");
     }
+}
+
+/// 화면에서 앞에 있는 창부터 차례로, 그 창이 `windows`의 몇 번째인지를 늘어놓는다.
+pub fn stacking(windows: &[HWND]) -> Vec<usize> {
+    let mut order = Vec::new();
+    let mut hwnd = unsafe { GetTopWindow(null_mut()) };
+    while !hwnd.is_null() {
+        order.extend(windows.iter().position(|&window| window == hwnd));
+        hwnd = unsafe { GetWindow(hwnd, GW_HWNDNEXT) };
+    }
+    order
+}
+
+/// 꽃핀들의 창을 화면에 놓인 자리대로 겹쳐, 한 장의 그림(BMP)으로 저장한다. `windows`는 뒤에 있는 것부터다.
+pub fn crowd_shot(windows: &[&CharacterWindow], path: &Path) {
+    let rects: Vec<Rect> = windows.iter().map(|window| window.screen_rect()).collect();
+    let Some(all) = rects.iter().copied().reduce(|all, rect| all.union(rect)) else { return };
+    let (width, height) = (all.w as usize, all.h as usize);
+    // 바탕화면을 흉내 낸 파란 바탕.
+    let mut desk = vec![[0x3Bu8, 0x78, 0xDC]; width * height];
+    for (window, rect) in windows.iter().zip(&rects) {
+        for (row, line) in window.shown().chunks(rect.w as usize).enumerate() {
+            let start = (rect.y - all.y) as usize * width + row * width + (rect.x - all.x) as usize;
+            for (under, &pixel) in desk[start..start + line.len()].iter_mut().zip(line) {
+                blend(under, pixel);
+            }
+        }
+    }
+    write_bmp(path, width, &desk);
+}
+
+/// 미리 곱한 알파의 픽셀 하나를 불투명한 색 위에 올린다.
+pub fn blend(under: &mut [u8; 3], pixel: u32) {
+    let alpha = pixel >> 24;
+    for (channel, shift) in [(0, 16), (1, 8), (2, 0)] {
+        // 미리 곱한 알파라 위의 색은 그대로 더한다.
+        let over = (pixel >> shift) & 0xFF;
+        under[channel] = (over + under[channel] as u32 * (255 - alpha) / 255).min(255) as u8;
+    }
+}
+
+/// 한 줄이 `width`개인 색들(빨강, 초록, 파랑)을 그림 파일(BMP)로 쓴다. 폴더가 없으면 만든다.
+pub fn write_bmp(path: &Path, width: usize, pixels: &[[u8; 3]]) {
+    let height = pixels.len() / width.max(1);
+    // 한 줄은 4바이트 단위로 맞춘다.
+    let row = (width * 3).div_ceil(4) * 4;
+    let mut file = Vec::with_capacity(54 + row * height);
+    file.extend_from_slice(b"BM");
+    file.extend_from_slice(&((54 + row * height) as u32).to_le_bytes());
+    file.extend_from_slice(&[0, 0, 0, 0, 54, 0, 0, 0, 40, 0, 0, 0]);
+    file.extend_from_slice(&(width as i32).to_le_bytes());
+    // 높이가 음수면 위에서 아래로 놓인 그림이다.
+    file.extend_from_slice(&(-(height as i32)).to_le_bytes());
+    file.extend_from_slice(&[1, 0, 24, 0]);
+    file.extend_from_slice(&[0; 24]);
+    for line in pixels.chunks(width.max(1)) {
+        for [red, green, blue] in line {
+            file.extend_from_slice(&[*blue, *green, *red]);
+        }
+        file.resize(file.len() + row - width * 3, 0);
+    }
+    if let Some(folder) = path.parent() {
+        let _ = std::fs::create_dir_all(folder);
+    }
+    let _ = std::fs::write(path, file);
 }
 
 /// 화면의 한 점을 눌렀을 때 그 클릭을 `hwnd`가 받는지 알려 준다.
@@ -590,6 +663,9 @@ mod tests {
 
     #[test]
     fn script_is_read_and_sorted_by_time() {
+        let crowd = parse_script("1 menu 7; 2 target 2; 3 crowd").unwrap();
+        let commands: Vec<Command> = crowd.iter().map(|step| step.command.clone()).collect();
+        assert_eq!(commands, [Command::Menu(7), Command::Target(2), Command::Crowd]);
         let more = parse_script("1 click; 2 rub 80.5; 3 do jump; 4 away on; 5 away off").unwrap();
         let commands: Vec<Command> = more.iter().map(|step| step.command.clone()).collect();
         assert_eq!(

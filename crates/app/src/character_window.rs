@@ -162,6 +162,11 @@ impl CharacterWindow {
         unsafe { SetWindowPos(self.hwnd, after, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE) };
     }
 
+    /// 이 창을 `front` 창의 바로 뒤에 둔다. 다른 창들 사이에서의 높이는 `front`를 따라간다.
+    pub fn place_behind(&self, front: HWND) {
+        unsafe { SetWindowPos(self.hwnd, front, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE) };
+    }
+
     /// 창의 왼쪽 위를 화면의 `(x, y)`로 옮긴다. 다음 `present` 때 화면에 반영된다.
     pub fn move_to(&mut self, x: i32, y: i32) {
         self.pos = (x, y);

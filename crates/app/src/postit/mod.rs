@@ -1431,38 +1431,14 @@ impl Postits {
             for y in 0..size.1 {
                 for x in 0..size.0 {
                     let pixel = pixels[y as usize * stride + x as usize];
-                    let alpha = pixel >> 24;
-                    if alpha == 0 {
-                        continue;
-                    }
-                    let under = &mut desk[(at.1 - top + y) as usize * width + (at.0 - left + x) as usize];
-                    for (channel, shift) in [(0, 16), (1, 8), (2, 0)] {
-                        // 미리 곱한 알파라 위의 색은 그대로 더한다.
-                        let over = (pixel >> shift) & 0xFF;
-                        under[channel] = (over + under[channel] as u32 * (255 - alpha) / 255).min(255) as u8;
+                    if pixel >> 24 != 0 {
+                        let under = &mut desk[(at.1 - top + y) as usize * width + (at.0 - left + x) as usize];
+                        crate::dev::blend(under, pixel);
                     }
                 }
             }
         }
-        let row = (width * 3).div_ceil(4) * 4;
-        let mut file = Vec::with_capacity(54 + row * height);
-        file.extend_from_slice(b"BM");
-        file.extend_from_slice(&((54 + row * height) as u32).to_le_bytes());
-        file.extend_from_slice(&[0, 0, 0, 0, 54, 0, 0, 0, 40, 0, 0, 0]);
-        file.extend_from_slice(&(width as i32).to_le_bytes());
-        file.extend_from_slice(&(-(height as i32)).to_le_bytes());
-        file.extend_from_slice(&[1, 0, 24, 0]);
-        file.extend_from_slice(&[0; 24]);
-        for line in desk.chunks(width) {
-            for [r, g, b] in line {
-                file.extend_from_slice(&[*b, *g, *r]);
-            }
-            file.resize(file.len() + row - width * 3, 0);
-        }
-        if let Some(folder) = path.parent() {
-            let _ = std::fs::create_dir_all(folder);
-        }
-        let _ = std::fs::write(path, file);
+        crate::dev::write_bmp(path, width, &desk);
         // 화면에 떠 있는 그림은 그대로이므로, 다음에 고칠 때 다시 그리게만 해 둔다.
         self.notes.iter_mut().for_each(|note| note.stale = true);
         self.written = None;
