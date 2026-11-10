@@ -1123,12 +1123,13 @@ impl App {
         }
     }
 
-    /// 메모 하나를 알린다. 그 메모의 포스트잇이 커지고 빛나며 앞으로 나오고, 첫 꽃핀이 뛴다.
+    /// 메모 하나를 알린다. 그 메모의 포스트잇이 커지고 빛나며 앞으로 나오고, 나와 있는 꽃핀이 모두 놀란다.
     /// Windows 알림으로도 보여 준다. 포스트잇 아래의 단추로 확인하거나 조금 뒤로 미룬다.
     fn remind(&mut self, memo: &Memo, now: Instant) {
         self.note(now, format!("알림: {}", memo.title()));
-        if let Some(first) = self.characters.first_mut() {
-            first.show(Show::Jump, &self.motions, &self.stage, now);
+        // 떠 있거나 잡혀 있는 꽃핀은 건너뛴다.
+        for character in &mut self.characters {
+            character.show(Show::Surprise, &self.motions, &self.stage, now);
         }
         self.postits.ring(&mut self.memos, memo.id);
         if self.settings.is_on(Key::ReminderToast) {
