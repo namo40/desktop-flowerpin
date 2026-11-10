@@ -73,6 +73,29 @@ fn history_holds_no_art() {
     assert!(problems.is_empty(), "지난 커밋에 그림이나 팩이 들어간 적이 있습니다:\n{problems:#?}");
 }
 
+/// `placeholder/`에는 대체 그림 팩만 둘 수 있다. 진짜 그림 팩을 여기에 잘못 넣으면 그대로 공개된다.
+#[test]
+fn placeholder_folder_holds_only_placeholder_packs() {
+    let folder = repo_root().join("placeholder");
+    let mut packs = 0;
+    for entry in std::fs::read_dir(&folder).expect("placeholder 폴더") {
+        let path = entry.expect("placeholder 폴더의 파일").path();
+        let name = path.file_name().and_then(|name| name.to_str()).unwrap_or_default().to_string();
+        if name == "README.md" {
+            continue;
+        }
+        assert!(name.ends_with(".dfpk"), "placeholder/{name}: 대체 그림 팩이 아닌 파일");
+        let bytes = std::fs::read(&path).expect("대체 그림 팩 읽기");
+        let header = dfp_pack::Header::parse(&bytes).unwrap_or_else(|e| panic!("placeholder/{name}: {e}"));
+        assert!(header.placeholder, "placeholder/{name}: 대체 그림 표시가 없는 팩");
+        assert_eq!(header.key_id, dfp_pack::DEV_KEY_ID, "placeholder/{name}: 개발 키로 만들지 않은 팩");
+        // 머리는 목차와 묶여 있어서, 개발 키로 열리면 위의 표시도 진짜다.
+        assert!(dfp_pack::Pack::open(&bytes, &dfp_pack::DEV_KEY).is_ok(), "placeholder/{name}: 개발 키로 열리지 않음");
+        packs += 1;
+    }
+    assert!(packs > 0, "placeholder 폴더에 대체 그림 팩이 없습니다");
+}
+
 #[test]
 fn guard_catches_what_it_should() {
     assert!(has_forbidden_extension("crates/app/idle.PNG"));
