@@ -45,7 +45,7 @@ pub enum WindowEvent {
     /// 버튼을 뗐다. 누르고 있던 것이 다른 까닭으로 끊겼을 때도 온다.
     Lift { hwnd: HWND },
     /// 오른쪽 버튼으로 눌렀다 뗐다.
-    Menu { x: i32, y: i32 },
+    Menu { hwnd: HWND, x: i32, y: i32 },
     /// 모니터 구성, 작업 영역, 화면 배율이 바뀌었다.
     StageChanged,
 }
@@ -293,7 +293,7 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
         }
         WM_RBUTTONUP => {
             let (x, y) = cursor_position();
-            push(WindowEvent::Menu { x, y });
+            push(WindowEvent::Menu { hwnd, x, y });
             0
         }
         // 꽃핀 위에서는 손 모양 커서를 보여 준다.

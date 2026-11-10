@@ -68,7 +68,8 @@ fn run(options: dev::Options) -> Result<Vec<String>, PackError> {
             Flow::Quit => break,
             Flow::Menu(x, y) => {
                 let owner = app.menu_owner();
-                let item = app::run_modal(&mut app, || tray::pick(owner, x, y));
+                let shows = app.menu_shows();
+                let item = app::run_modal(&mut app, || tray::pick(owner, x, y, &shows));
                 if app.picked(item, Instant::now()) {
                     break;
                 }

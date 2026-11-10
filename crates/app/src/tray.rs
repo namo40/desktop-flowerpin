@@ -25,12 +25,13 @@ use windows_sys::Win32::UI::Shell::{
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreateIconIndirect, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyIcon, DestroyMenu,
-    DestroyWindow, FindWindowW, GetSystemMetrics, HICON, ICONINFO, KillTimer, MF_POPUP, MF_SEPARATOR, MF_STRING,
-    PostMessageW, RegisterClassExW, RegisterWindowMessageW, SM_CXSMICON, SetForegroundWindow, SetTimer, TPM_NONOTIFY,
-    TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenuEx, WM_APP, WM_CONTEXTMENU, WM_LBUTTONDBLCLK, WM_NULL, WM_RBUTTONUP,
-    WM_TIMER, WNDCLASSEXW, WS_POPUP,
+    DestroyWindow, FindWindowW, GetSystemMetrics, HICON, ICONINFO, KillTimer, MF_GRAYED, MF_POPUP, MF_SEPARATOR,
+    MF_STRING, PostMessageW, RegisterClassExW, RegisterWindowMessageW, SM_CXSMICON, SetForegroundWindow, SetTimer,
+    TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenuEx, WM_APP, WM_CONTEXTMENU, WM_LBUTTONDBLCLK, WM_NULL,
+    WM_RBUTTONUP, WM_TIMER, WNDCLASSEXW, WS_POPUP,
 };
 
+use crate::actor::Show;
 use crate::geom::Rect;
 use crate::links::LINKS;
 use crate::win::{cursor_position, fatal, wide};
@@ -53,6 +54,8 @@ pub enum MenuItem {
     Settings,
     /// 바로 가기. [`LINKS`]의 몇 번째인지다.
     Link(usize),
+    /// 꽃핀에게 시켜서 볼 행동.
+    Show(Show),
 }
 
 impl MenuItem {
@@ -62,6 +65,7 @@ impl MenuItem {
             MenuItem::Quit => 1,
             MenuItem::Settings => 2,
             MenuItem::Link(index) => 100 + index as u32,
+            MenuItem::Show(show) => 200 + Show::ALL.iter().position(|&other| other == show).unwrap_or(0) as u32,
         }
     }
 
@@ -70,6 +74,7 @@ impl MenuItem {
             1 => Some(MenuItem::Quit),
             2 => Some(MenuItem::Settings),
             100.. if ((id - 100) as usize) < LINKS.len() => Some(MenuItem::Link((id - 100) as usize)),
+            200.. if ((id - 200) as usize) < Show::ALL.len() => Some(MenuItem::Show(Show::ALL[(id - 200) as usize])),
             _ => None,
         }
     }
@@ -109,19 +114,31 @@ pub fn while_modal<T>(owner: HWND, tick: fn(), show: impl FnOnce() -> T) -> T {
 
 /// 화면의 `(x, y)`에 메뉴를 띄우고, 고른 것을 돌려준다. 메뉴가 닫힐 때까지 돌아오지 않는다.
 /// `owner`는 메뉴의 주인이 될 창([`Tray::hwnd`])이다.
-pub fn pick(owner: HWND, x: i32, y: i32) -> Option<MenuItem> {
+///
+/// `shows`는 "행동" 아래에 넣을 행동과, 지금 고를 수 있는지다. 고를 수 없는 것은 흐리게 보인다.
+pub fn pick(owner: HWND, x: i32, y: i32, shows: &[(Show, bool)]) -> Option<MenuItem> {
     unsafe {
         let menu = CreatePopupMenu();
         let links = CreatePopupMenu();
-        if menu.is_null() || links.is_null() {
+        let actions = CreatePopupMenu();
+        if menu.is_null() || links.is_null() || actions.is_null() {
             return None;
         }
         let add = |menu, item: MenuItem, label: &str| {
             AppendMenuW(menu, MF_STRING, item.id() as usize, wide(label).as_ptr());
         };
+        for (index, &(show, possible)) in shows.iter().enumerate() {
+            // 혼자서도 하는 행동, 창을 오르내리는 행동, 사용자가 건드렸을 때의 반응을 줄로 나눈다.
+            if index > 0 && matches!(show, Show::Climb | Show::Surprise) {
+                AppendMenuW(actions, MF_SEPARATOR, 0, null());
+            }
+            let flags = if possible { MF_STRING } else { MF_STRING | MF_GRAYED };
+            AppendMenuW(actions, flags, MenuItem::Show(show).id() as usize, wide(show.label()).as_ptr());
+        }
         for (index, link) in LINKS.iter().enumerate() {
             add(links, MenuItem::Link(index), link.name);
         }
+        AppendMenuW(menu, MF_POPUP, actions as usize, wide("행동").as_ptr());
         // 이름 끝의 "..."은 창이 열린다는 뜻이다.
         AppendMenuW(menu, MF_POPUP, links as usize, wide("바로 가기").as_ptr());
         AppendMenuW(menu, MF_SEPARATOR, 0, null());
@@ -349,5 +366,26 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
             0
         }
         _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn menu_numbers_are_unique_and_read_back() {
+        let mut items = vec![MenuItem::Quit, MenuItem::Settings];
+        items.extend((0..LINKS.len()).map(MenuItem::Link));
+        items.extend(Show::ALL.map(MenuItem::Show));
+        for (n, item) in items.iter().enumerate() {
+            // 0은 "아무것도 고르지 않음"이다.
+            assert_ne!(item.id(), 0);
+            assert_eq!(MenuItem::from_id(item.id()), Some(*item));
+            assert!(items[..n].iter().all(|other| other.id() != item.id()), "{item:?}");
+        }
+        for id in [0, 3, 99, 100 + LINKS.len() as u32, 199, 200 + Show::ALL.len() as u32] {
+            assert_eq!(MenuItem::from_id(id), None, "{id}");
+        }
     }
 }

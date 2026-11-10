@@ -17,7 +17,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     DispatchMessageW, MSG, PM_REMOVE, PeekMessageW, TranslateMessage, WM_QUIT,
 };
 
-use crate::actor::{Habits, Mode};
+use crate::actor::{Habits, Mode, Show};
 use crate::character::{self, Character, Look};
 use crate::character_window::{self, WindowEvent};
 use crate::clock::WakeTimer;
@@ -77,7 +77,7 @@ enum Pointer {
 pub enum Flow {
     Continue,
     Quit,
-    /// 화면의 이 자리에 메뉴를 띄운다.
+    /// 화면의 이 자리에 메뉴를 띄운다. 넣을 행동은 [`App::menu_shows`]로 받는다.
     Menu(i32, i32),
     /// 설정 창의 이 탭을 기본값으로 되돌릴지 묻는다.
     ConfirmReset(usize),
@@ -132,6 +132,8 @@ pub struct App {
     timer: WakeTimer,
     /// 다른 창에서 일어난 일을 전해 듣는다. 들고 있는 동안만 알림이 온다.
     _watch: Watch,
+    /// 메뉴를 띄운 꽃핀의 창. 메뉴에서 고른 행동을 이 꽃핀이 한다. 트레이에서 띄웠으면 `None`이고 첫 꽃핀이 한다.
+    menu_target: Option<HWND>,
     /// 화면에 보이는 다른 창들과, 마지막으로 읽은 시각.
     desktop: Desktop,
     scanned: Option<Instant>,
@@ -223,6 +225,7 @@ impl App {
                 .unwrap_or_else(|| SystemTime::now().duration_since(UNIX_EPOCH).map_or(1, |d| d.as_nanos() as u64)),
             timer: WakeTimer::new(),
             _watch: Watch::start(),
+            menu_target: None,
             desktop: Desktop::default(),
             scanned: None,
             dev: Dev {
@@ -440,8 +443,11 @@ impl App {
                     }
                     self.hover = Some((hwnd, (x, y), now));
                 }
-                // 꽃핀을 오른쪽 클릭해도 트레이 아이콘과 같은 메뉴가 뜬다.
-                WindowEvent::Menu { x, y } => flow = Flow::Menu(x, y),
+                // 꽃핀을 오른쪽 클릭해도 트레이 아이콘과 같은 메뉴가 뜬다. 행동은 오른쪽 클릭한 꽃핀이 한다.
+                WindowEvent::Menu { hwnd, x, y } => {
+                    self.menu_target = Some(hwnd);
+                    flow = Flow::Menu(x, y);
+                }
                 WindowEvent::StageChanged => stage_changed = true,
             }
         }
@@ -455,7 +461,10 @@ impl App {
         // 2. 트레이 아이콘과 설정 창에서 온 일.
         for event in tray::take_events() {
             match event {
-                TrayEvent::Menu { x, y } => flow = Flow::Menu(x, y),
+                TrayEvent::Menu { x, y } => {
+                    self.menu_target = None;
+                    flow = Flow::Menu(x, y);
+                }
                 TrayEvent::Open => self.open_settings(),
                 TrayEvent::TaskbarCreated => self.tray.add(),
                 // 앱을 한 번 더 켰다. 꽃핀이 어디 있는지 알려 주는 일은 아직 하지 않는다.
@@ -671,9 +680,25 @@ impl App {
             Some(MenuItem::Quit) => return self.ask_quit(now),
             Some(MenuItem::Settings) => self.open_settings(),
             Some(MenuItem::Link(index)) => self.open(LINKS[index].url),
+            Some(MenuItem::Show(show)) => {
+                let target = self.menu_character();
+                if let Some(character) = self.characters.get_mut(target) {
+                    character.show(show, &self.motions, &self.stage, now);
+                }
+            }
             None => {}
         }
         false
+    }
+
+    /// 메뉴에서 고른 행동을 할 꽃핀. 메뉴를 띄운 꽃핀이고, 트레이에서 띄웠거나 그 꽃핀이 없어졌으면 첫 꽃핀이다.
+    fn menu_character(&self) -> usize {
+        self.menu_target.and_then(|hwnd| self.find(hwnd)).unwrap_or(0)
+    }
+
+    /// 메뉴의 "행동" 아래에 넣을 행동과, 지금 고를 수 있는지.
+    pub fn menu_shows(&self) -> Vec<(Show, bool)> {
+        self.characters.get(self.menu_character()).map(|character| character.showable(&self.stage)).unwrap_or_default()
     }
 
     /// 물음 창의 답을 받아, "예"였으면 설정 창의 그 탭을 기본값으로 되돌린다.

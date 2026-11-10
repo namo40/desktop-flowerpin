@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use dfp_pack::PackError;
 
-use crate::actor::{Actor, Mode, Surroundings};
+use crate::actor::{Actor, Mode, Show, Surroundings};
 use crate::character_window::CharacterWindow;
 use crate::desktop::Desktop;
 use crate::frames::Frames;
@@ -292,6 +292,20 @@ impl Character {
         }
         self.look = look;
         self.wake(now);
+    }
+
+    /// 메뉴에서 고를 수 있는 행동마다, 지금 보여 줄 수 있는지.
+    pub fn showable(&self, stage: &Stage) -> Vec<(Show, bool)> {
+        let around = Surroundings { perches: &self.perches, ..self.surroundings(self.monitor(stage)) };
+        Show::ALL.into_iter().map(|show| (show, self.actor.can_show(show, &around))).collect()
+    }
+
+    /// 메뉴에서 고른 행동을 바로 보여 준다. 그사이에 할 수 없게 됐으면 아무 일도 하지 않는다.
+    pub fn show(&mut self, show: Show, motions: &Motions, stage: &Stage, now: Instant) {
+        let around = Surroundings { perches: &self.perches, ..self.surroundings(self.monitor(stage)) };
+        if self.actor.show(show, motions, &around) {
+            self.wake(now);
+        }
     }
 
     /// 커서가 `cursor`에서 `distance`px 움직였다. 머리 위였으면 문지른 것으로 친다.

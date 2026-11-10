@@ -154,6 +154,56 @@ pub enum Whim {
     Hop,
 }
 
+/// 사용자가 메뉴에서 골라 볼 수 있는 행동.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Show {
+    Stretch,
+    Yawn,
+    Jump,
+    Sleep,
+    Sit,
+    Climb,
+    Hop,
+    Surprise,
+    Pout,
+    Shy,
+    Pat,
+}
+
+impl Show {
+    /// 메뉴에 놓이는 차례.
+    pub const ALL: [Show; 11] = [
+        Show::Stretch,
+        Show::Yawn,
+        Show::Jump,
+        Show::Sleep,
+        Show::Sit,
+        Show::Climb,
+        Show::Hop,
+        Show::Surprise,
+        Show::Pout,
+        Show::Shy,
+        Show::Pat,
+    ];
+
+    /// 메뉴에 적는 이름.
+    pub fn label(self) -> &'static str {
+        match self {
+            Show::Stretch => "기지개",
+            Show::Yawn => "하품",
+            Show::Jump => "점프",
+            Show::Sleep => "잠자기",
+            Show::Sit => "걸터앉기",
+            Show::Climb => "창 위로 올라가기",
+            Show::Hop => "뛰어내리기",
+            Show::Surprise => "놀라기",
+            Show::Pout => "삐치기",
+            Show::Shy => "수줍어하기",
+            Show::Pat => "쓰다듬 받기",
+        }
+    }
+}
+
 /// 창 윗변으로 뛰어오르는 길.
 ///
 /// 떠 있는 시간([`LEAP_AIR`])이 정해져 있어서, 박찬 뒤 흐른 시간만으로 자리가 정해진다. 걸음마다 조금씩
@@ -595,6 +645,52 @@ impl Actor {
             Whim::Climb | Whim::Hop => self.rest(motions, REST),
             other => self.start(other, motions),
         }
+    }
+
+    /// 지금 이 행동을 골라서 볼 수 있는가.
+    ///
+    /// 바닥이나 창 위에서 쉬거나 걷고 있을 때만 된다. 걸터앉기는 단 위에서만, 창 위로 올라가기는 가까이에
+    /// 올라설 윗변이 있을 때만, 뛰어내리기는 창 위에 있을 때만 된다.
+    pub fn can_show(&self, show: Show, around: &Surroundings) -> bool {
+        if self.mode != Mode::Ground || self.leaving {
+            return false;
+        }
+        match show {
+            Show::Sit => self.on.is_some() || around.ledge,
+            Show::Climb => self.climb_target(around).is_some(),
+            Show::Hop => self.on.is_some(),
+            _ => true,
+        }
+    }
+
+    /// 사용자가 고른 행동을 바로 시작한다. 지금 할 수 없는 행동이면 아무 일도 하지 않고 `false`를 돌려준다.
+    ///
+    /// 혼자 시작할 때와 달리 쉬는 그림의 첫 장을 기다리지 않는다. 고르자마자 보여야 하기 때문이다.
+    pub fn show(&mut self, show: Show, motions: &Motions, around: &Surroundings) -> bool {
+        if !self.can_show(show, around) {
+            return false;
+        }
+        match show {
+            Show::Stretch => self.start(Whim::Stretch, motions),
+            Show::Yawn => self.start(Whim::Yawn, motions),
+            Show::Jump => self.start(Whim::Jump, motions),
+            Show::Sleep => self.start(Whim::Sleep, motions),
+            Show::Sit => self.start(Whim::Sit, motions),
+            Show::Climb => return self.start_climb(motions, around),
+            Show::Hop => self.start_hop(motions, None),
+            Show::Surprise | Show::Pout | Show::Shy => {
+                let kind = match show {
+                    Show::Surprise => motions.poke_surprise,
+                    Show::Pout => motions.poke_pout,
+                    _ => motions.poke_shy,
+                };
+                // 다음에 클릭했을 때 같은 반응이 연달아 나오지 않게 적어 둔다.
+                self.last_poke = Some(kind);
+                self.act(kind);
+            }
+            Show::Pat => self.act(motions.pat),
+        }
+        true
     }
 
     /// 걸터앉아 있다가 일어난다. 다리를 흔드는 중이면 바로 일어나고, 앉는 중이면 앉자마자 일어난다.
@@ -2295,6 +2391,83 @@ mod tests {
             }
             // 20분 동안 창 위에도 있었고 바닥에도 있었다.
             assert!(on_window > 24 * 30 && on_floor > 24 * 30, "씨앗 {seed}: 창 위 {on_window}, 바닥 {on_floor}");
+        }
+    }
+
+    #[test]
+    fn a_picked_action_starts_at_once() {
+        let motions = sample();
+        let perches = [WINDOW, LOWER];
+        let around = among(&perches);
+        // 창 위에 서 있으면 모든 행동을 골라 볼 수 있다.
+        let expected = [
+            (Show::Stretch, Mode::Act, "stretch"),
+            (Show::Yawn, Mode::Act, "yawn"),
+            (Show::Jump, Mode::Jump, "jump"),
+            (Show::Sleep, Mode::Sleep, "sleep_in"),
+            (Show::Sit, Mode::Sit, "edge_in"),
+            (Show::Climb, Mode::Jump, "jump"),
+            (Show::Hop, Mode::Jump, "jump"),
+            (Show::Surprise, Mode::Act, "poke_surprise"),
+            (Show::Pout, Mode::Act, "poke_pout"),
+            (Show::Shy, Mode::Act, "poke_shy"),
+            (Show::Pat, Mode::Act, "pat"),
+        ];
+        assert_eq!(expected.map(|(show, ..)| show), Show::ALL);
+        for (show, mode, motion) in expected {
+            let mut actor = standing_on(&motions, WINDOW, 1000.0, 5);
+            // 걷는 중에 골라도 멈춰 서서 바로 한다.
+            actor.walk = Some(Dir::East);
+            actor.motion = motions.walk_e;
+            assert!(actor.can_show(show, &around), "{show:?}");
+            assert!(actor.show(show, &motions, &around), "{show:?}");
+            assert_eq!((actor.mode(), motions.clip(actor.motion()).name.as_str()), (mode, motion), "{show:?}");
+            assert_eq!((actor.walk, actor.t), (None, 0.0), "{show:?}");
+        }
+        // 창 위로 올라가기는 다른 창(아래 창)으로 옮겨 뛰고, 뛰어내리기는 바닥까지 간다.
+        let mut actor = standing_on(&motions, WINDOW, 1000.0, 5);
+        actor.set_habits(Habits { roam: false, whim_rate: 0.0 });
+        assert!(actor.show(Show::Climb, &motions, &around));
+        run(&mut actor, &motions, &around, 5.0);
+        assert_eq!((actor.support(), actor.position().1), (Some(8), 800.0));
+        assert!(actor.show(Show::Hop, &motions, &around));
+        run(&mut actor, &motions, &around, 5.0);
+        assert_eq!((actor.support(), actor.position().1), (None, AROUND.floor));
+    }
+
+    #[test]
+    fn only_actions_that_make_sense_here_can_be_picked() {
+        let motions = sample();
+        let perches = [WINDOW];
+        let pickable = |actor: &Actor, around: &Surroundings| -> Vec<Show> {
+            Show::ALL.into_iter().filter(|&show| actor.can_show(show, around)).collect()
+        };
+        let always = [Show::Stretch, Show::Yawn, Show::Jump, Show::Sleep];
+        let reactions = [Show::Surprise, Show::Pout, Show::Shy, Show::Pat];
+        let list = |middle: &[Show]| [&always[..], middle, &reactions[..]].concat();
+
+        // 화면 아래 끝이 바닥이고 창이 없는 곳: 걸터앉을 단도, 올라갈 창도, 뛰어내릴 곳도 없다.
+        let floor = Actor::stand(&motions, 1000.0, AROUND.floor, 1.0, 5);
+        assert_eq!(pickable(&floor, &AROUND), list(&[]));
+        // 작업표시줄 위: 걸터앉을 수 있다. 가까이에 창이 있으면 올라갈 수 있다.
+        assert_eq!(pickable(&floor, &ON_LEDGE), list(&[Show::Sit]));
+        assert_eq!(pickable(&floor, &among(&perches)), list(&[Show::Sit, Show::Climb]));
+        // 창 위: 걸터앉고 뛰어내릴 수 있다. 옮겨 뛸 다른 창이 없으면 올라가기는 고를 수 없다.
+        let above = standing_on(&motions, WINDOW, 1000.0, 5);
+        assert_eq!(pickable(&above, &among(&perches)), list(&[Show::Sit, Show::Hop]));
+
+        // 서 있지 않을 때(떠 있음, 다른 행동을 하는 중, 사라지는 중)는 아무것도 고를 수 없다.
+        let mut falling = Actor::stand(&motions, 1000.0, 300.0, 1.0, 5);
+        falling.update(STEP, &motions, &AROUND);
+        let mut busy = Actor::stand(&motions, 1000.0, AROUND.floor, 1.0, 5);
+        busy.start(Whim::Yawn, &motions);
+        let mut leaving = Actor::stand(&motions, 1000.0, AROUND.floor, 1.0, 5);
+        leaving.leave(&motions);
+        for mut actor in [falling, busy, leaving] {
+            assert_eq!(pickable(&actor, &ON_LEDGE), []);
+            let before = (actor.mode(), actor.motion());
+            assert!(!actor.show(Show::Stretch, &motions, &ON_LEDGE));
+            assert_eq!((actor.mode(), actor.motion()), before);
         }
     }
 }
