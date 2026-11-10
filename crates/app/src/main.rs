@@ -9,6 +9,7 @@ mod clock;
 mod dev;
 mod frames;
 mod geom;
+mod scale;
 mod win;
 
 use std::time::Instant;
@@ -18,6 +19,7 @@ use character_window::CharacterWindow;
 use clock::WakeTimer;
 use frames::Frames;
 use geom::Rect;
+use scale::Scale;
 
 /// 그림 팩 없이 빌드했을 때 띄우는 시험 그림의 한 변 길이.
 const TEST_SIZE: i32 = 200;
@@ -50,8 +52,12 @@ fn run(
     options: &dev::Options,
     report: &mut dev::Report,
 ) -> Result<(), dfp_pack::temp::PackError> {
+    // 보여 주는 배율은 사용자가 고른 크기 × 모니터 배율이다.
+    let dpi = options.dpi.unwrap_or_else(win::system_dpi);
+    let scale = Scale::new(options.size, dpi);
     let idle2 = frames.motion_frames(frames::MOTION_IDLE2);
-    let mut character = Character::new(frames, idle2, 0, floor, Instant::now())?;
+    let mut character = Character::new(frames, idle2, 0, scale, floor, Instant::now())?;
+    report.add(format!("배율 {scale} (크기 {}%, DPI {dpi})", options.size));
     report.add(format!("창 {}x{}", character.window().width(), character.window().height()));
 
     let timer = WakeTimer::new();
@@ -72,14 +78,16 @@ fn run(
         {
             check.sample(character.window(), now);
         }
+        let started = Instant::now();
         if character.tick(frames, now)? {
-            pace.frame_shown(now);
+            pace.frame_shown(now, started.elapsed());
         }
         // 다음 장 시각까지 잔다. 끝낼 시각이 더 이르면 그때 깬다.
         let wake = deadline.map_or(character.due(), |d| d.min(character.due()));
         timer.sleep_until(Some(wake));
     }
     report.add(pace.summary());
+    report.add(pace.cost_summary());
     if let Some(check) = &screen_check {
         report.add(check.summary());
     }

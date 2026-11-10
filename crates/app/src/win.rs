@@ -4,7 +4,9 @@ use std::ffi::c_void;
 use std::ptr::null_mut;
 
 use windows_sys::Win32::Foundation::RECT;
-use windows_sys::Win32::UI::HiDpi::{DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext};
+use windows_sys::Win32::UI::HiDpi::{
+    DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForSystem, SetProcessDpiAwarenessContext,
+};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     DispatchMessageW, MB_ICONERROR, MB_OK, MSG, MessageBoxW, PM_REMOVE, PeekMessageW, SPI_GETWORKAREA,
     SystemParametersInfoW, TranslateMessage, WM_QUIT,
@@ -21,6 +23,11 @@ pub fn wide(s: &str) -> Vec<u16> {
 pub fn enable_per_monitor_dpi() {
     // 실패해도(오래된 Windows 10) 앱은 돌아가므로 결과는 보지 않는다.
     unsafe { SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
+}
+
+/// 주 모니터의 DPI. 96이 Windows 배율 100%다.
+pub fn system_dpi() -> u32 {
+    unsafe { GetDpiForSystem() }
 }
 
 /// 주 모니터에서 작업표시줄을 뺀 범위.

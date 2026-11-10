@@ -7,6 +7,7 @@ use dfp_pack::temp::PackError;
 use crate::character_window::CharacterWindow;
 use crate::frames::Frames;
 use crate::geom::Rect;
+use crate::scale::Scale;
 
 /// 꽃핀의 발바닥이 놓이는 점(칸 좌표). 이 점을 바닥 위의 서 있을 자리에 맞춘다.
 const FOOT: (i32, i32) = (128, 232);
@@ -20,7 +21,9 @@ const MAX_LAG: Duration = Duration::from_millis(250);
 
 pub struct Character {
     window: CharacterWindow,
-    /// 창 버퍼의 왼쪽 위가 칸 안의 어느 점인지.
+    /// 그림을 보여 주는 배율(사용자가 고른 크기 × 모니터 배율).
+    scale: Scale,
+    /// 창 버퍼의 왼쪽 위가 화면 칸(칸을 배율만큼 줄이거나 키운 것)의 어느 점인지.
     origin: (i32, i32),
     /// 재생하는 동작의 장 번호들.
     motion: Vec<usize>,
@@ -33,22 +36,24 @@ pub struct Character {
 }
 
 impl Character {
-    /// 발바닥이 화면의 `floor`에 오도록 창을 만들고, `motion`의 `start`번째 장부터 재생한다.
+    /// 발바닥이 화면의 `floor`에 오도록 창을 만들고, `motion`의 `start`번째 장부터 `scale`배로 재생한다.
     pub fn new(
         frames: &mut Frames,
         motion: Vec<usize>,
         start: usize,
+        scale: Scale,
         floor: (i32, i32),
         now: Instant,
     ) -> Result<Character, PackError> {
         // 창은 모든 장이 들어가는 크기로 한 번만 만든다. 장마다 크기를 바꾸면 화면에 넘기는 비용이 오히려 는다.
-        let bounds = frames.bounds();
-        let x = floor.0 - (FOOT.0 - bounds.x);
-        let y = floor.1 - (FOOT.1 - bounds.y);
+        let bounds = frames.bounds(scale);
+        let x = floor.0 - (scale.point(FOOT.0) - bounds.x);
+        let y = floor.1 - (scale.point(FOOT.1) - bounds.y);
         let window = CharacterWindow::new(bounds.w, bounds.h, x, y);
         let index = start % motion.len();
         let mut character = Character {
             window,
+            scale,
             origin: (bounds.x, bounds.y),
             motion,
             index,
@@ -88,7 +93,7 @@ impl Character {
         let width = self.window.width();
         let previous = self.drawn;
         clear(self.window.pixels(), width, previous);
-        self.drawn = frames.draw(self.motion[self.index], self.window.pixels(), width, self.origin)?;
+        self.drawn = frames.draw(self.motion[self.index], self.scale, self.window.pixels(), width, self.origin)?;
         self.window.present(previous.union(self.drawn));
         Ok(())
     }

@@ -1,13 +1,16 @@
 //! 만드는 동안 확인하고 재는 데 쓰는 실행 인자. 배포판의 기능이 아니다.
 //!
 //! ```text
-//! DesktopFlowerpin.exe [--for 초] [--report 파일] [--check-screen]
+//! DesktopFlowerpin.exe [--for 초] [--report 파일] [--check-screen] [--size 퍼센트] [--dpi 값]
 //! ```
 //!
 //! - `--for 초`: 정한 시간이 지나면 스스로 끝낸다.
 //! - `--report 파일`: 확인한 값과 잰 값을 파일에 적는다. 콘솔이 없는 프로그램이라 파일로 남긴다.
 //! - `--check-screen`: 화면에 실제로 보이는 그림이 창 버퍼와 같은지 가끔 읽어 본다.
 //!   화면을 읽는 일이 무거워서, 자원을 잴 때는 함께 쓰지 않는다.
+//! - `--size 퍼센트`: 꽃핀 크기(75, 100, 125). 설정 창이 생기기 전까지 크기를 바꿔 보는 방법이다.
+//! - `--dpi 값`: 모니터 DPI를 이 값으로 친다(144면 배율 150%). 배율이 큰 모니터가 없어도
+//!   그 배율의 그림을 확인할 수 있다.
 
 use std::ffi::c_void;
 use std::path::PathBuf;
@@ -24,11 +27,12 @@ use windows_sys::Win32::UI::WindowsAndMessaging::WindowFromPoint;
 use crate::character_window::CharacterWindow;
 use crate::geom::Rect;
 
-#[derive(Default)]
 pub struct Options {
     pub run_for: Option<Duration>,
     pub report: Option<PathBuf>,
     pub check_screen: bool,
+    pub size: u32,
+    pub dpi: Option<u32>,
 }
 
 impl Options {
@@ -39,6 +43,8 @@ impl Options {
             run_for: value("--for").and_then(|s| s.parse::<f64>().ok()).map(Duration::from_secs_f64),
             report: value("--report").map(PathBuf::from),
             check_screen: args.iter().any(|a| a == "--check-screen"),
+            size: value("--size").and_then(|s| s.parse().ok()).unwrap_or(100),
+            dpi: value("--dpi").and_then(|s| s.parse().ok()),
         }
     }
 }
@@ -67,19 +73,34 @@ pub fn receives_click(hwnd: HWND, screen_x: i32, screen_y: i32) -> bool {
     unsafe { WindowFromPoint(POINT { x: screen_x, y: screen_y }) == hwnd }
 }
 
-/// 장이 제때 넘어가는지 재는 도구. 장을 넘길 때마다 시각을 받아 간격을 모은다.
+/// 장이 제때 넘어가는지 재는 도구. 장을 넘길 때마다 시각과 걸린 시간을 받아 모은다.
 #[derive(Default)]
 pub struct Pace {
     last: Option<Instant>,
     intervals_ms: Vec<f64>,
+    /// 장 하나를 꺼내 그려 화면에 넘기는 데 걸린 시간(µs).
+    costs_us: Vec<f64>,
 }
 
 impl Pace {
-    pub fn frame_shown(&mut self, now: Instant) {
+    /// `now`에 넘기기 시작한 장을 `took` 걸려 꺼내 그려 넘겼다고 적는다.
+    pub fn frame_shown(&mut self, now: Instant, took: Duration) {
         if let Some(last) = self.last {
             self.intervals_ms.push((now - last).as_secs_f64() * 1000.0);
         }
         self.last = Some(now);
+        self.costs_us.push(took.as_secs_f64() * 1e6);
+    }
+
+    /// 장 하나를 꺼내 그려 화면에 넘기는 데 걸린 시간(가운데 값과 평균)을 한 줄로 적는다.
+    pub fn cost_summary(&self) -> String {
+        if self.costs_us.is_empty() {
+            return "넘긴 장 없음".to_string();
+        }
+        let mut sorted = self.costs_us.clone();
+        sorted.sort_by(f64::total_cmp);
+        let mean = sorted.iter().sum::<f64>() / sorted.len() as f64;
+        format!("장 하나를 꺼내 그려 넘기는 데 가운데 값 {:.0} / 평균 {mean:.0} µs", sorted[sorted.len() / 2])
     }
 
     /// 넘긴 장 수와 장 사이 간격(가장 짧은 것, 평균, 가장 긴 것)을 한 줄로 적는다.
