@@ -79,8 +79,23 @@ impl Report {
 }
 
 /// 화면의 한 점을 눌렀을 때 그 클릭을 `hwnd`가 받는지 알려 준다.
-pub fn receives_click(hwnd: HWND, screen_x: i32, screen_y: i32) -> bool {
+fn receives_click(hwnd: HWND, screen_x: i32, screen_y: i32) -> bool {
     unsafe { WindowFromPoint(POINT { x: screen_x, y: screen_y }) == hwnd }
+}
+
+/// 꽃핀의 몸을 누르면 꽃핀이 받고, 투명한 곳을 누르면 뒤 창으로 넘어가는지 본다.
+///
+/// 창 버퍼에서 불투명한 픽셀과 투명한 픽셀을 하나씩 골라, 그 자리의 클릭을 어느 창이 받는지 묻는다.
+pub fn click_check(window: &CharacterWindow) -> String {
+    let (rect, pixels) = (window.screen_rect(), window.shown());
+    let at = |i: usize| (rect.x + i as i32 % rect.w, rect.y + i as i32 / rect.w);
+    let answer = |found: Option<usize>| match found.map(at) {
+        Some((x, y)) => receives_click(window.hwnd(), x, y).to_string(),
+        None => "그런 픽셀 없음".to_string(),
+    };
+    let body = answer(pixels.iter().position(|p| p >> 24 == 255));
+    let empty = answer(pixels.iter().position(|p| p >> 24 == 0));
+    format!("클릭을 받는가: 몸 위 {body}, 투명한 곳 {empty}")
 }
 
 /// 장이 제때 넘어가는지 재는 도구. 장을 넘길 때마다 시각과 걸린 시간을 받아 모은다.

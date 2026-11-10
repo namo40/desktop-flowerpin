@@ -20,12 +20,35 @@ cargo build --release
 
 실행 파일은 `target/release/DesktopFlowerpin.exe`에 만들어집니다.
 
+### 그림
+
+꽃핀 그림은 이 저장소에 없습니다. 이 저장소만 받아 빌드하면 대체 그림 팩(`placeholder/flowerpin.dfpk`)이 들어가고, 꽃핀 대신 눈이 둘 달린 둥근 기둥이 나옵니다. 코드를 고치고 확인하는 데는 이것으로 충분합니다.
+
+진짜 그림은 공식 배포판에만 들어 있습니다. 그림 팩은 암호화되어 있고, 그 키도 이 저장소에 없습니다.
+
+| 환경 변수 | 뜻 |
+|---|---|
+| `DFP_PACK_DIR` | 진짜 그림 팩(`flowerpin.dfpk`)이 있는 폴더. 정하지 않으면 저장소 옆의 `../local`을 봅니다 |
+| `DFP_PACK_KEY` | 진짜 그림 팩의 키(16진수 64글자). 없으면 팩 폴더의 `pack.key`를 읽습니다 |
+| `DFP_RELEASE` | `1`이면 공식 빌드입니다. 개발 키나 대체 그림 팩이면 빌드가 실패합니다 |
+
+### 확인
+
+```
+cargo fmt --check
+cargo clippy --all-targets
+cargo test
+```
+
+`cargo test`에는 이 저장소에 그림, 그림 팩, 키가 들어가지 않았는지 보는 검사가 들어 있습니다.
+
 ## 폴더
 
 | 폴더 | 내용 |
 |---|---|
 | `crates/app` | 캐릭터 실행 파일 |
-| `crates/pack` | 그림 팩 읽기와 쓰기 |
+| `crates/pack` | 그림 팩 형식. 읽기와 쓰기, 암호화, 키 다루기 |
+| `placeholder` | 대체 그림 팩 |
 
 ## 라이선스
 

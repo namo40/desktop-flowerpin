@@ -41,7 +41,6 @@
 
 pub mod key;
 mod read;
-pub mod temp;
 #[cfg(feature = "write")]
 mod write;
 
@@ -82,6 +81,8 @@ pub enum PackError {
     UnsupportedVersion(u16),
     /// 없는 장 번호를 달라고 했다.
     NoSuchFrame,
+    /// 팩에 이 이름의 동작이 없다.
+    NoSuchMotion(String),
     /// 암호를 풀지 못했다. 키가 다르거나 파일이 바뀌었다.
     Decrypt,
     /// 압축을 풀지 못했거나, 풀린 크기가 장 크기와 다르다.
@@ -94,6 +95,7 @@ impl std::fmt::Display for PackError {
             PackError::BadFormat => f.write_str("그림 팩의 형식이 맞지 않습니다"),
             PackError::UnsupportedVersion(version) => write!(f, "그림 팩의 형식 판({version})을 읽을 수 없습니다"),
             PackError::NoSuchFrame => f.write_str("그림 팩에 없는 장입니다"),
+            PackError::NoSuchMotion(name) => write!(f, "그림 팩에 {name} 동작이 없습니다"),
             PackError::Decrypt => f.write_str("그림 팩의 암호를 풀지 못했습니다"),
             PackError::Decompress => f.write_str("그림 팩의 압축을 풀지 못했습니다"),
         }
