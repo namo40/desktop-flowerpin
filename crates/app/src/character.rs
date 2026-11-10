@@ -170,6 +170,8 @@ pub struct Character {
     beat: Instant,
     /// 마지막 걸음에서 창이 움직였는가.
     moved: bool,
+    /// 마지막 걸음에서 걸터앉아 있었는가.
+    sitting: bool,
 }
 
 impl Character {
@@ -227,6 +229,7 @@ impl Character {
             due: now,
             beat,
             moved: false,
+            sitting: false,
         };
         let around = character.surroundings(character.monitor(stage));
         character.render(frames, motions, &around)?;
@@ -263,6 +266,16 @@ impl Character {
     /// 상태를 밖에서 바꿨을 때(잡기, 놓기 등) 다음 걸음을 바로 밟게 한다.
     pub fn wake(&mut self, now: Instant) {
         self.due = now;
+    }
+
+    /// "항상 위"이면 다른 "항상 위" 창들보다도 앞으로 올린다.
+    ///
+    /// 작업표시줄도 "항상 위" 창이다. 작업표시줄이 앞으로 나온 뒤에는 꽃핀이 그 뒤에 놓여서, 걸터앉았을 때
+    /// 작업표시줄 위로 내려온 다리가 가려진다.
+    pub fn keep_on_top(&self) {
+        if self.look.topmost {
+            self.window.set_topmost(true);
+        }
     }
 
     /// 보여 주는 설정을 바꾼다. 배율은 다음 걸음에서 다시 잡는다.
@@ -334,6 +347,12 @@ impl Character {
         }
         let around = self.surroundings(&monitor);
         self.actor.update(dt, motions, &around);
+        let sitting = self.actor.mode() == Mode::Sit;
+        if sitting && !self.sitting {
+            // 다리가 단 아래로 내려온다. 단(작업표시줄)보다 앞에 있어야 보인다.
+            self.keep_on_top();
+        }
+        self.sitting = sitting;
         self.render(frames, motions, &around)?;
         self.schedule(motions, at);
         Ok(true)

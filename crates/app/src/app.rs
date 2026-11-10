@@ -31,6 +31,7 @@ use crate::stage::Stage;
 use crate::store::{self, State, Store};
 use crate::tray::{self, MenuItem, Tray, TrayEvent};
 use crate::usage::{self, Meter};
+use crate::watch::{self, Watch, WatchEvent};
 use crate::win;
 
 /// 누른 뒤 이만큼 움직이거나(px, 그림 1배 기준) 이만큼 누르고 있으면 잡는 것으로 본다. 그 전에 떼면 클릭이다.
@@ -88,6 +89,8 @@ struct Dev {
     script_origin: (f64, f64),
     play: VecDeque<MotionId>,
     hellos: u32,
+    /// 맨 앞 창이 바뀌었다는 알림을 받은 횟수.
+    foregrounds: u32,
     snaps: u32,
     deadline: Option<Instant>,
     /// 실행하면서 보고서에 적을 줄.
@@ -119,6 +122,8 @@ pub struct App {
     started: Instant,
     seed: u64,
     timer: WakeTimer,
+    /// 다른 창에서 일어난 일을 전해 듣는다. 들고 있는 동안만 알림이 온다.
+    _watch: Watch,
     dev: Dev,
 }
 
@@ -206,6 +211,7 @@ impl App {
                 .seed
                 .unwrap_or_else(|| SystemTime::now().duration_since(UNIX_EPOCH).map_or(1, |d| d.as_nanos() as u64)),
             timer: WakeTimer::new(),
+            _watch: Watch::start(),
             dev: Dev {
                 pace: dev::Pace::default(),
                 trace: dev::Trace::default(),
@@ -216,6 +222,7 @@ impl App {
                 script_origin: (0.0, 0.0),
                 play,
                 hellos: 0,
+                foregrounds: 0,
                 snaps: 0,
                 deadline: options.run_for.map(|d| started + d),
                 notes,
@@ -439,6 +446,20 @@ impl App {
                 TrayEvent::TaskbarCreated => self.tray.add(),
                 // 앱을 한 번 더 켰다. 꽃핀이 어디 있는지 알려 주는 일은 아직 하지 않는다.
                 TrayEvent::Hello => self.dev.hellos += 1,
+            }
+        }
+        for event in watch::take_events() {
+            match event {
+                WatchEvent::Foreground => {
+                    // 작업표시줄을 누르면 작업표시줄이 "항상 위" 창들 가운데 맨 앞으로 나온다. 그 뒤에 있으면
+                    // 걸터앉은 다리가 가려지므로, 맨 앞 창이 바뀔 때마다 꽃핀을 다시 맨 앞으로 올린다.
+                    self.dev.foregrounds += 1;
+                    if self.dev.options.report.is_some() {
+                        let at = now.saturating_duration_since(self.started).as_secs_f64();
+                        self.dev.notes.push(format!("{at:.2}초 맨 앞 창이 바뀌었다는 알림"));
+                    }
+                    self.characters.iter().for_each(Character::keep_on_top);
+                }
             }
         }
         for event in settings_window::take_events() {
@@ -848,6 +869,7 @@ impl App {
         if self.dev.hellos > 0 {
             lines.push(format!("실행 중에 앱을 한 번 더 켠 횟수 {}", self.dev.hellos));
         }
+        lines.push(format!("맨 앞 창이 바뀌었다는 알림 {}번", self.dev.foregrounds));
         lines.extend(self.dev.trace.lines());
         lines
     }

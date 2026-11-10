@@ -22,6 +22,7 @@ mod stage;
 mod store;
 mod tray;
 mod usage;
+mod watch;
 mod win;
 
 use std::time::Instant;
