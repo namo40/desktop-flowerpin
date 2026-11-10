@@ -3,6 +3,8 @@
 // 콘솔 창을 띄우지 않는다.
 #![windows_subsystem = "windows"]
 
+#[allow(dead_code)]
+mod actor;
 mod character;
 mod character_window;
 mod clock;
@@ -10,6 +12,8 @@ mod dev;
 mod frames;
 mod geom;
 mod key;
+#[allow(dead_code)]
+mod motions;
 mod scale;
 mod win;
 
