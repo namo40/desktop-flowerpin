@@ -39,6 +39,8 @@ pub enum WindowEvent {
     Press { hwnd: HWND, x: i32, y: i32 },
     /// 누른 채로 움직였다.
     Move { hwnd: HWND, x: i32, y: i32 },
+    /// 누르지 않은 채로 꽃핀 위에서 움직였다. 투명한 곳 위에서는 오지 않는다.
+    Hover { hwnd: HWND, x: i32, y: i32 },
     /// 버튼을 뗐다. 누르고 있던 것이 다른 까닭으로 끊겼을 때도 온다.
     Lift { hwnd: HWND },
     /// 오른쪽 버튼으로 눌렀다 뗐다.
@@ -264,9 +266,11 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
             0
         }
         WM_MOUSEMOVE => {
+            let (x, y) = cursor_position();
             if unsafe { GetCapture() } == hwnd {
-                let (x, y) = cursor_position();
                 push(WindowEvent::Move { hwnd, x, y });
+            } else {
+                push(WindowEvent::Hover { hwnd, x, y });
             }
             0
         }

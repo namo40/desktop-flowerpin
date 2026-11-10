@@ -3,6 +3,7 @@
 //! ```text
 //! DesktopFlowerpin.exe [--for 초] [--report 파일] [--check-screen] [--size 퍼센트] [--dpi 값] [--characters 수]
 //!                      [--play 동작,동작] [--script "초 명령; 초 명령"] [--seed 수] [--still]
+//!                      [--away-after 초]
 //! ```
 //!
 //! - `--for 초`: 정한 시간이 지나면 스스로 끝낸다.
@@ -18,6 +19,7 @@
 //!   잡기와 놓기를 되풀이해 확인할 수 있다. 명령은 [`Command`]에 있다.
 //! - `--seed 수`: 쉬는 시간과 걷는 방향을 고르는 난수의 씨앗. 같은 수면 같은 순서로 움직인다.
 //! - `--still`: 모든 꽃핀이 돌아다니지 않고 제자리에 서 있는다. 가만히 있을 때의 자원을 재는 데 쓴다.
+//! - `--away-after 초`: 마우스와 키보드를 이만큼 쓰지 않으면 자리를 비운 것으로 친다. 0이면 끈다.
 //!
 //! 보고서에는 첫 꽃핀이 거친 상태와 동작이 시각과 함께 적힌다.
 //!
@@ -40,7 +42,7 @@ use windows_sys::Win32::System::Threading::GetCurrentProcess;
 use windows_sys::Win32::System::WindowsProgramming::QueryProcessCycleTime;
 use windows_sys::Win32::UI::WindowsAndMessaging::WindowFromPoint;
 
-use crate::actor::{Actor, Mode};
+use crate::actor::{Actor, Mode, Whim};
 use crate::character_window::CharacterWindow;
 use crate::geom::Rect;
 use crate::motions::{MotionId, Motions};
@@ -58,6 +60,8 @@ pub struct Options {
     pub script: Vec<Step>,
     pub seed: Option<u64>,
     pub still: bool,
+    /// 자리를 비운 것으로 치는 시간. 설정 창이 생기기 전까지 바꿔 보는 방법이다.
+    pub away_after: Option<Duration>,
 }
 
 impl Options {
@@ -79,6 +83,7 @@ impl Options {
                 .unwrap_or_default(),
             seed: value("--seed").and_then(|s| s.parse().ok()),
             still: args.iter().any(|a| a == "--still"),
+            away_after: value("--away-after").and_then(|s| s.parse::<f64>().ok()).map(Duration::from_secs_f64),
         }
     }
 }
@@ -98,6 +103,15 @@ pub enum Command {
     Roam(bool),
     /// `dpi 값`: 모니터 DPI를 이 값으로 친다. 실행 중에 배율이 바뀌는 것을 확인한다.
     Dpi(u32),
+    /// `click`: 짧게 클릭한다.
+    Click,
+    /// `rub 거리`: 머리를 그만큼(px) 문지른다.
+    Rub(f64),
+    /// `do stretch|yawn|jump|sleep`: 가끔 하는 행동을 바로 시킨다.
+    Do(Whim),
+    /// `away on|off`: 사용자가 자리를 비운 것으로, 또는 돌아온 것으로 친다.
+    /// 한 번 쓰면 그 뒤로는 진짜 입력 시각을 보지 않는다.
+    Away(bool),
 }
 
 /// `--script`의 한 줄. 시작하고 `at`이 지났을 때 `command`를 한다.
@@ -122,6 +136,16 @@ pub fn parse_script(text: &str) -> Result<Vec<Step>, String> {
             (Some("leave"), 2) => Command::Leave,
             (Some("roam"), 3) if words[2] == "on" || words[2] == "off" => Command::Roam(words[2] == "on"),
             (Some("dpi"), 3) => Command::Dpi(number(2)? as u32),
+            (Some("click"), 2) => Command::Click,
+            (Some("rub"), 3) => Command::Rub(number(2)?),
+            (Some("do"), 3) => Command::Do(match words[2] {
+                "stretch" => Whim::Stretch,
+                "yawn" => Whim::Yawn,
+                "jump" => Whim::Jump,
+                "sleep" => Whim::Sleep,
+                _ => return Err(bad()),
+            }),
+            (Some("away"), 3) if words[2] == "on" || words[2] == "off" => Command::Away(words[2] == "on"),
             _ => return Err(bad()),
         };
         steps.push(Step { at, command });
@@ -402,6 +426,12 @@ mod tests {
 
     #[test]
     fn script_is_read_and_sorted_by_time() {
+        let more = parse_script("1 click; 2 rub 80.5; 3 do jump; 4 away on; 5 away off").unwrap();
+        let commands: Vec<Command> = more.iter().map(|step| step.command).collect();
+        assert_eq!(
+            commands,
+            [Command::Click, Command::Rub(80.5), Command::Do(Whim::Jump), Command::Away(true), Command::Away(false)]
+        );
         let steps = parse_script(" 4 release; 1.5 grab ; 2 drag 300 -400;; 9 leave; 0 roam off; 3 dpi 144 ").unwrap();
         let commands: Vec<Command> = steps.iter().map(|step| step.command).collect();
         assert_eq!(
@@ -420,7 +450,7 @@ mod tests {
 
     #[test]
     fn bad_script_is_rejected() {
-        for text in ["grab", "1 fly", "1 drag 300", "-1 grab", "1 roam maybe", "1 grab extra"] {
+        for text in ["grab", "1 fly", "1 drag 300", "-1 grab", "1 roam maybe", "1 grab extra", "1 do dance", "1 rub"] {
             assert!(parse_script(text).is_err(), "{text}");
         }
         assert_eq!(parse_script("").unwrap(), []);

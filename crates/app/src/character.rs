@@ -17,6 +17,9 @@ use crate::stage::{Monitor, Stage};
 const WALL_MARGIN: f64 = 64.0;
 /// 들어 올릴 때 화면 위 끝에 맞추는 칸의 줄. 머리 조금 위다.
 const HEAD_ROW: f64 = 60.0;
+/// 머리로 치는 범위의 아래 끝. 뒷덜미(잡는 점)에서 발바닥까지를 1로 볼 때, 뒷덜미에서 이만큼 내려간 곳까지다.
+/// 꽃핀 그림에서는 칸의 y 160쯤이고, 얼굴 아래 끝이다. 이 위를 문질러야 쓰다듬는 것으로 친다.
+const HEAD_BELOW_HOLD: f64 = 0.31;
 /// 할 일이 없을 때(다 사라진 뒤) 다음에 깨어날 때까지의 시간.
 const IDLE_WAKE: Duration = Duration::from_secs(3600);
 /// 모든 꽃핀이 함께 맞추는 박자(초). 그림이 1초에 24장이라 장 하나의 길이와 같다.
@@ -55,6 +58,8 @@ struct Layout {
     shadow_center: (i32, i32),
     /// 발바닥에서 잡는 점(뒷덜미)까지(화면 px).
     hold: (f64, f64),
+    /// 발바닥에서 머리의 아래 끝까지(화면 px, 위쪽이라 음수).
+    head_bottom: f64,
     /// 그림자가 창 안에 다 들어오는 가장 높은 높이(화면 px). 이보다 높이 뜨면 그림자를 그리지 않는다.
     shadow_reach: f64,
     /// 벽에서 떨어져 설 거리와, 들어 올릴 때 발바닥에서 화면 위 끝까지 남길 거리(화면 px).
@@ -84,6 +89,7 @@ impl Layout {
                 (character.hold.0 as f64 - character.pivot.0 as f64) * factor,
                 (character.hold.1 as f64 - character.foot_y as f64) * factor,
             ),
+            head_bottom: (character.hold.1 as f64 - character.foot_y as f64) * (1.0 - HEAD_BELOW_HOLD) * factor,
             shadow_reach: (bounds.bottom() - shadow_bottom).max(1) as f64,
             wall_margin: WALL_MARGIN * factor,
             headroom: (character.foot_y as f64 - HEAD_ROW) * factor,
@@ -220,6 +226,17 @@ impl Character {
     pub fn set_look(&mut self, look: Look, now: Instant) {
         self.look = look;
         self.wake(now);
+    }
+
+    /// 커서가 `cursor`에서 `distance`px 움직였다. 머리 위였으면 문지른 것으로 친다.
+    pub fn rub(&mut self, motions: &Motions, cursor: (i32, i32), distance: f64, now: Instant) {
+        let before = self.actor.mode();
+        if (cursor.1 as f64) < self.actor.position().1 + self.layout.head_bottom {
+            self.actor.rub(motions, distance);
+        }
+        if self.actor.mode() != before {
+            self.wake(now);
+        }
     }
 
     /// 커서가 `cursor`에 있을 때, 잡는 점(뒷덜미)이 커서에 오게 하는 발바닥 자리.

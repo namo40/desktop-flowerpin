@@ -91,6 +91,16 @@ pub struct Motions {
     pub spawn: MotionId,
     pub spawn_to_fall: MotionId,
     pub despawn: MotionId,
+    pub poke_surprise: MotionId,
+    pub poke_pout: MotionId,
+    pub poke_shy: MotionId,
+    pub pat: MotionId,
+    pub stretch: MotionId,
+    pub yawn: MotionId,
+    pub jump: MotionId,
+    pub sleep_in: MotionId,
+    pub sleep_loop: MotionId,
+    pub sleep_out: MotionId,
 }
 
 impl Motions {
@@ -131,6 +141,16 @@ impl Motions {
             spawn: find("spawn")?,
             spawn_to_fall: find("spawn_to_fall")?,
             despawn: find("despawn")?,
+            poke_surprise: find("poke_surprise")?,
+            poke_pout: find("poke_pout")?,
+            poke_shy: find("poke_shy")?,
+            pat: find("pat")?,
+            stretch: find("stretch")?,
+            yawn: find("yawn")?,
+            jump: find("jump")?,
+            sleep_in: find("sleep_in")?,
+            sleep_loop: find("sleep_loop")?,
+            sleep_out: find("sleep_out")?,
             clips,
         })
     }
@@ -165,6 +185,16 @@ pub mod tests {
             ("spawn_to_fall", &[250, 250], false, Some("fall")),
             ("despawn", &[1000, 1000], false, None),
             ("stretch", &[300, 300], false, Some("idle2")),
+            ("yawn", &[400, 400], false, Some("idle2")),
+            ("poke_surprise", &[200, 200], false, Some("idle2")),
+            ("poke_pout", &[200, 200], false, Some("idle2")),
+            ("poke_shy", &[200, 200], false, Some("idle2")),
+            ("pat", &[250, 250], false, Some("idle2")),
+            // 0.3초에 박차고 올라 1.63초에 내려온다. 그림은 1.7초다.
+            ("jump", &[300, 700, 700], false, Some("fall")),
+            ("sleep_in", &[250, 250], false, Some("sleep_loop")),
+            ("sleep_loop", &[500, 500], true, Some("sleep_out")),
+            ("sleep_out", &[250, 250], false, Some("idle2")),
             ("edge_in", &[100, 100], false, Some("edge_loop")),
             ("edge_loop", &[100, 100], true, Some("edge_out")),
             ("edge_out", &[100, 100], false, Some("idle2")),
@@ -182,6 +212,7 @@ pub mod tests {
             match clip.name.as_str() {
                 "walk_w" => (clip.foot_shift, clip.stride) = (5.0, 40.0),
                 "walk_e" => (clip.foot_shift, clip.stride) = (-4.0, 40.0),
+                "jump" => clip.launch_ms = Some(300.0),
                 _ => {}
             }
         }

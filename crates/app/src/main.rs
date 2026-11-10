@@ -21,7 +21,7 @@ mod win;
 use std::collections::VecDeque;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use actor::Mode;
+use actor::{Habits, Mode};
 use character::{Character, Look};
 use character_window::WindowEvent;
 use clock::WakeTimer;
@@ -43,6 +43,15 @@ const COALESCE: Duration = Duration::from_millis(3);
 /// 그 전에 떼면 클릭이다.
 const CLICK_MOVE: f64 = 6.0;
 const CLICK_HOLD: Duration = Duration::from_millis(250);
+
+/// 마우스와 키보드를 이만큼 쓰지 않으면 자리를 비운 것으로 친다. 그러면 꽃핀도 잠든다.
+const AWAY_AFTER: Duration = Duration::from_secs(5 * 60);
+/// 자리를 비웠는지 확인하는 간격.
+const AWAY_CHECK: Duration = Duration::from_secs(1);
+/// 머리 위에서 움직인 것을 이어서 문지른 것으로 치는 한계. 이보다 오래 끊겼거나 한 번에 이보다 멀리(px, 그림
+/// 1배 기준) 뛰었으면 커서가 꽃핀을 벗어났다 돌아온 것이라 세지 않는다.
+const RUB_GAP: Duration = Duration::from_millis(250);
+const RUB_JUMP: f64 = 120.0;
 
 /// 끝내기를 고른 뒤 꽃핀들이 사라지기를 기다리는 한계. 공중에 있던 꽃핀이 내려와 인사할 시간이다.
 const QUIT_LIMIT: Duration = Duration::from_secs(8);
@@ -133,7 +142,8 @@ fn run(frames: &mut Frames, options: &dev::Options, report: &mut dev::Report) ->
         });
     }
     if options.still {
-        characters.iter_mut().for_each(|character| character.actor_mut().set_roam(false));
+        let still = Habits { roam: false, whim_rate: 0.0, ..Habits::default() };
+        characters.iter_mut().for_each(|character| character.actor_mut().set_habits(still));
     }
 
     let pack = frames.pack();
@@ -159,6 +169,7 @@ fn run(frames: &mut Frames, options: &dev::Options, report: &mut dev::Report) ->
     }
     report.add(format!("꽃핀 {}명, 배율 {} (크기 {}%)", characters.len(), characters[0].scale(), options.size));
     report.add(format!("창 {}x{}", characters[0].window().width(), characters[0].window().height()));
+    report.add(format!("시작할 때 마지막 입력 뒤 {:.1}초", win::idle_seconds()));
 
     // 트레이 아이콘은 서 있는 그림(idle2의 첫 장)의 얼굴로 만든다.
     let icon_size = tray::icon_size();
@@ -178,6 +189,13 @@ fn run(frames: &mut Frames, options: &dev::Options, report: &mut dev::Report) ->
     let mut script: VecDeque<dev::Step> = options.script.iter().copied().collect();
     let mut script_origin = (0.0, 0.0);
     let mut pointer = Pointer::Idle;
+    // 누르지 않은 채 꽃핀 위에서 마지막으로 움직인 곳. 문지른 거리를 재는 데 쓴다.
+    let mut hover: Option<(HWND, (i32, i32), Instant)> = None;
+    // 자리를 비운 것으로 치는 시간. 0이면 보지 않는다.
+    let away_after = options.away_after.unwrap_or(AWAY_AFTER);
+    let mut away = false;
+    let mut away_forced = false;
+    let mut next_away_check = started;
     let mut quitting: Option<Instant> = None;
     let mut hellos = 0;
     let deadline = options.run_for.map(|d| started + d);
@@ -239,10 +257,29 @@ fn run(frames: &mut Frames, options: &dev::Options, report: &mut dev::Report) ->
                             }
                             pointer = Pointer::Idle;
                         }
-                        // 짧게 눌렀다 뗐다. 클릭 반응은 아직 없다.
-                        Pointer::Pressing { hwnd: pressed, .. } if pressed == hwnd => pointer = Pointer::Idle,
+                        // 짧게 눌렀다 뗐다. 클릭이다.
+                        Pointer::Pressing { hwnd: pressed, .. } if pressed == hwnd => {
+                            if let Some(i) = find(&characters, hwnd) {
+                                characters[i].actor_mut().poke(&motions);
+                                characters[i].wake(now);
+                            }
+                            pointer = Pointer::Idle;
+                        }
                         _ => {}
                     }
+                }
+                WindowEvent::Hover { hwnd, x, y } => {
+                    if let (Some((last_hwnd, at, when)), Some(i)) = (hover, find(&characters, hwnd)) {
+                        // 가로와 세로로 움직인 거리를 더한다(데모와 같은 셈법).
+                        let distance = ((x - at.0).abs() + (y - at.1).abs()) as f64;
+                        let connected = last_hwnd == hwnd
+                            && now.duration_since(when) <= RUB_GAP
+                            && distance <= RUB_JUMP * characters[i].scale().factor();
+                        if connected && distance > 0.0 {
+                            characters[i].rub(&motions, (x, y), distance, now);
+                        }
+                    }
+                    hover = Some((hwnd, (x, y), now));
                 }
                 WindowEvent::Menu { x, y } => menu_at = Some((x, y)),
                 WindowEvent::StageChanged => stage_changed = true,
@@ -282,6 +319,20 @@ fn run(frames: &mut Frames, options: &dev::Options, report: &mut dev::Report) ->
             }
         }
 
+        // 사용자가 자리를 비웠는지 가끔 본다. 비웠으면 꽃핀도 잠들고, 돌아오면 깬다.
+        if now >= next_away_check && !away_forced {
+            next_away_check = now + AWAY_CHECK;
+            let idle = Duration::from_secs_f64(win::idle_seconds());
+            let now_away = !away_after.is_zero() && idle >= away_after;
+            if now_away != away {
+                away = now_away;
+                for character in &mut characters {
+                    character.actor_mut().set_away(away);
+                    character.wake(now);
+                }
+            }
+        }
+
         // 3. 만드는 동안 확인용: 정한 시각에 시킨 일과 차례로 보여 줄 동작.
         while script.front().is_some_and(|step| now >= started + step.at) {
             let Some(step) = script.pop_front() else { break };
@@ -297,10 +348,21 @@ fn run(frames: &mut Frames, options: &dev::Options, report: &mut dev::Report) ->
                 }
                 dev::Command::Release => character.actor_mut().release(&motions),
                 dev::Command::Leave => quit_asked = true,
-                dev::Command::Roam(roam) => character.actor_mut().set_roam(roam),
+                dev::Command::Roam(roam) => {
+                    let habits = Habits { roam, ..character.actor().habits() };
+                    character.actor_mut().set_habits(habits);
+                }
                 dev::Command::Dpi(dpi) => {
                     look.dpi_override = Some(dpi);
                     characters.iter_mut().for_each(|character| character.set_look(look, now));
+                }
+                dev::Command::Click => character.actor_mut().poke(&motions),
+                dev::Command::Rub(distance) => character.actor_mut().rub(&motions, distance),
+                dev::Command::Do(whim) => character.actor_mut().start(whim, &motions),
+                dev::Command::Away(on) => {
+                    away = on;
+                    away_forced = true;
+                    characters.iter_mut().for_each(|character| character.actor_mut().set_away(on));
                 }
             }
             characters[0].wake(now);
@@ -359,6 +421,9 @@ fn run(frames: &mut Frames, options: &dev::Options, report: &mut dev::Report) ->
         let mut wake = characters.iter().map(Character::due).min().expect("꽃핀이 한 명 이상 남아 있다");
         if let Pointer::Pressing { since, .. } = pointer {
             wake = wake.min(since + CLICK_HOLD);
+        }
+        if !away_forced && !away_after.is_zero() {
+            wake = wake.min(next_away_check);
         }
         for limit in [deadline, quitting, script.front().map(|step| started + step.at)].into_iter().flatten() {
             wake = wake.min(limit);
