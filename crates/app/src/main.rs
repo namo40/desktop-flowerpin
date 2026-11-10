@@ -5,6 +5,7 @@
 
 mod actor;
 mod app;
+mod autostart;
 mod bubble;
 mod character;
 mod character_window;

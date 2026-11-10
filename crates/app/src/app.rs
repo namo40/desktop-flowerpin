@@ -18,6 +18,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 };
 
 use crate::actor::{Habits, Mode, Rng, Show};
+use crate::autostart;
 use crate::bubble::{Bubble, Speech};
 use crate::character::{self, Character, Look, Stay};
 use crate::character_window::{self, WindowEvent};
@@ -405,6 +406,7 @@ impl App {
         }
         app.apply_habits();
         app.describe();
+        app.sync_autostart(started);
         app.greet();
         // 적어 둔 메모를 포스트잇으로 붙인다. 붙인 적이 없는 메모에 자리를 잡아 줬으면 저장한다.
         app.postits.attach(&mut app.memos);
@@ -522,7 +524,48 @@ impl App {
             }
         }
         self.show_live();
+        self.sync_autostart(now);
         self.store.settings_changed(now);
+    }
+
+    /// "Windows 시작할 때 실행" 설정대로 레지스트리를 맞춘다. 켜 두었으면 이 실행 파일의 자리를 적고,
+    /// 꺼 두었으면 적힌 것을 지운다. 정한 시간만 도는 확인용 실행은 적을 곳을 따로 줬을 때만 한다.
+    fn sync_autostart(&mut self, now: Instant) {
+        let key = match (&self.dev.options.run_key, self.dev.options.run_for) {
+            (Some(key), _) => key.clone(),
+            (None, None) => autostart::RUN_KEY.to_string(),
+            (None, Some(_)) => return,
+        };
+        let wanted = self.settings.is_on(Key::StartWithWindows);
+        let exe = std::env::current_exe().ok();
+        // 켜 두었는데 이 실행 파일의 자리를 모르면, 적혀 있는 것을 건드리지 않는다.
+        if wanted && exe.is_none() {
+            return;
+        }
+        if autostart::set(&key, exe.as_deref().filter(|_| wanted)) {
+            self.note(now, format!("Windows 시작할 때 실행: {}", if wanted { "적어 둠" } else { "지움" }));
+        }
+    }
+
+    /// 꽃핀들이 잠깐 반짝여, 어디 있는지 알려 준다. 다른 창에 가려 있었으면 앞으로 나온다.
+    /// 메뉴로 숨겨 둔 중이었으면 다시 보인다.
+    fn blink_all(&mut self, now: Instant) {
+        if self.hide != Hide::Off {
+            self.hide = Hide::Off;
+            self.apply_hiding(now);
+        }
+        if self.out_of_sight {
+            return;
+        }
+        self.note(now, format!("꽃핀 {}명이 반짝임", self.characters.len()));
+        self.characters.iter_mut().for_each(|character| character.blink(now));
+        if !self.look.topmost {
+            // "항상 위"가 꺼져 있으면 다른 창 뒤에 있을 수 있다. 앞에 설 꽃핀을 올리고 나머지를 그 뒤에 세운다.
+            if let Some(front) = self.home().or(self.characters.last()) {
+                front.window().raise();
+            }
+        }
+        self.restack();
     }
 
     /// 처음 켰을 때 한 번, 쓰는 법과 인터넷을 쓴다는 것을 말풍선으로 알린다.
@@ -1118,8 +1161,13 @@ impl App {
                 }
                 TrayEvent::Open => self.open_settings(),
                 TrayEvent::TaskbarCreated => self.tray.add(),
-                // 앱을 한 번 더 켰다. 꽃핀이 어디 있는지 알려 주는 일은 아직 하지 않는다.
-                TrayEvent::Hello => self.dev.hellos += 1,
+                // 앱을 한 번 더 켰다. 새로 켠 쪽은 끝났고, 여기서는 꽃핀이 반짝여 이미 켜져 있다고 알린다.
+                TrayEvent::Hello => {
+                    self.dev.hellos += 1;
+                    self.blink_all(now);
+                }
+                // 트레이 아이콘을 클릭했다. 꽃핀이 반짝여 어디 있는지 알려 준다.
+                TrayEvent::Click => self.blink_all(now),
                 TrayEvent::ToastClicked => self.toast_clicked(now),
                 TrayEvent::Locked(locked) => {
                     self.locked = locked;
@@ -1926,6 +1974,7 @@ impl App {
                 self.screen = if on { Screen::Busy } else { Screen::Free };
             }
             dev::Command::Lock(on) => self.locked = on,
+            dev::Command::Hello => self.blink_all(now),
             dev::Command::Hide(seconds) => {
                 self.hide = Hide::Until(now + Duration::from_secs_f64(seconds));
             }

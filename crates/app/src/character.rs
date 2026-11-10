@@ -29,6 +29,11 @@ const BEAT: f64 = BEAT_MS / 1000.0;
 /// 박자를 셀 때 봐주는 오차(박자 단위, 약 40나노초). 시각을 나노초로 적으면서 생기는 끝자리 오차를 넘는다.
 const BEAT_SLACK: f64 = 1e-6;
 
+/// 반짝이는 시간(초)과 그동안 밝아졌다 돌아오는 횟수, 가장 밝을 때 흰색 쪽으로 가는 정도(0~1).
+const BLINK_TIME: f64 = 0.9;
+const BLINK_PULSES: f64 = 2.0;
+const BLINK_PEAK: f64 = 0.6;
+
 /// 깨어났을 때 이만큼 앞선 시각까지 본다. 곧 올 박자를 지금 함께 밟으려는 것이다.
 /// [`Character::tick`]에는 "지금 + 이 값"을 넘긴다.
 pub const LOOKAHEAD: Duration = Duration::from_millis(3);
@@ -164,6 +169,8 @@ struct Drawn {
     /// 그림자의 진하기(0~255)와, 발밑에서 아래로 내려간 거리(화면 px).
     shadow_level: u8,
     shadow_drop: i32,
+    /// 반짝여서 밝아진 정도(0~255).
+    glow: u8,
 }
 
 pub struct Character {
@@ -189,6 +196,8 @@ pub struct Character {
     /// 올라설 수 있는 다른 창의 윗변들과, 그것을 계산했을 때의 조건. 조건이 달라졌을 때만 다시 계산한다.
     perches: Vec<Perch>,
     perches_for: Option<(u64, Rect, Body, bool)>,
+    /// 반짝임이 끝날 때까지 남은 시간(초). 반짝이지 않으면 0이다.
+    blink_left: f64,
 }
 
 impl Character {
@@ -252,6 +261,7 @@ impl Character {
             raised: true,
             perches: Vec::new(),
             perches_for: None,
+            blink_left: 0.0,
         };
         let around = character.surroundings(character.monitor(stage));
         character.render(frames, motions, &around)?;
@@ -311,6 +321,18 @@ impl Character {
         if visible {
             self.resume(now);
         }
+    }
+
+    /// 잠깐 반짝인다. 어디 있는지 알려 주려는 것이다. 하던 동작은 그대로 한다.
+    pub fn blink(&mut self, now: Instant) {
+        self.blink_left = BLINK_TIME;
+        self.wake(now);
+    }
+
+    /// 반짝여서 지금 밝아진 정도(0~255).
+    fn glow(&self) -> u8 {
+        let turns = (1.0 - self.blink_left / BLINK_TIME) * BLINK_PULSES;
+        ((turns * std::f64::consts::PI).sin().powi(2) * BLINK_PEAK * 255.0).round() as u8
     }
 
     /// 상태를 밖에서 바꿨을 때(잡기, 놓기 등) 다음 걸음을 바로 밟게 한다.
@@ -432,6 +454,7 @@ impl Character {
         let at = clock_at(self.beat, horizon, self.last, self.actor.moves_smoothly());
         let dt = at.saturating_duration_since(self.last).as_secs_f64();
         self.last = at;
+        self.blink_left = (self.blink_left - dt).max(0.0);
 
         let monitor = *self.monitor(stage);
         // 배율이 다른 모니터로 옮겨졌으면 크기를 다시 잡는다. 잡혀 있는 동안에는 창을 바꾸지 않는다.
@@ -467,7 +490,12 @@ impl Character {
     ///
     /// 떨어지거나 끌려가는 동안에는 박자보다 자주 움직여야 하므로 박자에 맞추지 않는다.
     fn schedule(&mut self, motions: &Motions, from: Instant) {
-        self.due = due_after(self.beat, from, self.actor.wake_in(motions), self.actor.moves_smoothly());
+        let mut wait = self.actor.wake_in(motions);
+        if self.blink_left > 0.0 {
+            // 반짝이는 동안에는 장이 그대로여도 박자마다 밝기를 고친다.
+            wait = wait.min(BEAT);
+        }
+        self.due = due_after(self.beat, from, wait, self.actor.moves_smoothly());
     }
 
     /// 배율을 바꾼다. 창 버퍼의 크기가 달라지므로 창을 새로 만든다.
@@ -492,6 +520,7 @@ impl Character {
             frame: self.actor.frame(motions),
             shadow_level,
             shadow_drop: if shadow_level > 0 { height.round() as i32 } else { 0 },
+            glow: self.glow(),
         };
 
         let mut dirty = Rect::EMPTY;
@@ -502,6 +531,7 @@ impl Character {
             let mut drawn = Rect::EMPTY;
             if !self.actor.is_gone() {
                 drawn = frames.draw(now.frame, self.layout.scale, self.window.pixels(), width, self.layout.origin)?;
+                brighten(self.window.pixels(), width, drawn, now.glow);
             }
             let center = (self.layout.shadow_center.0, self.layout.shadow_center.1 + now.shadow_drop);
             let shadow = self.layout.shadow.draw_under(self.window.pixels(), width, rows, center, now.shadow_level);
@@ -516,6 +546,26 @@ impl Character {
         self.window.move_to(x, y);
         self.window.present(dirty);
         Ok(())
+    }
+}
+
+/// 창 버퍼의 `rect` 범위에 있는 그림을 흰색 쪽으로 밝힌다. `level`이 255면 온통 희다. 투명한 정도는 그대로다.
+fn brighten(pixels: &mut [u32], width: i32, rect: Rect, level: u8) {
+    if level == 0 {
+        return;
+    }
+    let level = level as u32;
+    for y in rect.y..rect.bottom() {
+        let start = (y * width + rect.x) as usize;
+        for pixel in &mut pixels[start..start + rect.w as usize] {
+            let (alpha, color) = (*pixel >> 24, *pixel);
+            // 미리 곱한 알파라, 그 픽셀에서 가장 밝은 값은 알파와 같다.
+            let lift = |shift: u32| {
+                let channel = ((color >> shift) & 0xFF).min(alpha);
+                (channel + (alpha - channel) * level / 255) << shift
+            };
+            *pixel = alpha << 24 | lift(16) | lift(8) | lift(0);
+        }
     }
 }
 
@@ -603,6 +653,22 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn brightening_moves_colors_toward_white_and_keeps_alpha() {
+        // 불투명한 색, 반투명한 색(미리 곱한 알파), 투명한 픽셀.
+        let mut pixels = vec![0xFF20_4060u32, 0x8010_2030, 0x0000_0000, 0xFF20_4060];
+        brighten(&mut pixels, 4, Rect::new(0, 0, 3, 1), 255);
+        // 가장 밝을 때는 알파만큼 희다. 투명한 픽셀과 범위 밖은 그대로다.
+        assert_eq!(pixels, [0xFFFF_FFFF, 0x8080_8080, 0x0000_0000, 0xFF20_4060]);
+        let mut half = vec![0xFF00_80FFu32];
+        brighten(&mut half, 1, Rect::new(0, 0, 1, 1), 128);
+        assert_eq!(half, [0xFF80_BFFF]);
+        // 0이면 아무것도 바꾸지 않는다.
+        let mut same = vec![0xFF12_3456u32];
+        brighten(&mut same, 1, Rect::new(0, 0, 1, 1), 0);
+        assert_eq!(same, [0xFF12_3456]);
     }
 
     #[test]

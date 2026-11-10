@@ -83,6 +83,9 @@ pub struct Options {
     /// `--clock "2026-11-12 18:59:50"`: 이 PC의 시계가 시작할 때 이 시각이었던 것으로 친다. 알림을 확인하는 데 쓴다.
     /// 벽시계의 1970-01-01 00:00부터 흐른 초다.
     pub clock: Option<i64>,
+    /// `--run-key 자리`: "Windows 시작할 때 실행"을 진짜 자리 대신 레지스트리(`HKEY_CURRENT_USER` 아래)의
+    /// 이 자리에 적는다. `--for`와 함께 쓸 때 이것을 주지 않으면 레지스트리를 건드리지 않는다.
+    pub run_key: Option<String>,
 }
 
 impl Options {
@@ -115,6 +118,7 @@ impl Options {
             screen_check: args.iter().any(|a| a == "--screen-check"),
             clock: value("--clock")
                 .map(|s| parse_clock(&s).unwrap_or_else(|| crate::win::fatal("--clock을 읽을 수 없습니다."))),
+            run_key: value("--run-key"),
         }
     }
 }
@@ -149,6 +153,8 @@ pub enum Command {
     Fullscreen(bool),
     /// `lock on|off`: 화면을 잠근 것으로, 또는 푼 것으로 친다.
     Lock(bool),
+    /// `hello`: 앱을 한 번 더 켰거나 트레이 아이콘을 클릭한 것으로 친다. 꽃핀이 반짝인다.
+    Hello,
     /// `hide 초`: 메뉴에서 "잠깐 숨기기"를 고른 것과 같다. 그 시간이 지나면 다시 보인다.
     Hide(f64),
     /// `menu 번호`: 메뉴에서 그 항목을 고른 것으로 친다. 번호는 [`crate::tray::MenuItem`]의 값이다.
@@ -304,6 +310,7 @@ pub fn parse_script(text: &str) -> Result<Vec<Step>, String> {
             (Some("away"), 3) if words[2] == "on" || words[2] == "off" => Command::Away(words[2] == "on"),
             (Some("fullscreen"), 3) if words[2] == "on" || words[2] == "off" => Command::Fullscreen(words[2] == "on"),
             (Some("lock"), 3) if words[2] == "on" || words[2] == "off" => Command::Lock(words[2] == "on"),
+            (Some("hello"), 2) => Command::Hello,
             (Some("hide"), 3) => Command::Hide(number(2)?),
             (Some("menu"), 3) => Command::Menu(number(2)? as u32),
             (Some("target"), 3) => Command::Target(number(2)? as usize),

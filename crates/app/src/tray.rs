@@ -32,7 +32,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     DestroyWindow, FindWindowW, GetSystemMetrics, HICON, HMENU, ICONINFO, KillTimer, MF_DISABLED, MF_GRAYED, MF_POPUP,
     MF_SEPARATOR, MF_STRING, PBT_APMRESUMEAUTOMATIC, PBT_APMRESUMESUSPEND, PBT_APMSUSPEND, PostMessageW,
     RegisterClassExW, RegisterWindowMessageW, SM_CXICON, SM_CXSMICON, SetForegroundWindow, SetTimer, TPM_NONOTIFY,
-    TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenuEx, WM_APP, WM_CONTEXTMENU, WM_LBUTTONDBLCLK, WM_NULL,
+    TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenuEx, WM_APP, WM_CONTEXTMENU, WM_LBUTTONDBLCLK, WM_LBUTTONUP, WM_NULL,
     WM_POWERBROADCAST, WM_RBUTTONUP, WM_TIMER, WM_WTSSESSION_CHANGE, WNDCLASSEXW, WS_POPUP, WTS_SESSION_LOCK,
     WTS_SESSION_UNLOCK,
 };
@@ -130,6 +130,8 @@ impl MenuItem {
 pub enum TrayEvent {
     /// 트레이 아이콘을 오른쪽 클릭했다. 좌표는 메뉴를 띄울 화면 위치다.
     Menu { x: i32, y: i32 },
+    /// 트레이 아이콘을 왼쪽 버튼으로 클릭했다. 두 번 클릭할 때도 그 앞에 한 번 온다.
+    Click,
     /// 트레이 아이콘을 두 번 클릭했다. 설정 창을 연다.
     Open,
     /// 작업표시줄이 새로 만들어졌다(탐색기가 다시 시작됨). 아이콘을 다시 등록해야 한다.
@@ -543,6 +545,7 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                     let (x, y) = cursor_position();
                     push(TrayEvent::Menu { x, y });
                 }
+                WM_LBUTTONUP => push(TrayEvent::Click),
                 WM_LBUTTONDBLCLK => push(TrayEvent::Open),
                 NIN_BALLOONUSERCLICK => push(TrayEvent::ToastClicked),
                 _ => {}
