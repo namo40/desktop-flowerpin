@@ -59,6 +59,11 @@ impl Notices {
         self.waiting.push(notice);
     }
 
+    /// 이름이 `tag`인 것이 줄에서 기다리고 있는가. 떠 있는 것은 치지 않는다.
+    pub fn is_waiting(&self, tag: &'static str) -> bool {
+        self.waiting.iter().any(|notice| notice.tag == Some(tag))
+    }
+
     /// 이름이 `tag`인 것을 모두 버린다. 떠 있던 것을 버렸으면 `true`를 돌려준다(말풍선을 닫아야 한다).
     pub fn cancel(&mut self, tag: &'static str) -> bool {
         self.waiting.retain(|notice| notice.tag != Some(tag));
@@ -142,6 +147,20 @@ mod tests {
         }
         assert_eq!(shown, ["알림", "방송 1", "방송 2", "메모", "안내"]);
         assert!(notices.showing().is_none() && notices.dismiss().is_none());
+    }
+
+    #[test]
+    fn knows_what_is_still_waiting() {
+        let now = Instant::now();
+        let mut notices = Notices::default();
+        notices.push(Notice { tag: Some("first"), ..notice(Kind::Note, "하나") });
+        notices.push(Notice { tag: Some("second"), ..notice(Kind::Note, "둘") });
+        assert!(notices.is_waiting("first") && notices.is_waiting("second") && !notices.is_waiting("third"));
+        // 떠 있는 것은 기다리는 것이 아니다.
+        notices.next(now, true);
+        assert!(!notices.is_waiting("first") && notices.is_waiting("second"));
+        notices.cancel("second");
+        assert!(!notices.is_waiting("second"));
     }
 
     #[test]

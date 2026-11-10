@@ -67,6 +67,11 @@ const LIVE_TAG: &str = "live";
 const LIVE_END_LASTS: Duration = Duration::from_secs(10);
 /// 메뉴에 적는 방송 제목의 가장 긴 길이(글자 수).
 const MENU_TITLE: usize = 40;
+/// 처음 켰을 때 하는 안내의 이름. 뒤의 것은 인터넷을 쓴다는 안내다.
+const GREET_TAG: &str = "greet";
+const GREET_LIVE_TAG: &str = "greet-live";
+/// 처음 켰을 때의 인사가 떠 있는 시간. 인터넷을 쓴다는 안내는 클릭할 때까지 떠 있다.
+const GREET_LASTS: Duration = Duration::from_secs(12);
 
 /// 마우스로 꽃핀에게 하고 있는 일.
 #[derive(Clone, Copy)]
@@ -154,6 +159,8 @@ pub struct App {
     face: Vec<u32>,
     icon_size: i32,
     live: LiveWatch,
+    /// 처음 켰을 때의 안내를 하는 중인가.
+    greeting: bool,
     window: Option<SettingsWindow>,
     /// 설정 창에 보여 줄 CPU를 재는 도구와, 다음에 고칠 시각.
     meter: Meter,
@@ -268,6 +275,7 @@ impl App {
             face,
             icon_size,
             live,
+            greeting: false,
             window: None,
             meter: Meter::start(),
             next_usage: started,
@@ -316,6 +324,7 @@ impl App {
         }
         app.apply_habits();
         app.describe();
+        app.greet();
         Ok(app)
     }
 
@@ -402,15 +411,42 @@ impl App {
         }
         self.apply_habits();
         if !self.live_enabled() {
-            // 방송 상태 확인을 껐다. 알던 것을 잊고, 방송 안내를 치운다.
+            // 방송 상태 확인을 껐다. 알던 것을 잊고, 방송 안내와 아직 띄우지 않은 인터넷 안내를 치운다.
             if *self.live.tracker.view() != View::Unknown {
                 self.live.tracker = Tracker::new(self.live.tracker.announced().map(str::to_string));
                 self.live.checked = None;
             }
-            self.drop_live_notices(now);
+            if self.notices.cancel(LIVE_TAG) | self.notices.cancel(GREET_LIVE_TAG) {
+                self.close_bubble(now);
+            }
         }
         self.show_live();
         self.store.settings_changed(now);
+    }
+
+    /// 처음 켰을 때 한 번, 쓰는 법과 인터넷을 쓴다는 것을 말풍선으로 알린다.
+    fn greet(&mut self) {
+        // 정한 시간만 도는 확인용 실행에서는 시켰을 때만 한다.
+        if self.state.greeted || (self.dev.options.run_for.is_some() && !self.dev.options.greet) {
+            return;
+        }
+        let note = |title: &str, body: String, lasts, tag| Notice {
+            kind: Kind::Note,
+            speech: Speech { title: title.to_string(), body },
+            lasts,
+            click: Click::Close,
+            tag: Some(tag),
+        };
+        let hello = "나를 오른쪽 클릭하면 메뉴가 나와요.".to_string();
+        self.notices.push(note("안녕!", hello, Some(GREET_LASTS), GREET_TAG));
+        if self.live_enabled() {
+            let body = format!(
+                "방송이 켜지면 알려 주려고 {}분마다 치지직에 물어봐요. 치지직의 공식 API는 아니에요. 설정에서 끌 수 있어요.",
+                self.settings.number(Key::LiveCheckInterval)
+            );
+            self.notices.push(note("방송 알림", body, None, GREET_LIVE_TAG));
+        }
+        self.greeting = true;
     }
 
     /// 방송 상태 확인이 켜져 있는가.
@@ -427,7 +463,8 @@ impl App {
 
     /// 치지직에 다음으로 물을 시각. 묻지 않을 때는 `None`이다.
     fn live_due(&self) -> Option<Instant> {
-        if !self.live_online() || self.live.waiting {
+        // 처음 켰을 때는 인터넷을 쓴다는 안내를 띄운 뒤부터 묻는다.
+        if !self.live_online() || self.live.waiting || self.notices.is_waiting(GREET_LIVE_TAG) {
             return None;
         }
         let interval = Duration::from_secs(self.settings.number(Key::LiveCheckInterval).max(1) as u64 * 60);
@@ -926,6 +963,12 @@ impl App {
         }
         if let Some(bubble) = &mut self.bubble {
             bubble.follow(head, half_body, bounds);
+        }
+        // 처음 켰을 때의 안내를 다 띄웠으면(또는 띄울 까닭이 없어졌으면) 다음부터는 하지 않게 적어 둔다.
+        if self.greeting && !self.notices.is_waiting(GREET_TAG) && !self.notices.is_waiting(GREET_LIVE_TAG) {
+            self.greeting = false;
+            self.state.greeted = true;
+            self.store.state_changed(now);
         }
     }
 

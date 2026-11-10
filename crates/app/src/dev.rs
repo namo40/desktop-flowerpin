@@ -70,6 +70,8 @@ pub struct Options {
     pub settings_shot: Option<PathBuf>,
     /// 정한 시간만 도는 확인용 실행에서도 치지직에 진짜로 묻는다. 주지 않으면 확인용 실행은 인터넷을 쓰지 않는다.
     pub live_check: bool,
+    /// 확인용 실행에서도 처음 켰을 때의 안내를 한다.
+    pub greet: bool,
     /// 확인용 실행에서도 Windows 알림을 진짜로 띄운다. 주지 않으면 보고서에 적기만 한다.
     pub toast: bool,
 }
@@ -99,6 +101,7 @@ impl Options {
             settings_dump: value("--settings-dump").map(PathBuf::from),
             settings_shot: value("--settings-shot").map(PathBuf::from),
             live_check: args.iter().any(|a| a == "--live-check"),
+            greet: args.iter().any(|a| a == "--greet"),
             toast: args.iter().any(|a| a == "--toast"),
         }
     }

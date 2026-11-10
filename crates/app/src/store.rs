@@ -35,6 +35,8 @@ pub struct State {
     pub settings_tab: usize,
     /// 마지막으로 안내한 방송의 시작 시각. 앱을 다시 켜도 같은 방송을 또 안내하지 않는 데 쓴다.
     pub announced_live: Option<String>,
+    /// 처음 켰을 때의 안내를 했는가.
+    pub greeted: bool,
 }
 
 impl State {
@@ -48,7 +50,7 @@ impl State {
             // 응답에 적혀 있던 글이다. 따옴표 같은 것이 섞여 있어도 파일이 깨지지 않게 적는다.
             text.push_str(&format!(",\n  \"announced_live\": {}", Value::String(opened.clone())));
         }
-        text.push_str("\n}\n");
+        text.push_str(&format!(",\n  \"greeted\": {}\n}}\n", self.greeted));
         text
     }
 
@@ -61,6 +63,7 @@ impl State {
             character: coordinate("x").zip(coordinate("y")),
             settings_tab: object.get("settings_tab").and_then(Value::as_u64).map_or(0, |tab| tab as usize),
             announced_live: object.get("announced_live").and_then(Value::as_str).map(str::to_string),
+            greeted: object.get("greeted").and_then(Value::as_bool).unwrap_or(false),
         })
     }
 }
@@ -203,6 +206,7 @@ mod tests {
             settings_tab: 3,
             // 따옴표와 역빗금이 섞여 있어도 그대로 돌아온다.
             announced_live: Some(r#"2026-11-09 "16:11:06" \"#.to_string()),
+            greeted: true,
         };
         assert_eq!(State::from_json(&state.to_json()), Some(state));
         let empty = State::default();
@@ -214,7 +218,7 @@ mod tests {
         // 자리의 한쪽 값만 있거나 숫자가 아니면 자리가 없는 것으로 친다.
         let state = State::from_json(r#"{"character": {"x": 10}, "settings_tab": "two", "later": true}"#).unwrap();
         assert_eq!(state, State::default());
-        let state = State::from_json(r#"{"announced_live": 20261109}"#).unwrap();
+        let state = State::from_json(r#"{"announced_live": 20261109, "greeted": "yes"}"#).unwrap();
         assert_eq!(state, State::default());
         assert_eq!(State::from_json("not json"), None);
     }
