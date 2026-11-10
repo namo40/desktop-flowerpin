@@ -298,11 +298,8 @@ impl App {
 
     /// 설정의 버릇을 모든 꽃핀에게 알린다.
     fn apply_habits(&mut self) {
-        let habits = if self.dev.options.still {
-            Habits { roam: false, whim_rate: 0.0, ..Habits::default() }
-        } else {
-            self.settings.habits()
-        };
+        let habits =
+            if self.dev.options.still { Habits { roam: false, whim_rate: 0.0 } } else { self.settings.habits() };
         self.characters.iter_mut().for_each(|character| character.actor_mut().set_habits(habits));
     }
 

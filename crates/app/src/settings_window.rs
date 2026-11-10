@@ -86,8 +86,6 @@ const CONTROLS: [Control; settings::COUNT] = [
     combo(Key::StartupCharacters, 1102, 1111, None),
     combo(Key::Size, 1103, 1112, None),
     check(Key::AlwaysOnTop, 1104),
-    check(Key::Wander, 1201),
-    combo(Key::WanderRange, 1202, 1211, Some(Key::Wander)),
     combo(Key::IdleActions, 1203, 1212, None),
     combo(Key::SleepWhenAway, 1204, 1213, None),
     combo(Key::ExtraStay, 1205, 1214, None),

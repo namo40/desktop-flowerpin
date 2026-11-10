@@ -109,7 +109,7 @@ pub enum Command {
     Release,
     /// `leave`: 메뉴에서 끝내기를 고른 것과 같다. 모든 꽃핀이 사라진 뒤 앱이 끝난다.
     Leave,
-    /// `roam on|off`: 혼자 돌아다니기를 켜고 끈다.
+    /// `roam on|off`: 돌아다니지 않고 제자리에 서 있게 하거나, 다시 돌아다니게 한다.
     Roam(bool),
     /// `dpi 값`: 모니터 DPI를 이 값으로 친다. 실행 중에 배율이 바뀌는 것을 확인한다.
     Dpi(u32),

@@ -3,7 +3,7 @@
 //! 모든 항목은 "몇 가지 가운데 하나를 고르는 것"으로 다룬다. 켜고 끄는 항목도 [끔, 켬] 가운데 하나를 고르는
 //! 것이다. 그래서 설정 창, 파일 읽기와 쓰기, 기본값으로 되돌리기가 항목 표([`SPECS`]) 하나만 보고 돌아간다.
 //!
-//! 파일(`settings.json`)에는 고른 순번이 아니라 뜻이 있는 값을 적는다(크기는 100, 범위는 160처럼).
+//! 파일(`settings.json`)에는 고른 순번이 아니라 뜻이 있는 값을 적는다(크기는 100, 잠드는 시간은 5처럼).
 //! 고를 수 있는 것을 나중에 더하거나 순서를 바꿔도 예전 파일이 그대로 읽힌다.
 
 use std::time::Duration;
@@ -22,8 +22,6 @@ pub enum Key {
     StartupCharacters,
     Size,
     AlwaysOnTop,
-    Wander,
-    WanderRange,
     IdleActions,
     SleepWhenAway,
     ExtraStay,
@@ -37,7 +35,7 @@ pub enum Key {
 }
 
 /// 항목 수.
-pub const COUNT: usize = 16;
+pub const COUNT: usize = 14;
 
 /// 파일에 적는 값.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -110,14 +108,6 @@ pub const SPECS: [Spec; COUNT] = [
     },
     flag(Key::AlwaysOnTop, "always_on_top", 0, true),
     // 꽃핀
-    flag(Key::Wander, "wander", 1, true),
-    Spec {
-        key: Key::WanderRange,
-        name: "wander_range",
-        tab: 1,
-        picks: &[number("좁게 (80px)", 80), number("보통 (160px)", 160), number("넓게 (320px)", 320)],
-        default: 1,
-    },
     Spec {
         key: Key::IdleActions,
         name: "idle_actions",
@@ -232,11 +222,7 @@ impl Settings {
 
     /// 꽃핀의 버릇.
     pub fn habits(&self) -> Habits {
-        Habits {
-            roam: self.is_on(Key::Wander),
-            wander: self.number(Key::WanderRange) as f64,
-            whim_rate: self.number(Key::IdleActions) as f64 / 100.0,
-        }
+        Habits { whim_rate: self.number(Key::IdleActions) as f64 / 100.0, ..Habits::default() }
     }
 
     /// 마우스와 키보드를 이만큼 쓰지 않으면 자리를 비운 것으로 친다. 껐으면 `None`이다.
@@ -309,7 +295,7 @@ mod tests {
     fn defaults_match_the_feature_list() {
         let settings = Settings::default();
         assert!(!settings.is_on(Key::StartWithWindows));
-        assert!(settings.is_on(Key::AlwaysOnTop) && settings.is_on(Key::Wander));
+        assert!(settings.is_on(Key::AlwaysOnTop));
         assert_eq!(settings.size_percent(), 100);
         assert_eq!(settings.habits(), Habits::default());
         assert_eq!(settings.away_after(), Some(Duration::from_secs(300)));
@@ -323,18 +309,19 @@ mod tests {
     fn written_file_reads_back_the_same() {
         let mut settings = Settings::default();
         settings.set(Key::Size, 2);
-        settings.set(Key::Wander, 0);
-        settings.set(Key::WanderRange, 0);
+        settings.set(Key::AlwaysOnTop, 0);
         settings.set(Key::IdleActions, 2);
         settings.set(Key::SleepWhenAway, 0);
         settings.set(Key::LiveEndNotice, 2);
         let text = settings.to_json();
         assert!(
-            text.contains("\"version\": 1") && text.contains("\"size\": 125") && text.contains("\"wander\": false")
+            text.contains("\"version\": 1")
+                && text.contains("\"size\": 125")
+                && text.contains("\"always_on_top\": false")
         );
         assert_eq!(Settings::from_json(&text), Some(settings.clone()));
         assert_eq!(settings.size_percent(), 125);
-        assert_eq!(settings.habits(), Habits { roam: false, wander: 80.0, whim_rate: 2.0 });
+        assert_eq!(settings.habits(), Habits { roam: true, whim_rate: 2.0 });
         assert_eq!(settings.away_after(), None);
     }
 
@@ -349,10 +336,10 @@ mod tests {
     #[test]
     fn values_that_cannot_be_picked_fall_back_to_the_default() {
         // 고를 수 없는 숫자, 종류가 다른 값은 그 항목만 기본값으로 둔다.
-        let text = r#"{"size": 90, "wander": "yes", "max_characters": 3, "live_start_notice": 5}"#;
+        let text = r#"{"size": 90, "always_on_top": "yes", "max_characters": 3, "live_start_notice": 5}"#;
         let settings = Settings::from_json(text).unwrap();
         assert_eq!(settings.size_percent(), 100);
-        assert!(settings.is_on(Key::Wander));
+        assert!(settings.is_on(Key::AlwaysOnTop));
         assert_eq!(settings.number(Key::MaxCharacters), 3);
         assert_eq!(settings.get(Key::LiveStartNotice), 0);
     }
@@ -368,12 +355,12 @@ mod tests {
     fn reset_touches_only_one_tab() {
         let mut settings = Settings::default();
         settings.set(Key::Size, 0);
-        settings.set(Key::Wander, 0);
+        settings.set(Key::IdleActions, 0);
         settings.set(Key::LiveCheck, 0);
         settings.reset_tab(1);
         assert_eq!(
-            (settings.get(Key::Size), settings.is_on(Key::Wander), settings.is_on(Key::LiveCheck)),
-            (0, true, false)
+            (settings.get(Key::Size), settings.get(Key::IdleActions), settings.is_on(Key::LiveCheck)),
+            (0, 1, false)
         );
     }
 

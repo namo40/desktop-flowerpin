@@ -62,13 +62,8 @@ const AFTER_ACT: (f64, f64) = (1.5, 3.5);
 const WHIMS: [(Whim, f64); 4] = [(Whim::Stretch, 0.10), (Whim::Yawn, 0.10), (Whim::Jump, 0.07), (Whim::Sleep, 0.05)];
 /// 단 위에 있을 때 걸터앉을 확률. 위의 행동들보다 먼저 따진다.
 const SIT_CHANCE: f64 = 0.10;
-/// 돌아다니지 않을 때 걸터앉을 확률.
-const STILL_SIT_CHANCE: f64 = 0.20;
 /// 걸터앉아 다리를 흔드는 횟수.
 const SIT_LOOPS: (u32, u32) = (3, 6);
-/// 돌아다니지 않을 때: 이만큼(초) 서 있다가 가끔 하는 행동과 그 확률. 점프는 하지 않는다.
-const STILL_REST: (f64, f64) = (6.0, 12.0);
-const STILL_WHIMS: [(Whim, f64); 3] = [(Whim::Stretch, 0.30), (Whim::Yawn, 0.30), (Whim::Sleep, 0.15)];
 /// 머리를 문지른 거리가 이만큼(px) 쌓이면 쓰다듬은 것으로 친다. 이 시간(초) 동안 문지르지 않으면 쌓인 거리를 버린다.
 const PAT_DISTANCE: f64 = 200.0;
 const PAT_KEEP: f64 = 0.7;
@@ -131,20 +126,18 @@ pub enum Whim {
     Sit,
 }
 
-/// 꽃핀의 버릇. 설정에서 바꾸는 값이다.
+/// 꽃핀의 버릇.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Habits {
-    /// 혼자 돌아다닌다. 끄면 걷지 않고 제자리에서 쉰다. 기지개, 하품, 잠은 그래도 가끔 한다.
+    /// 혼자 돌아다닌다. 늘 켜 둔다. 만드는 동안 가만히 세워 두고 볼 때만 끈다.
     pub roam: bool,
-    /// 자리에서 이만큼 넘게 멀어지면 돌아오는 쪽으로 걷는다(그림 1배 기준 px).
-    pub wander: f64,
-    /// 가끔 하는 행동의 빈도. 확률에 곱한다. 1이 보통이고, 0이면 하지 않는다.
+    /// 가끔 하는 행동의 빈도. 확률에 곱한다. 1이 보통이고, 0이면 하지 않는다. 설정에서 바꾼다.
     pub whim_rate: f64,
 }
 
 impl Default for Habits {
     fn default() -> Habits {
-        Habits { roam: true, wander: 160.0, whim_rate: 1.0 }
+        Habits { roam: true, whim_rate: 1.0 }
     }
 }
 
@@ -153,7 +146,7 @@ impl Default for Habits {
 pub struct Surroundings {
     /// 바닥선의 y. 발바닥이 여기에 놓인다.
     pub floor: f64,
-    /// 걸어갈 수 있는 x의 범위(벽).
+    /// 걸어갈 수 있는 x의 범위(벽). 꽃핀은 이 사이를 끝에서 끝까지 돌아다닌다.
     pub left: f64,
     pub right: f64,
     /// 들어 올릴 수 있는 가장 높은 자리(발바닥의 y). 머리가 화면 위로 나가지 않게 한다.
@@ -226,7 +219,7 @@ pub struct Actor {
     vy: f64,
     /// 표시 배율. 길이와 빠르기 상수에 곱한다.
     scale: f64,
-    /// 둘레를 돌아다니는 자리의 가운데. 마지막으로 내려앉은 곳이다.
+    /// 마지막으로 내려앉은 곳.
     home: f64,
     /// 걷고 있는 방향.
     walk: Option<Dir>,
@@ -320,7 +313,7 @@ impl Actor {
         (self.x, self.y)
     }
 
-    /// 둘레를 돌아다니는 자리의 가운데. 마지막으로 내려앉은 곳이다.
+    /// 마지막으로 내려앉은 곳. 다시 켰을 때 나타날 자리로 쓴다.
     pub fn home(&self) -> f64 {
         self.home
     }
@@ -663,7 +656,6 @@ impl Actor {
     fn touch_down(&mut self, motions: &Motions, around: &Surroundings) {
         self.y = around.floor;
         self.vy = 0.0;
-        // 내려앉은 곳이 새로 둘레를 돌아다닐 자리가 된다.
         self.home = self.x;
         self.mode = Mode::Land;
         self.motion = motions.land;
@@ -783,11 +775,9 @@ impl Actor {
     ///
     /// `ledge`는 단 위에 서 있는지다. 단 위에서만 걸터앉기를 고른다.
     fn pick_whim(&mut self, ledge: bool) -> Option<Whim> {
-        let table: &[(Whim, f64)] = if self.habits.roam { &WHIMS } else { &STILL_WHIMS };
-        let sit_chance = if self.habits.roam { SIT_CHANCE } else { STILL_SIT_CHANCE };
-        let sit = (Whim::Sit, if ledge { sit_chance } else { 0.0 });
+        let sit = (Whim::Sit, if ledge { SIT_CHANCE } else { 0.0 });
         let mut r = self.rng.unit();
-        for &(whim, chance) in std::iter::once(&sit).chain(table) {
+        for &(whim, chance) in std::iter::once(&sit).chain(&WHIMS) {
             r -= chance * self.habits.whim_rate;
             if r < 0.0 {
                 return Some(whim);
@@ -877,18 +867,15 @@ impl Actor {
             if let Some(whim) = self.pick_whim(around.ledge) {
                 self.pending = Some(whim);
             } else if self.habits.roam {
+                // 어느 쪽으로든 걷는다. 그래서 벽에서 벽까지 어디든 간다.
                 let mut dir = if self.rng.chance(0.5) { Dir::West } else { Dir::East };
-                // 자리에서 너무 멀어졌으면 돌아오는 쪽으로 걷는다.
-                if (self.x - self.home).abs() > self.habits.wander * self.scale {
-                    dir = if self.x > self.home { Dir::West } else { Dir::East };
-                }
                 if self.at_edge(dir, around) {
                     dir = dir.opposite();
                 }
                 self.walk = Some(dir);
                 self.wait = self.rng.range(WALK);
             } else {
-                self.wait = self.rng.range(STILL_REST);
+                self.wait = self.rng.range(REST);
             }
         }
 
@@ -1041,14 +1028,15 @@ mod tests {
     }
 
     #[test]
-    fn resting_and_walking_alternate_and_stay_in_range() {
+    fn resting_and_walking_alternate_from_wall_to_wall() {
         let motions = sample();
         let mut actor = Actor::stand(&motions, 1000.0, AROUND.floor, 1.0, 7);
         // 가끔 하는 행동은 끄고 쉬기와 걷기만 본다.
         actor.set_habits(Habits { whim_rate: 0.0, ..Habits::default() });
         let (mut low, mut high) = (f64::MAX, f64::MIN);
         let mut seen = std::collections::BTreeSet::new();
-        for _ in 0..(600.0 / STEP) as usize {
+        // 한 시간.
+        for _ in 0..(3600.0 / STEP) as usize {
             actor.update(STEP, &motions, &AROUND);
             assert_eq!(actor.mode(), Mode::Ground);
             low = low.min(actor.position().0);
@@ -1057,10 +1045,9 @@ mod tests {
         }
         // 쉬기, 양쪽 걷기, 돌아설 때의 idle이 모두 나온다.
         assert_eq!(seen.into_iter().collect::<Vec<_>>(), ["idle", "idle2", "walk_e", "walk_w"]);
-        // 자리(1000)에서 160px 넘게 멀어지면 돌아오므로, 한 번 걷는 거리(40px/s × 2.6초)보다 더 멀리는 못 간다.
-        let reach = Habits::default().wander + 40.0 * WALK.1 + 1.0;
-        assert!(low >= 1000.0 - reach && high <= 1000.0 + reach, "{low}..{high}");
-        assert!(high - low > 100.0, "거의 움직이지 않음: {low}..{high}");
+        // 벽 밖으로는 나가지 않는다. 처음 선 자리 둘레에 머물지 않고 바닥의 대부분을 돌아다닌다.
+        assert!(low >= AROUND.left && high <= AROUND.right, "{low}..{high}");
+        assert!(high - low > (AROUND.right - AROUND.left) * 0.6, "멀리 가지 않음: {low}..{high}");
     }
 
     #[test]
@@ -1088,24 +1075,27 @@ mod tests {
 
     #[test]
     fn standing_still_when_roaming_is_off() {
+        // 만드는 동안 가만히 세워 두고 볼 때 쓴다.
         let motions = sample();
         let mut actor = Actor::stand(&motions, 1000.0, AROUND.floor, 1.0, 7);
-        actor.set_habits(Habits { roam: false, whim_rate: 0.0, ..Habits::default() });
+        actor.set_habits(Habits { roam: false, whim_rate: 0.0 });
         let seen = run(&mut actor, &motions, &AROUND, 60.0);
         assert_eq!(names(&seen), ["idle2"]);
         assert_eq!(actor.position().0, 1000.0);
     }
 
     #[test]
-    fn staying_put_still_stretches_yawns_and_sleeps() {
-        // 돌아다니기를 꺼도 기지개, 하품, 잠은 가끔 한다. 걷거나 뛰지는 않는다.
+    fn staying_put_still_does_its_whims() {
+        // 돌아다니기를 꺼도 가끔 하는 행동은 한다. 걷지는 않는다.
         let motions = sample();
         let mut actor = Actor::stand(&motions, 1000.0, AROUND.floor, 1.0, 7);
-        actor.set_habits(Habits { roam: false, ..Habits::default() });
+        actor.set_habits(Habits { roam: false, whim_rate: 1.0 });
         let seen = run(&mut actor, &motions, &AROUND, 1200.0);
         let names: std::collections::BTreeSet<&str> = names(&seen).into_iter().collect();
-        let expected = ["idle2", "sleep_in", "sleep_loop", "sleep_out", "stretch", "yawn"];
-        assert_eq!(names.into_iter().collect::<Vec<_>>(), expected);
+        assert!(!names.contains("walk_w") && !names.contains("walk_e") && !names.contains("idle"), "{names:?}");
+        for whim in ["stretch", "yawn", "jump", "sleep_loop"] {
+            assert!(names.contains(whim), "{whim}이 나오지 않음: {names:?}");
+        }
         assert_eq!(actor.position().0, 1000.0);
     }
 
@@ -1124,7 +1114,7 @@ mod tests {
     fn click_reacts_and_never_repeats_the_last_reaction() {
         let motions = sample();
         let mut actor = Actor::stand(&motions, 1000.0, AROUND.floor, 1.0, 7);
-        actor.set_habits(Habits { roam: false, whim_rate: 0.0, ..Habits::default() });
+        actor.set_habits(Habits { roam: false, whim_rate: 0.0 });
         let mut seen = Vec::new();
         for _ in 0..60 {
             actor.poke(&motions);
@@ -1151,7 +1141,7 @@ mod tests {
     fn rubbing_the_head_gets_a_pat_but_passing_by_does_not() {
         let motions = sample();
         let mut actor = Actor::stand(&motions, 1000.0, AROUND.floor, 1.0, 7);
-        actor.set_habits(Habits { roam: false, whim_rate: 0.0, ..Habits::default() });
+        actor.set_habits(Habits { roam: false, whim_rate: 0.0 });
         // 머리 너비(약 80px)를 한 번 지나가는 것으로는 모자란다.
         actor.rub(&motions, 80.0);
         assert_eq!(actor.mode(), Mode::Ground);
@@ -1219,17 +1209,14 @@ mod tests {
     #[test]
     fn sitting_is_only_picked_on_a_ledge() {
         let motions = sample();
-        let sits = |around: &Surroundings, roam: bool| {
+        let sits = |around: &Surroundings| {
             let mut actor = Actor::stand(&motions, 1000.0, around.floor, 1.0, 11);
-            actor.set_habits(Habits { roam, ..Habits::default() });
             (0..20000).filter(|_| actor.pick_whim(around.ledge) == Some(Whim::Sit)).count() as f64 / 200.0
         };
-        // 단 위에서는 쉬기를 마칠 때 10%, 돌아다니지 않을 때는 20%.
-        assert!((sits(&ON_LEDGE, true) - 10.0).abs() < 1.0, "{}", sits(&ON_LEDGE, true));
-        assert!((sits(&ON_LEDGE, false) - 20.0).abs() < 1.2, "{}", sits(&ON_LEDGE, false));
+        // 단 위에서는 쉬기를 마칠 때 10%.
+        assert!((sits(&ON_LEDGE) - 10.0).abs() < 1.0, "{}", sits(&ON_LEDGE));
         // 바닥이 화면의 아래 끝이면 앉지 않는다.
-        assert_eq!(sits(&AROUND, true), 0.0);
-        assert_eq!(sits(&AROUND, false), 0.0);
+        assert_eq!(sits(&AROUND), 0.0);
     }
 
     #[test]
@@ -1411,7 +1398,7 @@ mod tests {
     fn returning_before_falling_asleep_cancels_the_nap() {
         let motions = sample();
         let mut actor = Actor::stand(&motions, 1000.0, AROUND.floor, 1.0, 7);
-        actor.set_habits(Habits { roam: false, whim_rate: 0.0, ..Habits::default() });
+        actor.set_habits(Habits { roam: false, whim_rate: 0.0 });
         actor.t = 150.0;
         actor.set_away(true);
         actor.update(STEP, &motions, &AROUND);
