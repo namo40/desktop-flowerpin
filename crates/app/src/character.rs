@@ -270,6 +270,12 @@ impl Character {
         self.moved
     }
 
+    /// 멈춰 세워 두었던 꽃핀을 다시 움직이게 한다. 멈춰 있던 동안의 시간은 흐르지 않은 것으로 친다.
+    pub fn resume(&mut self, now: Instant) {
+        self.last = last_beat(self.beat, now).max(self.last);
+        self.due = now;
+    }
+
     /// 상태를 밖에서 바꿨을 때(잡기, 놓기 등) 다음 걸음을 바로 밟게 한다.
     pub fn wake(&mut self, now: Instant) {
         self.due = now;

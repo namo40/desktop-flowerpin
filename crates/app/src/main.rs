@@ -69,8 +69,12 @@ fn run(options: dev::Options) -> Result<Vec<String>, PackError> {
             Flow::Menu(x, y) => {
                 let owner = app.menu_owner();
                 let shows = app.menu_shows();
+                // 행동을 고르는 동안에는 그 꽃핀이 멈춰서 기다린다.
+                app.hold_for_menu(&shows);
                 let item = app::run_modal(&mut app, || tray::pick(owner, x, y, &shows));
-                if app.picked(item, Instant::now()) {
+                let now = Instant::now();
+                app.release_held(now);
+                if app.picked(item, now) {
                     break;
                 }
             }

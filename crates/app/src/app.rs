@@ -134,6 +134,8 @@ pub struct App {
     _watch: Watch,
     /// 메뉴를 띄운 꽃핀의 창. 메뉴에서 고른 행동을 이 꽃핀이 한다. 트레이에서 띄웠으면 `None`이고 첫 꽃핀이 한다.
     menu_target: Option<HWND>,
+    /// 메뉴가 떠 있는 동안 멈춰 세워 둔 꽃핀의 창.
+    held: Option<HWND>,
     /// 화면에 보이는 다른 창들과, 마지막으로 읽은 시각.
     desktop: Desktop,
     scanned: Option<Instant>,
@@ -226,6 +228,7 @@ impl App {
             timer: WakeTimer::new(),
             _watch: Watch::start(),
             menu_target: None,
+            held: None,
             desktop: Desktop::default(),
             scanned: None,
             dev: Dev {
@@ -596,7 +599,12 @@ impl App {
         self.read_desktop(now);
         let started = Instant::now();
         let mut shown = false;
+        let held = self.held;
         for character in &mut self.characters {
+            // 메뉴에서 행동을 고르는 동안에는 그 꽃핀을 그대로 세워 둔다.
+            if held == Some(character.window().hwnd()) {
+                continue;
+            }
             shown |= character.tick(&mut self.frames, &self.motions, &self.stage, &self.desktop, horizon)?;
         }
         if let (true, Some(first)) = (shown, self.characters.first()) {
@@ -694,6 +702,25 @@ impl App {
     /// 메뉴에서 고른 행동을 할 꽃핀. 메뉴를 띄운 꽃핀이고, 트레이에서 띄웠거나 그 꽃핀이 없어졌으면 첫 꽃핀이다.
     fn menu_character(&self) -> usize {
         self.menu_target.and_then(|hwnd| self.find(hwnd)).unwrap_or(0)
+    }
+
+    /// 메뉴가 떠 있는 동안, 메뉴에서 고른 행동을 할 꽃핀을 멈춰 세운다. `shows`는 [`App::menu_shows`]가 준 것이다.
+    ///
+    /// 계속 움직이게 두면 고르는 사이에 걷거나 다른 행동을 시작해서, 메뉴에 보이는 것과 실제로 할 수 있는
+    /// 것이 달라진다. 고를 수 있는 행동이 하나도 없으면(떠 있거나 잡혀 있으면) 멈추지 않는다.
+    pub fn hold_for_menu(&mut self, shows: &[(Show, bool)]) {
+        if shows.iter().any(|&(_, possible)| possible) {
+            self.held = self.characters.get(self.menu_character()).map(|character| character.window().hwnd());
+        }
+    }
+
+    /// 멈춰 세워 둔 꽃핀을 다시 움직이게 한다.
+    pub fn release_held(&mut self, now: Instant) {
+        if let Some(hwnd) = self.held.take()
+            && let Some(index) = self.find(hwnd)
+        {
+            self.characters[index].resume(now);
+        }
     }
 
     /// 메뉴의 "행동" 아래에 넣을 행동과, 지금 고를 수 있는지.

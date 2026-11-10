@@ -649,10 +649,13 @@ impl Actor {
 
     /// 지금 이 행동을 골라서 볼 수 있는가.
     ///
-    /// 바닥이나 창 위에서 쉬거나 걷고 있을 때만 된다. 걸터앉기는 단 위에서만, 창 위로 올라가기는 가까이에
-    /// 올라설 윗변이 있을 때만, 뛰어내리기는 창 위에 있을 때만 된다.
+    /// 바닥이나 창 위에 서 있을 때 된다. 쉬거나 걷는 중이 아니라 다른 행동을 하고 있어도(기지개, 잠,
+    /// 걸터앉기 등) 된다. 그때는 하던 것을 그만두고 고른 행동을 한다. 떠 있거나 잡혀 있을 때는 안 된다.
+    /// 걸터앉기는 단 위에서만, 창 위로 올라가기는 가까이에 올라설 윗변이 있을 때만, 뛰어내리기는 창 위에
+    /// 있을 때만 된다.
     pub fn can_show(&self, show: Show, around: &Surroundings) -> bool {
-        if self.mode != Mode::Ground || self.leaving {
+        let standing = matches!(self.mode, Mode::Ground | Mode::Act | Mode::Sleep | Mode::Sit);
+        if !standing || self.leaving {
             return false;
         }
         match show {
@@ -2456,18 +2459,37 @@ mod tests {
         let above = standing_on(&motions, WINDOW, 1000.0, 5);
         assert_eq!(pickable(&above, &among(&perches)), list(&[Show::Sit, Show::Hop]));
 
-        // 서 있지 않을 때(떠 있음, 다른 행동을 하는 중, 사라지는 중)는 아무것도 고를 수 없다.
+        // 떠 있거나, 잡혀 있거나, 사라지는 중에는 아무것도 고를 수 없다.
         let mut falling = Actor::stand(&motions, 1000.0, 300.0, 1.0, 5);
         falling.update(STEP, &motions, &AROUND);
-        let mut busy = Actor::stand(&motions, 1000.0, AROUND.floor, 1.0, 5);
-        busy.start(Whim::Yawn, &motions);
+        let mut held = Actor::stand(&motions, 1000.0, AROUND.floor, 1.0, 5);
+        held.grab(&motions, (1000.0, 500.0));
         let mut leaving = Actor::stand(&motions, 1000.0, AROUND.floor, 1.0, 5);
         leaving.leave(&motions);
-        for mut actor in [falling, busy, leaving] {
+        for mut actor in [falling, held, leaving] {
             assert_eq!(pickable(&actor, &ON_LEDGE), []);
             let before = (actor.mode(), actor.motion());
             assert!(!actor.show(Show::Stretch, &motions, &ON_LEDGE));
             assert_eq!((actor.mode(), actor.motion()), before);
+        }
+    }
+
+    #[test]
+    fn a_picked_action_interrupts_what_it_was_doing() {
+        // 하품하는 중, 자는 중, 걸터앉은 중에도 고를 수 있다. 하던 것을 그만두고 고른 행동을 바로 한다.
+        let motions = sample();
+        for busy_with in [Whim::Yawn, Whim::Sleep, Whim::Sit] {
+            let mut actor = Actor::stand(&motions, 1000.0, ON_LEDGE.floor, 1.0, 5);
+            actor.set_habits(Habits { roam: false, whim_rate: 0.0 });
+            actor.start(busy_with, &motions);
+            run(&mut actor, &motions, &ON_LEDGE, 0.5);
+            assert_ne!(actor.mode(), Mode::Ground, "{busy_with:?}");
+            assert!(actor.can_show(Show::Stretch, &ON_LEDGE), "{busy_with:?}");
+            assert!(actor.show(Show::Stretch, &motions, &ON_LEDGE), "{busy_with:?}");
+            assert_eq!((actor.mode(), motions.clip(actor.motion()).name.as_str()), (Mode::Act, "stretch"));
+            // 고른 행동을 마치면 서서 쉰다. 하던 것으로 돌아가지 않는다.
+            let seen = run(&mut actor, &motions, &ON_LEDGE, 3.0);
+            assert_eq!(names(&seen), ["stretch", "idle2"], "{busy_with:?}");
         }
     }
 }
