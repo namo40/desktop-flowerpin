@@ -88,10 +88,14 @@ pub fn confirm(owner: HWND, title: &str, question: &str) -> bool {
     unsafe { MessageBoxW(owner, question.as_ptr(), title.as_ptr(), MB_OKCANCEL | MB_ICONQUESTION) == IDOK }
 }
 
+/// 화면에 보이는 이 프로그램의 이름. 창의 제목, 트레이 아이콘, 오류를 알리는 창에 쓴다.
+/// 파일과 폴더의 이름은 따로다(`DesktopFlowerpin`).
+pub const APP_NAME: &str = "데스크탑 꽃핀";
+
 /// 더 진행할 수 없는 오류를 알리고 끝낸다. 콘솔이 없는 프로그램이라 메시지 상자로 보여 준다.
 pub fn fatal(message: &str) -> ! {
     let text = wide(message);
-    let title = wide("DesktopFlowerpin");
+    let title = wide(APP_NAME);
     unsafe { MessageBoxW(null_mut(), text.as_ptr(), title.as_ptr(), MB_OK | MB_ICONERROR) };
     std::process::exit(1);
 }

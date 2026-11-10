@@ -29,7 +29,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     CreateDialogParamW, DestroyIcon, DestroyWindow, EN_CHANGE, EN_KILLFOCUS, GetClientRect, GetDlgCtrlID, GetDlgItem,
     GetNextDlgTabItem, GetWindowRect, GetWindowTextW, HICON, IsDialogMessageW, MSG, MapDialogRect, STM_SETICON,
     SW_HIDE, SW_SHOW, SW_SHOWNA, SWP_NOACTIVATE, SendDlgItemMessageW, SendMessageW, SetDlgItemTextW,
-    SetForegroundWindow, SetWindowPos, ShowWindow, WM_CLOSE, WM_COMMAND, WM_KEYDOWN, WM_NOTIFY,
+    SetForegroundWindow, SetWindowPos, ShowWindow, WM_CLOSE, WM_COMMAND, WM_KEYDOWN, WM_NOTIFY, WM_SETICON,
 };
 
 use crate::dialog::{self, rect_in, resource};
@@ -162,27 +162,34 @@ pub struct SettingsWindow {
     tabs: HWND,
     pages: [HWND; TAB_NAMES.len()],
     current: usize,
-    icon: HICON,
+    /// 창의 큰 아이콘(정보 탭에도 보인다)과 작은 아이콘. 창이 닫힐 때 없앤다.
+    icons: (HICON, HICON),
 }
 
 impl SettingsWindow {
     /// 설정 창을 만들어 보여 준다. 가운데가 화면의 `center`에 온다.
     ///
-    /// `icon`은 정보 탭에 보여 줄 그림이고, 창이 맡아서 닫힐 때 없앤다. `version`은 그 옆에 적을 글이다.
+    /// `icons`는 큰 아이콘과 작은 아이콘이다. 작업표시줄과 제목 줄에 보이고, 큰 것은 정보 탭에도 보인다.
+    /// 창이 맡아서 닫힐 때 없앤다. `version`은 정보 탭의 그림 옆에 적을 글이다.
     pub fn open(
         settings: &Settings,
         tab: usize,
         center: (i32, i32),
-        icon: HICON,
+        icons: (HICON, HICON),
         version: &str,
     ) -> Option<SettingsWindow> {
+        let (icon, small) = icons;
+        let drop_icons = || unsafe {
+            DestroyIcon(icon);
+            DestroyIcon(small);
+        };
         // 탭 컨트롤을 쓰려면 공용 컨트롤을 한 번 준비시켜야 한다.
         dialog::prepare();
         let instance = unsafe { GetModuleHandleW(null()) };
         // 주인 창을 두지 않는다. 그래야 작업표시줄에 보이고, 다른 창 뒤로 가도 다시 찾기 쉽다.
         let hwnd = unsafe { CreateDialogParamW(instance, resource(DIALOG), null_mut(), Some(main_proc), 0) };
         if hwnd.is_null() {
-            unsafe { DestroyIcon(icon) };
+            drop_icons();
             return None;
         }
         let tabs = unsafe { GetDlgItem(hwnd, ID_TABS) };
@@ -201,10 +208,8 @@ impl SettingsWindow {
         for (i, page) in pages.iter_mut().enumerate() {
             *page = unsafe { CreateDialogParamW(instance, resource(FIRST_PAGE + i as u16), hwnd, Some(page_proc), 0) };
             if page.is_null() {
-                unsafe {
-                    DestroyWindow(hwnd);
-                    DestroyIcon(icon);
-                }
+                unsafe { DestroyWindow(hwnd) };
+                drop_icons();
                 return None;
             }
             unsafe {
@@ -215,7 +220,7 @@ impl SettingsWindow {
             }
         }
 
-        let mut window = SettingsWindow { hwnd, tabs, pages, current: 0, icon };
+        let mut window = SettingsWindow { hwnd, tabs, pages, current: 0, icons };
         for control in &CONTROLS {
             let spec = settings::spec(control.key);
             let item = window.item(control.id);
@@ -237,6 +242,9 @@ impl SettingsWindow {
         window.fill(settings);
         window.set_text(ID_VERSION, version);
         unsafe {
+            // 창의 아이콘. 달지 않으면 작업표시줄에 Windows의 기본 그림이 나온다(1이 큰 것, 0이 작은 것).
+            SendMessageW(hwnd, WM_SETICON, 1, icon as LPARAM);
+            SendMessageW(hwnd, WM_SETICON, 0, small as LPARAM);
             SendDlgItemMessageW(window.pages[INFO_TAB], ID_ICON, STM_SETICON, icon as WPARAM, 0);
             // 저장소 주소가 아직 정해지지 않았다. 정해지면 연다.
             EnableWindow(window.item(ID_OPEN_PROJECT), 0);
@@ -489,7 +497,8 @@ impl Drop for SettingsWindow {
     fn drop(&mut self) {
         unsafe {
             DestroyWindow(self.hwnd);
-            DestroyIcon(self.icon);
+            DestroyIcon(self.icons.0);
+            DestroyIcon(self.icons.1);
         }
     }
 }
@@ -544,6 +553,25 @@ mod tests {
         let start = RC.find(&format!("\n{id} DIALOGEX")).unwrap_or_else(|| panic!("대화 상자 {id}가 없음"));
         let begin = start + RC[start..].find("BEGIN").unwrap();
         &RC[begin..begin + RC[begin..].find("\nEND").unwrap()]
+    }
+
+    #[test]
+    fn the_resource_shows_the_name_and_the_version() {
+        let name = crate::win::APP_NAME;
+        assert!(RC.contains(&format!("CAPTION \"설정 - {name}\"")));
+        assert!(dialog_body(FIRST_PAGE + INFO_TAB as u16).contains(&format!("LTEXT \"{name}\", 1502")));
+        for value in ["FileDescription", "ProductName"] {
+            assert!(RC.contains(&format!("VALUE \"{value}\", \"{name}\"")), "{value}");
+        }
+        // 파일의 정보에 적은 판 번호는 Cargo.toml의 것과 같다.
+        let version = env!("CARGO_PKG_VERSION");
+        let numbers = format!("{}, 0", version.replace('.', ", "));
+        for line in [format!("FILEVERSION {numbers}"), format!("PRODUCTVERSION {numbers}")] {
+            assert!(RC.contains(&line), "{line}");
+        }
+        for value in ["FileVersion", "ProductVersion"] {
+            assert!(RC.contains(&format!("VALUE \"{value}\", \"{version}\"")), "{value}");
+        }
     }
 
     #[test]

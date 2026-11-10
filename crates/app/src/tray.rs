@@ -48,7 +48,7 @@ const INSTANCE_NAME: &str = "Local\\DesktopFlowerpin.Running";
 /// 트레이 아이콘에서 일이 있을 때 Windows가 보내 주는 메시지와, 아이콘의 번호.
 const WM_TRAY: u32 = WM_APP + 1;
 const ICON_ID: u32 = 1;
-const TIP: &str = "DesktopFlowerpin";
+const TIP: &str = crate::win::APP_NAME;
 /// 메뉴나 물음 창이 떠 있는 동안 꽃핀을 움직이게 하는 타이머의 번호와 간격(ms).
 const TICK_TIMER: usize = 1;
 const TICK_EVERY_MS: u32 = 15;

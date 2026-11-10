@@ -1886,8 +1886,11 @@ impl App {
             if commit.is_empty() { String::new() } else { format!(" (커밋 {commit})") },
             if pack.placeholder { " · 대체 그림" } else { "" }
         );
-        let icon = tray::make_icon(&face, ABOUT_ICON);
-        self.window = SettingsWindow::open(&self.settings, self.state.settings_tab, center, icon, &version);
+        // 창의 아이콘은 트레이 아이콘과 같은 얼굴이다. 큰 것은 정보 탭에도 보인다.
+        let small_size = tray::icon_size();
+        let Ok(small_face) = self.frames.portrait(first, small_size as usize) else { return };
+        let icons = (tray::make_icon(&face, ABOUT_ICON), tray::make_icon(&small_face, small_size));
+        self.window = SettingsWindow::open(&self.settings, self.state.settings_tab, center, icons, &version);
         self.next_usage = Instant::now();
         self.meter = Meter::start();
         self.show_live();

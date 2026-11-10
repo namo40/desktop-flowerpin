@@ -14,11 +14,36 @@
 
 1 24 "app.manifest"
 
+// 파일의 정보. 작업 관리자와 Windows 알림에 이 이름이 보인다. 판 번호는 Cargo.toml과 같아야 한다.
+//   0x40004 = VOS_NT_WINDOWS32, 0x1 = VFT_APP, 0412 = 한국어, 04B0 = 유니코드
+1 VERSIONINFO
+FILEVERSION 0, 1, 0, 0
+PRODUCTVERSION 0, 1, 0, 0
+FILEOS 0x40004
+FILETYPE 0x1
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "041204B0"
+        BEGIN
+            VALUE "FileDescription", "데스크탑 꽃핀"
+            VALUE "ProductName", "데스크탑 꽃핀"
+            VALUE "FileVersion", "0.1.0"
+            VALUE "ProductVersion", "0.1.0"
+            VALUE "OriginalFilename", "DesktopFlowerpin.exe"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x0412, 0x04B0
+    END
+END
+
 // ---------- 창 뼈대: 250 x 229 ----------
 100 DIALOGEX 0, 0, 250, 229
 STYLE 0x80C808C0
 EXSTYLE 0x00050000
-CAPTION "설정 - DesktopFlowerpin"
+CAPTION "설정 - 데스크탑 꽃핀"
 FONT 9, "맑은 고딕", 400, 0, 0x1
 BEGIN
     // 탭 컨트롤을 맨 뒤에 적는다. Tab 키 순서가 "탭 머리 > 탭 쪽 > 기본값으로 > 닫기"로 돈다
@@ -108,7 +133,7 @@ EXSTYLE 0x00010000
 FONT 9, "맑은 고딕", 400, 0, 0x1
 BEGIN
     ICON "", 1501, 7, 7, 20, 20
-    LTEXT "DesktopFlowerpin", 1502, 34, 8, 191, 8, 0x80
+    LTEXT "데스크탑 꽃핀", 1502, 34, 8, 191, 8, 0x80
     LTEXT "", 1503, 34, 18, 191, 8, 0x80
     LTEXT "지금 쓰는 자원", -1, 7, 32, 46, 8
     CONTROL "", -1, "Static", 0x50000010, 57, 36, 169, 1
