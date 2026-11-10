@@ -3,9 +3,6 @@
 //! 그림은 풀어 두지 않는다. 팩은 암호화된 채 exe 안에 그대로 있고, 장이 바뀔 때 그 장만 꺼낸다
 //! (암호 풀기 → 압축 풀기 → 팔레트로 펼치기). 꺼내는 도구와 버퍼는 하나만 두고 모든 꽃핀이 함께 쓴다.
 
-use std::ops::Range;
-use std::time::Duration;
-
 use dfp_pack::{FrameDecoder, Pack, PackError};
 
 use crate::geom::Rect;
@@ -33,24 +30,6 @@ impl Frames {
 
     pub fn pack(&self) -> &Pack<'static> {
         &self.pack
-    }
-
-    /// 발바닥이 놓이는 점(칸 좌표). 이 점을 바닥 위의 서 있을 자리에 맞춘다.
-    pub fn foot(&self) -> (i32, i32) {
-        let character = self.pack.character();
-        (character.pivot.0 as i32, character.foot_y as i32)
-    }
-
-    /// 이름으로 동작을 찾아, 그 동작의 장 번호들을 재생 순서대로 돌려준다.
-    pub fn motion_frames(&self, name: &str) -> Result<Range<usize>, PackError> {
-        let id = self.pack.motion_id(name).ok_or_else(|| PackError::NoSuchMotion(name.to_string()))?;
-        let motion = &self.pack.motions()[id as usize];
-        Ok(motion.first_frame..motion.first_frame + motion.frame_count)
-    }
-
-    /// 장을 보여 줄 시간.
-    pub fn duration(&self, frame: usize) -> Duration {
-        Duration::from_millis(self.pack.frames()[frame].duration_ms as u64)
     }
 
     /// 장이 칸 안에서 차지하는 범위.

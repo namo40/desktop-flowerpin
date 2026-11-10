@@ -2,6 +2,7 @@
 //!
 //! ```text
 //! DesktopFlowerpin.exe [--for 초] [--report 파일] [--check-screen] [--size 퍼센트] [--dpi 값] [--characters 수]
+//!                      [--play 동작,동작] [--script "초 명령; 초 명령"] [--seed 수] [--still]
 //! ```
 //!
 //! - `--for 초`: 정한 시간이 지나면 스스로 끝낸다.
@@ -12,6 +13,13 @@
 //! - `--dpi 값`: 모니터 DPI를 이 값으로 친다(144면 배율 150%). 배율이 큰 모니터가 없어도
 //!   그 배율의 그림을 확인할 수 있다.
 //! - `--characters 수`: 꽃핀을 여러 명 띄운다. 여러 명일 때의 메모리와 CPU를 재는 데 쓴다.
+//! - `--play 동작,동작`: 바닥에 선 채로 시작해 동작을 차례로 보여 준다. `all`이면 팩의 모든 동작이다.
+//! - `--script "초 명령; 초 명령"`: 정한 시각에 첫 꽃핀에게 일을 시킨다. 마우스를 움직이지 않고도
+//!   잡기와 놓기를 되풀이해 확인할 수 있다. 명령은 [`Command`]에 있다.
+//! - `--seed 수`: 쉬는 시간과 걷는 방향을 고르는 난수의 씨앗. 같은 수면 같은 순서로 움직인다.
+//! - `--still`: 모든 꽃핀이 돌아다니지 않고 제자리에 서 있는다. 가만히 있을 때의 자원을 재는 데 쓴다.
+//!
+//! 보고서에는 첫 꽃핀이 거친 상태와 동작이 시각과 함께 적힌다.
 //!
 //! `--for`를 [`WARM_UP`]보다 길게 주면, 그 뒤부터 끝날 때까지 쓴 메모리와 CPU를 보고서에 적는다.
 
@@ -32,8 +40,10 @@ use windows_sys::Win32::System::Threading::GetCurrentProcess;
 use windows_sys::Win32::System::WindowsProgramming::QueryProcessCycleTime;
 use windows_sys::Win32::UI::WindowsAndMessaging::WindowFromPoint;
 
+use crate::actor::{Actor, Mode};
 use crate::character_window::CharacterWindow;
 use crate::geom::Rect;
+use crate::motions::{MotionId, Motions};
 
 pub struct Options {
     pub run_for: Option<Duration>,
@@ -42,6 +52,12 @@ pub struct Options {
     pub size: u32,
     pub dpi: Option<u32>,
     pub characters: usize,
+    /// 차례로 보여 줄 동작의 이름.
+    pub play: Vec<String>,
+    /// 정한 시각에 시킬 일. 시각 순서로 놓여 있다.
+    pub script: Vec<Step>,
+    pub seed: Option<u64>,
+    pub still: bool,
 }
 
 impl Options {
@@ -55,7 +71,99 @@ impl Options {
             size: value("--size").and_then(|s| s.parse().ok()).unwrap_or(100),
             dpi: value("--dpi").and_then(|s| s.parse().ok()),
             characters: value("--characters").and_then(|s| s.parse().ok()).unwrap_or(1).max(1),
+            play: value("--play")
+                .map(|s| s.split(',').map(|name| name.trim().to_string()).collect())
+                .unwrap_or_default(),
+            script: value("--script")
+                .map(|s| parse_script(&s).unwrap_or_else(|e| crate::win::fatal(&e)))
+                .unwrap_or_default(),
+            seed: value("--seed").and_then(|s| s.parse().ok()),
+            still: args.iter().any(|a| a == "--still"),
         }
+    }
+}
+
+/// `--script`로 시킬 수 있는 일.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Command {
+    /// `grab`: 첫 꽃핀을 그 자리에서 잡는다.
+    Grab,
+    /// `drag 가로 세로`: 잡은 자리에서 그만큼 떨어진 곳으로 끈다(화면 px, 위쪽이 음수).
+    Drag(f64, f64),
+    /// `release`: 놓는다.
+    Release,
+    /// `leave`: 메뉴에서 끝내기를 고른 것과 같다. 모든 꽃핀이 사라진 뒤 앱이 끝난다.
+    Leave,
+    /// `roam on|off`: 혼자 돌아다니기를 켜고 끈다.
+    Roam(bool),
+    /// `dpi 값`: 모니터 DPI를 이 값으로 친다. 실행 중에 배율이 바뀌는 것을 확인한다.
+    Dpi(u32),
+}
+
+/// `--script`의 한 줄. 시작하고 `at`이 지났을 때 `command`를 한다.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Step {
+    pub at: Duration,
+    pub command: Command,
+}
+
+/// `"1.5 grab; 2 drag 300 -400; 4 release"` 같은 글을 읽는다. 시각 순서로 돌려준다.
+pub fn parse_script(text: &str) -> Result<Vec<Step>, String> {
+    let mut steps = Vec::new();
+    for line in text.split(';').map(str::trim).filter(|line| !line.is_empty()) {
+        let bad = || format!("--script를 읽을 수 없습니다: {line}");
+        let words: Vec<&str> = line.split_whitespace().collect();
+        let number = |i: usize| words.get(i).and_then(|w| w.parse::<f64>().ok()).ok_or_else(bad);
+        let at = number(0).ok().filter(|s| *s >= 0.0).map(Duration::from_secs_f64).ok_or_else(bad)?;
+        let command = match (words.get(1).copied(), words.len()) {
+            (Some("grab"), 2) => Command::Grab,
+            (Some("drag"), 4) => Command::Drag(number(2)?, number(3)?),
+            (Some("release"), 2) => Command::Release,
+            (Some("leave"), 2) => Command::Leave,
+            (Some("roam"), 3) if words[2] == "on" || words[2] == "off" => Command::Roam(words[2] == "on"),
+            (Some("dpi"), 3) => Command::Dpi(number(2)? as u32),
+            _ => return Err(bad()),
+        };
+        steps.push(Step { at, command });
+    }
+    steps.sort_by_key(|step| step.at);
+    Ok(steps)
+}
+
+/// 첫 꽃핀이 거친 상태와 동작의 기록. 상태나 동작이 바뀔 때마다 한 줄을 적는다.
+#[derive(Default)]
+pub struct Trace {
+    last: Option<(Mode, MotionId)>,
+    lines: Vec<String>,
+    /// 바닥에 있는 동안 지나간 x의 범위.
+    walked: Option<(f64, f64)>,
+}
+
+/// 기록이 끝없이 길어지지 않게 하는 한계.
+const TRACE_LIMIT: usize = 400;
+
+impl Trace {
+    pub fn note(&mut self, seconds: f64, actor: &Actor, motions: &Motions) {
+        let (x, y) = actor.position();
+        if actor.mode() == Mode::Ground {
+            let (low, high) = self.walked.unwrap_or((x, x));
+            self.walked = Some((low.min(x), high.max(x)));
+        }
+        let now = (actor.mode(), actor.motion());
+        if self.last != Some(now) && self.lines.len() < TRACE_LIMIT {
+            let name = &motions.clip(now.1).name;
+            self.lines.push(format!("  {seconds:6.2}초 {:?} {name} ({x:.0}, {y:.0})", now.0));
+        }
+        self.last = Some(now);
+    }
+
+    pub fn lines(&self) -> Vec<String> {
+        let mut lines = vec!["첫 꽃핀이 거친 상태와 동작 (시각, 상태, 동작, 발바닥 자리)".to_string()];
+        lines.extend(self.lines.iter().cloned());
+        if let Some((low, high)) = self.walked {
+            lines.push(format!("바닥에서 지나간 x의 범위 {low:.0}~{high:.0} (너비 {:.0})", high - low));
+        }
+        lines
     }
 }
 
@@ -286,4 +394,35 @@ fn memory() -> (usize, usize) {
     let pointer = &mut counters as *mut PROCESS_MEMORY_COUNTERS_EX2 as *mut PROCESS_MEMORY_COUNTERS;
     unsafe { K32GetProcessMemoryInfo(GetCurrentProcess(), pointer, counters.cb) };
     (counters.PrivateWorkingSetSize, counters.WorkingSetSize)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn script_is_read_and_sorted_by_time() {
+        let steps = parse_script(" 4 release; 1.5 grab ; 2 drag 300 -400;; 9 leave; 0 roam off; 3 dpi 144 ").unwrap();
+        let commands: Vec<Command> = steps.iter().map(|step| step.command).collect();
+        assert_eq!(
+            commands,
+            [
+                Command::Roam(false),
+                Command::Grab,
+                Command::Drag(300.0, -400.0),
+                Command::Dpi(144),
+                Command::Release,
+                Command::Leave
+            ]
+        );
+        assert_eq!(steps[1].at, Duration::from_millis(1500));
+    }
+
+    #[test]
+    fn bad_script_is_rejected() {
+        for text in ["grab", "1 fly", "1 drag 300", "-1 grab", "1 roam maybe", "1 grab extra"] {
+            assert!(parse_script(text).is_err(), "{text}");
+        }
+        assert_eq!(parse_script("").unwrap(), []);
+    }
 }

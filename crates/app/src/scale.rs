@@ -31,6 +31,11 @@ impl Scale {
         self.num == self.den
     }
 
+    /// 배율을 소수로 돌려준다. 길이와 빠르기를 계산할 때 쓴다.
+    pub fn factor(self) -> f64 {
+        self.num as f64 / self.den as f64
+    }
+
     /// 원본 칸의 자리(픽셀 경계)를 화면 칸의 자리로 바꾼다. 가장 가까운 픽셀 경계로 맞춘다.
     pub fn point(self, v: i32) -> i32 {
         (2 * v * self.num + self.den).div_euclid(2 * self.den)

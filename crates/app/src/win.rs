@@ -1,18 +1,13 @@
 //! Win32를 부를 때 여러 곳에서 쓰는 작은 도구.
 
-use std::ffi::c_void;
 use std::ptr::null_mut;
 
-use windows_sys::Win32::Foundation::RECT;
-use windows_sys::Win32::UI::HiDpi::{
-    DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForSystem, SetProcessDpiAwarenessContext,
-};
+use windows_sys::Win32::Foundation::POINT;
+use windows_sys::Win32::UI::HiDpi::{DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    DispatchMessageW, MB_ICONERROR, MB_OK, MSG, MessageBoxW, PM_REMOVE, PeekMessageW, SPI_GETWORKAREA,
-    SystemParametersInfoW, TranslateMessage, WM_QUIT,
+    DispatchMessageW, GetCursorPos, MB_ICONERROR, MB_OK, MSG, MessageBoxW, PM_REMOVE, PeekMessageW, TranslateMessage,
+    WM_QUIT,
 };
-
-use crate::geom::Rect;
 
 /// Win32에 넘길 수 있게, 끝에 0을 붙인 UTF-16 문자열로 바꾼다.
 pub fn wide(s: &str) -> Vec<u16> {
@@ -25,19 +20,11 @@ pub fn enable_per_monitor_dpi() {
     unsafe { SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
 }
 
-/// 주 모니터의 DPI. 96이 Windows 배율 100%다.
-pub fn system_dpi() -> u32 {
-    unsafe { GetDpiForSystem() }
-}
-
-/// 주 모니터에서 작업표시줄을 뺀 범위.
-pub fn primary_work_area() -> Rect {
-    let mut r = RECT { left: 0, top: 0, right: 0, bottom: 0 };
-    let ok = unsafe { SystemParametersInfoW(SPI_GETWORKAREA, 0, &mut r as *mut RECT as *mut c_void, 0) };
-    if ok == 0 {
-        fatal("작업 영역을 읽지 못했습니다.");
-    }
-    Rect::new(r.left, r.top, r.right - r.left, r.bottom - r.top)
+/// 마우스 커서의 자리(화면 좌표).
+pub fn cursor_position() -> (i32, i32) {
+    let mut point = POINT { x: 0, y: 0 };
+    unsafe { GetCursorPos(&mut point) };
+    (point.x, point.y)
 }
 
 /// 쌓여 있는 창 메시지를 모두 처리한다. 끝내라는 메시지(`WM_QUIT`)를 받으면 `false`를 돌려준다.

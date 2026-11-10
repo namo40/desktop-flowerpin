@@ -3,7 +3,11 @@
 //! 화면에 보이는 것은 32비트(미리 곱한 알파) 그림 한 장이다. 테두리도 제목 줄도 없고,
 //! 완전히 투명한 픽셀을 누르면 클릭이 뒤에 있는 창으로 넘어간다. 그림은 창 버퍼에 그린 뒤
 //! [`CharacterWindow::present`]로 화면에 넘긴다.
+//!
+//! 창에서 일어난 일(누르기, 끌기, 모니터가 바뀜)은 창 메시지를 받는 자리에서 처리하지 않고
+//! [`WindowEvent`]로 적어 두기만 한다. 메인 루프가 [`take_events`]로 꺼내 처리한다.
 
+use std::cell::RefCell;
 use std::ffi::c_void;
 use std::ptr::{null, null_mut};
 use std::sync::Once;
@@ -14,16 +18,52 @@ use windows_sys::Win32::Graphics::Gdi::{
     CreateDIBSection, DIB_RGB_COLORS, DeleteDC, DeleteObject, HBITMAP, HDC, HGDIOBJ, SelectObject,
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetCapture, ReleaseCapture, SetCapture};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, MA_NOACTIVATE, PostQuitMessage, RegisterClassExW,
-    SW_SHOWNOACTIVATE, ShowWindow, ULW_ALPHA, UPDATELAYEREDWINDOWINFO, UpdateLayeredWindowIndirect, WM_MOUSEACTIVATE,
-    WM_RBUTTONUP, WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, HTCLIENT, IDC_HAND, LoadCursorW, MA_NOACTIVATE, RegisterClassExW,
+    SW_SHOWNOACTIVATE, SetCursor, ShowWindow, ULW_ALPHA, UPDATELAYEREDWINDOWINFO, UpdateLayeredWindowIndirect,
+    WM_CAPTURECHANGED, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE,
+    WM_RBUTTONUP, WM_SETCURSOR, WM_SETTINGCHANGE, WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+    WS_EX_TOPMOST, WS_POPUP,
 };
 
 use crate::geom::Rect;
-use crate::win::{fatal, wide};
+use crate::win::{cursor_position, fatal, wide};
 
 const CLASS_NAME: &str = "DesktopFlowerpinCharacter";
+
+/// 꽃핀 창에서 일어난 일. 좌표는 화면 기준이다.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WindowEvent {
+    /// 꽃핀을 왼쪽 버튼으로 눌렀다.
+    Press { hwnd: HWND, x: i32, y: i32 },
+    /// 누른 채로 움직였다.
+    Move { hwnd: HWND, x: i32, y: i32 },
+    /// 버튼을 뗐다. 누르고 있던 것이 다른 까닭으로 끊겼을 때도 온다.
+    Lift { hwnd: HWND },
+    /// 오른쪽 버튼으로 눌렀다 뗐다.
+    Menu { x: i32, y: i32 },
+    /// 모니터 구성, 작업 영역, 화면 배율이 바뀌었다.
+    StageChanged,
+}
+
+thread_local! {
+    static EVENTS: RefCell<Vec<WindowEvent>> = const { RefCell::new(Vec::new()) };
+}
+
+fn push(event: WindowEvent) {
+    EVENTS.with(|events| events.borrow_mut().push(event));
+}
+
+/// 지난번에 꺼낸 뒤로 쌓인 일을 모두 꺼낸다.
+pub fn take_events() -> Vec<WindowEvent> {
+    EVENTS.with(|events| std::mem::take(&mut *events.borrow_mut()))
+}
+
+/// 누르고 있던 것을 그만둔다. 잡을 수 없는 꽃핀을 눌렀을 때 쓴다.
+pub fn stop_pressing() {
+    unsafe { ReleaseCapture() };
+}
 
 pub struct CharacterWindow {
     hwnd: HWND,
@@ -110,6 +150,11 @@ impl CharacterWindow {
     /// 창이 화면에서 차지하는 범위.
     pub fn screen_rect(&self) -> Rect {
         Rect::new(self.pos.0, self.pos.1, self.width, self.height)
+    }
+
+    /// 창의 왼쪽 위를 화면의 `(x, y)`로 옮긴다. 다음 `present` 때 화면에 반영된다.
+    pub fn move_to(&mut self, x: i32, y: i32) {
+        self.pos = (x, y);
     }
 
     /// 창 버퍼. 한 줄이 `width`개이고 위에서 아래로 놓인다. 값은 미리 곱한 알파의 BGRA(0xAARRGGBB)다.
@@ -211,10 +256,42 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
     match msg {
         // 꽃핀을 눌러도 쓰던 창이 포커스를 잃지 않게 한다.
         WM_MOUSEACTIVATE => MA_NOACTIVATE as LRESULT,
-        // 임시: 트레이 메뉴가 생길 때까지는 꽃핀을 오른쪽 클릭하면 끝낸다.
-        WM_RBUTTONUP => {
-            unsafe { PostQuitMessage(0) };
+        // 누른 동안은 커서가 창 밖으로 나가도 움직임을 계속 받는다. 끌어서 옮기려면 그래야 한다.
+        WM_LBUTTONDOWN => {
+            unsafe { SetCapture(hwnd) };
+            let (x, y) = cursor_position();
+            push(WindowEvent::Press { hwnd, x, y });
             0
+        }
+        WM_MOUSEMOVE => {
+            if unsafe { GetCapture() } == hwnd {
+                let (x, y) = cursor_position();
+                push(WindowEvent::Move { hwnd, x, y });
+            }
+            0
+        }
+        // 뗐다는 것은 아래의 WM_CAPTURECHANGED 한 곳에서만 알린다.
+        WM_LBUTTONUP => {
+            unsafe { ReleaseCapture() };
+            0
+        }
+        WM_CAPTURECHANGED => {
+            push(WindowEvent::Lift { hwnd });
+            0
+        }
+        WM_RBUTTONUP => {
+            let (x, y) = cursor_position();
+            push(WindowEvent::Menu { x, y });
+            0
+        }
+        // 꽃핀 위에서는 손 모양 커서를 보여 준다.
+        WM_SETCURSOR if (lparam & 0xFFFF) as u32 == HTCLIENT => {
+            unsafe { SetCursor(LoadCursorW(null_mut(), IDC_HAND)) };
+            1
+        }
+        WM_DISPLAYCHANGE | WM_SETTINGCHANGE | WM_DPICHANGED => {
+            push(WindowEvent::StageChanged);
+            unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
         }
         _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
     }

@@ -42,7 +42,8 @@ const SHADOW_OUT_MS: (f64, f64) = (1000.0, 1550.0);
 /// 떨어지거나 끌려갈 때 자리를 고치는 간격(초). 이때만 장이 바뀌지 않아도 움직인다.
 const SMOOTH_STEP: f64 = 1.0 / 60.0;
 /// 한 번에 흐르게 하는 시간의 한계(초). 절전에서 깨어난 뒤처럼 오래 멈췄다 돌아오면 그사이를 건너뛴다.
-const MAX_STEP: f64 = 0.1;
+/// 가장 오래 보여 주는 장(약 0.3초)보다는 길어야 한다. 짧으면 그 장을 보여 주는 동안 시간이 느리게 흐른다.
+const MAX_STEP: f64 = 0.5;
 /// 동작을 차례로 보여 줄 때([`Actor::play`]) 반복 동작을 도는 횟수.
 const SHOWCASE_LOOPS: u32 = 2;
 
@@ -267,9 +268,14 @@ impl Actor {
         self.roam = roam;
     }
 
-    /// 잡는다. 나타나는 중, 착지하는 중, 사라지는 중에는 잡히지 않는다.
+    /// 지금 잡을 수 있는가. 나타나는 중, 착지하는 중, 사라지는 중에는 잡히지 않는다.
+    pub fn can_grab(&self) -> bool {
+        matches!(self.mode, Mode::Ground | Mode::Act | Mode::Release | Mode::Fall | Mode::Emerge)
+    }
+
+    /// 잡는다. 잡을 수 없는 때면 아무 일도 하지 않고 `false`를 돌려준다.
     pub fn grab(&mut self, motions: &Motions, target: (f64, f64)) -> bool {
-        if !matches!(self.mode, Mode::Ground | Mode::Act | Mode::Release | Mode::Fall | Mode::Emerge) {
+        if !self.can_grab() {
             return false;
         }
         self.mode = Mode::Drag;
@@ -331,24 +337,33 @@ impl Actor {
         }
     }
 
+    /// 장이 바뀌지 않아도 자리를 자주 고쳐야 하는가. 떨어지는 중이거나 끌려가는 중이면 그렇다.
+    pub fn moves_smoothly(&self) -> bool {
+        match self.mode {
+            Mode::Fall => true,
+            Mode::Drag => (self.drag.0 - self.x).abs() > 0.5 || (self.drag.1 - self.y).abs() > 0.5,
+            // 잠깐 떠 있는 동안은 움직이지 않는다.
+            Mode::Release => self.t >= RELEASE_HOLD_MS,
+            Mode::Emerge => self.t >= SPAWN_DROP_MS,
+            _ => false,
+        }
+    }
+
     /// 다음에 [`Actor::update`]를 불러야 할 때까지 남은 시간(초).
     ///
-    /// 보통은 다음 장으로 넘어갈 때다. 떨어지거나 끌려가는 동안에는 장이 바뀌지 않아도 자리를 고쳐야 해서
-    /// 더 자주 부른다.
+    /// 보통은 다음 장으로 넘어갈 때다. 떨어지거나 끌려가는 동안([`Actor::moves_smoothly`])에는
+    /// 장이 바뀌지 않아도 자리를 고쳐야 해서 더 자주 부른다.
     pub fn wake_in(&self, motions: &Motions) -> f64 {
         let frame = motions.clip(self.motion).until_next_frame(self.t) / 1000.0;
         let until = |at_ms: f64| ((at_ms - self.t) / 1000.0).max(0.0);
         match self.mode {
             Mode::Gone => f64::INFINITY,
-            Mode::Fall => frame.min(SMOOTH_STEP),
-            Mode::Drag if (self.drag.0 - self.x).abs() > 0.5 || (self.drag.1 - self.y).abs() > 0.5 => {
-                frame.min(SMOOTH_STEP)
-            }
-            // 잠깐 떠 있는 동안은 장만 넘기고, 떨어지기 시작하면 자주 고친다.
-            Mode::Release => frame.min(until(RELEASE_HOLD_MS).max(SMOOTH_STEP)),
-            Mode::Emerge => frame.min(until(SPAWN_DROP_MS).max(SMOOTH_STEP)),
+            _ if self.moves_smoothly() => frame.min(SMOOTH_STEP),
+            // 떠 있는 시간이 끝날 때를 놓치지 않는다.
+            Mode::Release => frame.min(until(RELEASE_HOLD_MS)),
+            Mode::Emerge => frame.min(until(SPAWN_DROP_MS)),
             // 쉬기와 걷기를 마칠 때를 놓치지 않는다. idle은 장 하나가 0.25초라서 장만 기다리면 늦는다.
-            Mode::Ground if !self.leaving => frame.min(self.wait.max(SMOOTH_STEP)),
+            Mode::Ground if !self.leaving => frame.min(self.wait.max(0.0)),
             _ => frame,
         }
     }
@@ -857,13 +872,28 @@ mod tests {
 
     #[test]
     fn long_pause_does_not_fast_forward() {
-        // 절전에서 깨어난 뒤처럼 한참 만에 불려도 0.1초만 흐른 것으로 친다.
+        // 절전에서 깨어난 뒤처럼 한참 만에 불려도 0.5초만 흐른 것으로 친다.
         let motions = sample();
         let mut actor = Actor::stand(&motions, 500.0, 400.0, 1.0, 1);
         actor.update(STEP, &motions, &AROUND);
         actor.update(3600.0, &motions, &AROUND);
+        // 0.5초 동안 떨어지는 거리는 1500 × 0.5² ≈ 375px이다. 바닥(600px 아래)까지 가지 못한다.
         assert_eq!(actor.mode(), Mode::Fall);
-        assert!(actor.position().1 < 420.0);
+        assert!(actor.position().1 < 800.0);
+    }
+
+    #[test]
+    fn long_frames_do_not_slow_time_down() {
+        // idle은 장 하나가 0.25초다. 그 간격으로 불려도 쉬는 시간이 제대로 줄어야 한다.
+        let motions = sample();
+        let mut actor = Actor::stand(&motions, 1000.0, AROUND.floor, 1.0, 7);
+        actor.turn_to = Some(Dir::East);
+        actor.wait = 1.0;
+        for _ in 0..4 {
+            actor.update(0.25, &motions, &AROUND);
+        }
+        actor.update(0.01, &motions, &AROUND);
+        assert_eq!(actor.walk, Some(Dir::East));
     }
 
     #[test]
