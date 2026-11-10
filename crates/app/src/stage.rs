@@ -41,6 +41,8 @@ impl Monitor {
             left: left.min((left + right) / 2.0),
             right: right.max((left + right) / 2.0),
             top: (self.area.y as f64 + headroom).min(floor),
+            // 작업 영역 아래에 작업표시줄이 있으면 그 윗변이 걸터앉을 수 있는 단이다.
+            ledge: self.work.bottom() < self.area.bottom(),
         }
     }
 
@@ -136,6 +138,8 @@ mod tests {
         let stage = two_monitors();
         let around = stage.primary().surroundings(64.0, 172.0);
         assert_eq!((around.floor, around.left, around.right, around.top), (1032.0, 64.0, 1856.0, 172.0));
+        // 아래에 작업표시줄이 있으므로 걸터앉을 수 있다.
+        assert!(around.ledge);
         // 왼쪽 모니터는 바닥도 벽도 다르다.
         let around = stage.nearest(-500, 0).surroundings(96.0, 258.0);
         assert_eq!((around.floor, around.left, around.right, around.top), (1460.0, -984.0, -96.0, -142.0));
@@ -145,7 +149,10 @@ mod tests {
     fn taskbar_on_top_still_uses_the_bottom() {
         let monitor =
             Monitor { area: Rect::new(0, 0, 1920, 1080), work: Rect::new(0, 48, 1920, 1032), dpi: 96, primary: true };
-        assert_eq!(monitor.surroundings(64.0, 172.0).floor, 1080.0);
+        let around = monitor.surroundings(64.0, 172.0);
+        assert_eq!(around.floor, 1080.0);
+        // 바닥이 화면의 아래 끝이라 걸터앉을 단이 없다. 앉으면 다리가 화면 밖으로 나간다.
+        assert!(!around.ledge);
     }
 
     #[test]

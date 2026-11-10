@@ -382,7 +382,7 @@ fn run(frames: &mut Frames, options: &dev::Options, report: &mut dev::Report) ->
             }
             quitting = Some(now + QUIT_LIMIT);
             for character in &mut characters {
-                character.actor_mut().leave();
+                character.actor_mut().leave(&motions);
                 character.wake(now);
             }
         }

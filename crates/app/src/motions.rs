@@ -101,6 +101,9 @@ pub struct Motions {
     pub sleep_in: MotionId,
     pub sleep_loop: MotionId,
     pub sleep_out: MotionId,
+    pub edge_in: MotionId,
+    pub edge_loop: MotionId,
+    pub edge_out: MotionId,
 }
 
 impl Motions {
@@ -151,6 +154,9 @@ impl Motions {
             sleep_in: find("sleep_in")?,
             sleep_loop: find("sleep_loop")?,
             sleep_out: find("sleep_out")?,
+            edge_in: find("edge_in")?,
+            edge_loop: find("edge_loop")?,
+            edge_out: find("edge_out")?,
             clips,
         })
     }

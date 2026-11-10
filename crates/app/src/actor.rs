@@ -11,6 +11,7 @@
 //! 쓰다듬기: 머리를 문지른 거리가 쌓이면 pat → idle2
 //! 가끔 혼자: stretch | yawn → idle2,  jump → (떠 있으면 fall) → land → …
 //! 잠:       sleep_in → sleep_loop(6~12초, 자리를 비웠으면 돌아올 때까지) → sleep_out → idle2
+//! 걸터앉기: 단 위에서 edge_in → edge_loop(3~6바퀴) → edge_out → idle2
 //! 사라지기: idle2가 첫 장으로 돌아올 때 despawn → 없어짐
 //! ```
 //!
@@ -59,6 +60,12 @@ const SLEEP_FOR: (f64, f64) = (6.0, 12.0);
 const AFTER_ACT: (f64, f64) = (1.5, 3.5);
 /// 쉬기를 마쳤을 때 가끔 하는 행동과 그 확률. 나머지는 걷는다.
 const WHIMS: [(Whim, f64); 4] = [(Whim::Stretch, 0.10), (Whim::Yawn, 0.10), (Whim::Jump, 0.07), (Whim::Sleep, 0.05)];
+/// 단 위에 있을 때 걸터앉을 확률. 위의 행동들보다 먼저 따진다.
+const SIT_CHANCE: f64 = 0.10;
+/// 돌아다니지 않을 때 걸터앉을 확률.
+const STILL_SIT_CHANCE: f64 = 0.20;
+/// 걸터앉아 다리를 흔드는 횟수.
+const SIT_LOOPS: (u32, u32) = (3, 6);
 /// 돌아다니지 않을 때: 이만큼(초) 서 있다가 가끔 하는 행동과 그 확률. 점프는 하지 않는다.
 const STILL_REST: (f64, f64) = (6.0, 12.0);
 const STILL_WHIMS: [(Whim, f64); 3] = [(Whim::Stretch, 0.30), (Whim::Yawn, 0.30), (Whim::Sleep, 0.15)];
@@ -82,6 +89,8 @@ pub enum Mode {
     Jump,
     /// 졸다가 잠들고, 자고, 깬다.
     Sleep,
+    /// 단의 앞 가장자리에 걸터앉아 다리를 흔든다.
+    Sit,
     /// 빛이 모여 나타나는 중이다. 공중에 떠 있다.
     Spawn,
     /// 나타난 뒤 떨어지는 자세를 잡는다.
@@ -118,6 +127,8 @@ pub enum Whim {
     Yawn,
     Jump,
     Sleep,
+    /// 단의 앞 가장자리에 걸터앉기. 단 위에 있을 때만 고른다.
+    Sit,
 }
 
 /// 꽃핀의 버릇. 설정에서 바꾸는 값이다.
@@ -147,6 +158,9 @@ pub struct Surroundings {
     pub right: f64,
     /// 들어 올릴 수 있는 가장 높은 자리(발바닥의 y). 머리가 화면 위로 나가지 않게 한다.
     pub top: f64,
+    /// 바닥이 단의 윗변이다(작업표시줄 위에 서 있다). 그러면 앞 가장자리에 걸터앉을 수 있다.
+    /// 바닥이 화면의 아래 끝이면 걸터앉은 다리가 화면 밖으로 나가므로 앉지 않는다.
+    pub ledge: bool,
 }
 
 /// 작고 빠른 난수. 쉬는 시간과 걷는 방향을 고르는 데 쓴다.
@@ -194,6 +208,7 @@ pub fn mode_of(motion: MotionId, motions: &Motions) -> Mode {
         m if m == motions.despawn => Mode::Vanish,
         m if m == motions.jump => Mode::Jump,
         m if [motions.sleep_in, motions.sleep_loop, motions.sleep_out].contains(&m) => Mode::Sleep,
+        m if [motions.edge_in, motions.edge_loop, motions.edge_out].contains(&m) => Mode::Sit,
         m if [motions.idle, motions.idle2, motions.walk_w, motions.walk_e].contains(&m) => Mode::Ground,
         _ => Mode::Act,
     }
@@ -233,6 +248,8 @@ pub struct Actor {
     launched: bool,
     /// 잠에서 깰 때까지 남은 시간(초). 자리를 비운 동안의 잠은 끝이 없다.
     sleep_left: f64,
+    /// 걸터앉아 다리를 몇 번 더 흔들지.
+    sit_left: u32,
     /// 사용자가 자리를 비웠다. 쉬게 되면 잠들고, 돌아올 때까지 잔다.
     away: bool,
     /// idle2가 첫 장으로 돌아오면 시작할 행동.
@@ -277,6 +294,7 @@ impl Actor {
             pat_quiet: 0.0,
             launched: false,
             sleep_left: 0.0,
+            sit_left: 0,
             away: false,
             pending: None,
             showcase: false,
@@ -342,10 +360,12 @@ impl Actor {
         self.habits = habits;
     }
 
-    /// 짧게 클릭했다. 자고 있으면 깨우고, 서 있으면 반응 하나를 한다. 바로 전과 다른 반응을 고른다.
+    /// 짧게 클릭했다. 자고 있으면 깨우고, 걸터앉아 있으면 일어나고, 서 있으면 반응 하나를 한다.
+    /// 반응은 바로 전과 다른 것을 고른다.
     pub fn poke(&mut self, motions: &Motions) {
         match self.mode {
             Mode::Sleep => self.sleep_left = 0.0,
+            Mode::Sit => self.stand_up(motions),
             Mode::Ground => {
                 let kinds = [motions.poke_surprise, motions.poke_pout, motions.poke_shy];
                 let choices: Vec<MotionId> = kinds.into_iter().filter(|&kind| Some(kind) != self.last_poke).collect();
@@ -390,6 +410,20 @@ impl Actor {
                 self.mode = Mode::Sleep;
                 self.sleep_left = if self.away { f64::INFINITY } else { self.rng.range(SLEEP_FOR) };
             }
+            Whim::Sit => {
+                self.act(motions.edge_in);
+                self.mode = Mode::Sit;
+                let (least, most) = SIT_LOOPS;
+                self.sit_left = least + (self.rng.unit() * (most - least + 1) as f64) as u32;
+            }
+        }
+    }
+
+    /// 걸터앉아 있다가 일어난다. 다리를 흔드는 중이면 바로 일어나고, 앉는 중이면 앉자마자 일어난다.
+    fn stand_up(&mut self, motions: &Motions) {
+        self.sit_left = 0;
+        if self.motion == motions.edge_loop {
+            self.enter(motions.edge_out, 0.0, motions);
         }
     }
 
@@ -426,7 +460,7 @@ impl Actor {
     pub fn can_grab(&self) -> bool {
         matches!(
             self.mode,
-            Mode::Ground | Mode::Act | Mode::Jump | Mode::Sleep | Mode::Release | Mode::Fall | Mode::Emerge
+            Mode::Ground | Mode::Act | Mode::Jump | Mode::Sleep | Mode::Sit | Mode::Release | Mode::Fall | Mode::Emerge
         )
     }
 
@@ -464,12 +498,14 @@ impl Actor {
         }
     }
 
-    /// 사라지라고 한다. 바닥에 서 있지 않으면 내려와 선 뒤에 사라진다. 자고 있으면 깬다.
-    pub fn leave(&mut self) {
+    /// 사라지라고 한다. 바닥에 서 있지 않으면 내려와 선 뒤에 사라진다. 자고 있으면 깨고, 앉아 있으면 일어난다.
+    pub fn leave(&mut self, motions: &Motions) {
         self.leaving = true;
         self.pending = None;
-        if self.mode == Mode::Sleep {
-            self.sleep_left = 0.0;
+        match self.mode {
+            Mode::Sleep => self.sleep_left = 0.0,
+            Mode::Sit => self.stand_up(motions),
+            _ => {}
         }
     }
 
@@ -667,6 +703,23 @@ impl Actor {
                     self.follow_when_over(motions);
                 }
             }
+            Mode::Sit => {
+                if self.motion != motions.edge_loop {
+                    // 앉는 그림과 일어나는 그림은 끝나면 다음으로 넘어간다. 앉는 사이에 일어나라고 했으면 바로 일어난다.
+                    let sat_down = self.motion == motions.edge_in && motions.clip(self.motion).is_over(self.t);
+                    if sat_down && self.sit_left == 0 {
+                        self.enter(motions.edge_out, 0.0, motions);
+                    } else {
+                        self.follow_when_over(motions);
+                    }
+                } else if self.wrap(motions) {
+                    // 다리를 한 번 흔들 때마다 센다. 다 흔들었으면 일어난다.
+                    self.sit_left = self.sit_left.saturating_sub(1);
+                    if self.sit_left == 0 {
+                        self.enter(motions.edge_out, self.t, motions);
+                    }
+                }
+            }
             Mode::Act => self.act_step(motions),
             _ => self.follow_when_over(motions),
         }
@@ -701,10 +754,14 @@ impl Actor {
     }
 
     /// 쉬기를 마쳤을 때 가끔 하는 행동 가운데 하나를 고른다. 고르지 않으면 `None`이다.
-    fn pick_whim(&mut self) -> Option<Whim> {
+    ///
+    /// `ledge`는 단 위에 서 있는지다. 단 위에서만 걸터앉기를 고른다.
+    fn pick_whim(&mut self, ledge: bool) -> Option<Whim> {
         let table: &[(Whim, f64)] = if self.habits.roam { &WHIMS } else { &STILL_WHIMS };
+        let sit_chance = if self.habits.roam { SIT_CHANCE } else { STILL_SIT_CHANCE };
+        let sit = (Whim::Sit, if ledge { sit_chance } else { 0.0 });
         let mut r = self.rng.unit();
-        for &(whim, chance) in table {
+        for &(whim, chance) in std::iter::once(&sit).chain(table) {
             r -= chance * self.habits.whim_rate;
             if r < 0.0 {
                 return Some(whim);
@@ -791,7 +848,7 @@ impl Actor {
             // 사용자가 자리를 비웠으면 쉬는 김에 잠든다.
             self.pending = Some(Whim::Sleep);
         } else if self.wait <= 0.0 {
-            if let Some(whim) = self.pick_whim() {
+            if let Some(whim) = self.pick_whim(around.ledge) {
                 self.pending = Some(whim);
             } else if self.habits.roam {
                 let mut dir = if self.rng.chance(0.5) { Dir::West } else { Dir::East };
@@ -837,7 +894,10 @@ mod tests {
     use super::*;
     use crate::motions::tests::sample;
 
-    const AROUND: Surroundings = Surroundings { floor: 1000.0, left: 100.0, right: 1900.0, top: 150.0 };
+    /// 화면의 아래 끝이 바닥인 곳. 걸터앉을 단이 없다.
+    const AROUND: Surroundings = Surroundings { floor: 1000.0, left: 100.0, right: 1900.0, top: 150.0, ledge: false };
+    /// 작업표시줄 위. 바닥이 단의 윗변이다.
+    const ON_LEDGE: Surroundings = Surroundings { ledge: true, ..AROUND };
     /// 시험에서 시간을 흘리는 걸음(초). 앱은 1/24초나 1/60초마다 부른다.
     const STEP: f64 = 1.0 / 60.0;
 
@@ -1094,6 +1154,79 @@ mod tests {
     }
 
     #[test]
+    fn sitting_is_only_picked_on_a_ledge() {
+        let motions = sample();
+        let sits = |around: &Surroundings, roam: bool| {
+            let mut actor = Actor::stand(&motions, 1000.0, around.floor, 1.0, 11);
+            actor.set_habits(Habits { roam, ..Habits::default() });
+            (0..20000).filter(|_| actor.pick_whim(around.ledge) == Some(Whim::Sit)).count() as f64 / 200.0
+        };
+        // 단 위에서는 쉬기를 마칠 때 10%, 돌아다니지 않을 때는 20%.
+        assert!((sits(&ON_LEDGE, true) - 10.0).abs() < 1.0, "{}", sits(&ON_LEDGE, true));
+        assert!((sits(&ON_LEDGE, false) - 20.0).abs() < 1.2, "{}", sits(&ON_LEDGE, false));
+        // 바닥이 화면의 아래 끝이면 앉지 않는다.
+        assert_eq!(sits(&AROUND, true), 0.0);
+        assert_eq!(sits(&AROUND, false), 0.0);
+    }
+
+    #[test]
+    fn sits_swings_the_legs_a_few_times_and_stands_up() {
+        let motions = sample();
+        for seed in 1..40 {
+            let mut actor = Actor::stand(&motions, 1000.0, ON_LEDGE.floor, 1.0, seed);
+            actor.start(Whim::Sit, &motions);
+            let mut swings = 0.0;
+            let mut seen = vec![motions.clip(actor.motion()).name.clone()];
+            while actor.mode() == Mode::Sit {
+                actor.update(STEP, &motions, &ON_LEDGE);
+                if actor.motion() == motions.edge_loop {
+                    swings += STEP;
+                }
+                let name = motions.clip(actor.motion()).name.clone();
+                if seen.last() != Some(&name) {
+                    seen.push(name);
+                }
+            }
+            assert_eq!(seen, ["edge_in", "edge_loop", "edge_out", "idle2"]);
+            // 다리 흔들기 한 번이 0.2초다. 3~6번 흔든다.
+            let loops = (swings / 0.2).round() as u32;
+            assert!((3..=6).contains(&loops), "{loops}번 (seed {seed})");
+            // 앉았다 일어나는 동안 자리는 그대로다.
+            assert_eq!(actor.position(), (1000.0, ON_LEDGE.floor));
+        }
+    }
+
+    #[test]
+    fn click_makes_a_sitter_stand_up() {
+        let motions = sample();
+        let mut actor = Actor::stand(&motions, 1000.0, ON_LEDGE.floor, 1.0, 7);
+        actor.start(Whim::Sit, &motions);
+        run(&mut actor, &motions, &ON_LEDGE, 0.3);
+        assert_eq!(motions.clip(actor.motion()).name, "edge_loop");
+        actor.poke(&motions);
+        assert_eq!(motions.clip(actor.motion()).name, "edge_out");
+        // 앉는 중에 클릭하면 앉자마자 일어난다.
+        settle(&mut actor, &motions);
+        actor.start(Whim::Sit, &motions);
+        actor.poke(&motions);
+        assert_eq!(names(&run(&mut actor, &motions, &ON_LEDGE, 1.0)), ["edge_in", "edge_out", "idle2"]);
+    }
+
+    #[test]
+    fn sitter_stands_up_to_leave() {
+        let motions = sample();
+        let mut actor = Actor::stand(&motions, 1000.0, ON_LEDGE.floor, 1.0, 7);
+        actor.start(Whim::Sit, &motions);
+        run(&mut actor, &motions, &ON_LEDGE, 0.3);
+        assert!(actor.can_grab());
+        // 사라지라고 하면 바로 일어나서, 인사하고 사라진다.
+        actor.leave(&motions);
+        let seen = run(&mut actor, &motions, &ON_LEDGE, 6.0);
+        assert_eq!(names(&seen), ["edge_out", "idle2", "despawn"]);
+        assert!(actor.is_gone());
+    }
+
+    #[test]
     fn whim_waits_for_the_first_frame_of_idle2() {
         let motions = sample();
         let mut actor = Actor::stand(&motions, 1000.0, AROUND.floor, 1.0, 7);
@@ -1233,7 +1366,7 @@ mod tests {
         run(&mut actor, &motions, &AROUND, 2.0);
         assert!(actor.can_grab());
         // 사라지라고 하면 깨어나서 인사하고 사라진다.
-        actor.leave();
+        actor.leave(&motions);
         let seen = run(&mut actor, &motions, &AROUND, 6.0);
         assert_eq!(names(&seen), ["sleep_loop", "sleep_out", "idle2", "despawn"]);
         assert!(actor.is_gone());
@@ -1281,7 +1414,7 @@ mod tests {
         assert_eq!(landing.mode(), Mode::Land);
         assert!(!landing.grab(&motions, (0.0, 0.0)));
         let mut vanishing = Actor::stand(&motions, 500.0, AROUND.floor, 1.0, 1);
-        vanishing.leave();
+        vanishing.leave(&motions);
         vanishing.update(STEP, &motions, &AROUND);
         assert_eq!(vanishing.mode(), Mode::Vanish);
         assert!(!vanishing.grab(&motions, (0.0, 0.0)));
@@ -1305,7 +1438,7 @@ mod tests {
         actor.walk = Some(Dir::East);
         actor.wait = 10.0;
         run(&mut actor, &motions, &AROUND, 0.1);
-        actor.leave();
+        actor.leave(&motions);
         let seen = run(&mut actor, &motions, &AROUND, 3.0);
         assert_eq!(names(&seen), ["walk_e", "despawn"]);
         assert_eq!(seen.last().map(|(mode, _)| *mode), Some(Mode::Gone));
@@ -1317,7 +1450,7 @@ mod tests {
     fn leaving_in_the_air_waits_for_the_landing() {
         let motions = sample();
         let mut actor = Actor::stand(&motions, 1000.0, 700.0, 1.0, 7);
-        actor.leave();
+        actor.leave(&motions);
         let seen = run(&mut actor, &motions, &AROUND, 6.0);
         assert_eq!(names(&seen), ["idle2", "fall", "land", "land_to_idle2", "idle2", "despawn"]);
         assert!(actor.is_gone());
@@ -1334,7 +1467,7 @@ mod tests {
         assert_eq!(actor.shadow(), 1.0);
 
         let mut actor = Actor::stand(&motions, 1000.0, AROUND.floor, 1.0, 7);
-        actor.leave();
+        actor.leave(&motions);
         run(&mut actor, &motions, &AROUND, 1.0);
         assert_eq!(actor.shadow(), 1.0);
         run(&mut actor, &motions, &AROUND, 0.3);
