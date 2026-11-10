@@ -171,7 +171,7 @@ pub enum Show {
 }
 
 impl Show {
-    /// 메뉴에 놓이는 차례.
+    /// 번호로 고를 때의 차례.
     pub const ALL: [Show; 11] = [
         Show::Stretch,
         Show::Yawn,
@@ -186,7 +186,7 @@ impl Show {
         Show::Pat,
     ];
 
-    /// 메뉴에 적는 이름.
+    /// 행동의 이름. 확인용 기록에 적는다.
     pub fn label(self) -> &'static str {
         match self {
             Show::Stretch => "기지개",

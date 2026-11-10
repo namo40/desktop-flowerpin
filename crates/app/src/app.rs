@@ -1754,6 +1754,7 @@ impl App {
                 let target = self.menu_character();
                 if let Some(character) = self.characters.get_mut(target) {
                     character.show(show, &self.motions, &self.stage, now);
+                    self.note(now, format!("행동을 시킴: {target}번에게 {}", show.label()));
                 }
             }
             None => {}

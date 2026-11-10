@@ -71,7 +71,7 @@ pub enum MenuItem {
     MemoTidy,
     /// 메모를 한데 모아 보는 창을 연다.
     MemoList,
-    /// 꽃핀을 하나 더 부른다.
+    /// 꽃핀을 하나 더 초대한다.
     CallOne,
     /// 더 부른 꽃핀을 모두 돌려보낸다.
     SendAll,
@@ -83,7 +83,7 @@ pub enum MenuItem {
     Unhide,
     /// 바로 가기. [`LINKS`]의 몇 번째인지다.
     Link(usize),
-    /// 꽃핀에게 시켜서 볼 행동.
+    /// 꽃핀에게 시켜서 볼 행동. 메뉴에는 없고, 확인용 스크립트가 번호로 고른다.
     Show(Show),
 }
 
@@ -171,8 +171,6 @@ pub fn while_modal<T>(owner: HWND, tick: fn(), show: impl FnOnce() -> T) -> T {
 
 /// 메뉴를 띄울 때의 상황. 넣을 항목과 흐리게 할 항목이 여기에 달려 있다.
 pub struct MenuState<'a> {
-    /// "행동" 아래에 넣을 행동과, 지금 고를 수 있는지. 고를 수 없는 것은 흐리게 보인다.
-    pub shows: &'a [(Show, bool)],
     /// 방송 중일 때의 방송 제목과 방송 정보 한 줄. 있으면 "● 방송 중"을 넣는다.
     pub live: Option<&'a (String, String)>,
     /// 더 부른 꽃핀을 오른쪽 클릭해서 띄웠다. 맨 위에 "이 꽃핀 보내기"를 넣는다.
@@ -225,9 +223,8 @@ fn build(state: &MenuState) -> Option<HMENU> {
             }
         }
         let links = CreatePopupMenu();
-        let actions = CreatePopupMenu();
         let memos = CreatePopupMenu();
-        if menu.is_null() || links.is_null() || actions.is_null() || memos.is_null() {
+        if menu.is_null() || links.is_null() || memos.is_null() {
             return None;
         }
         let add = |menu, item: MenuItem, label: &str| {
@@ -238,13 +235,6 @@ fn build(state: &MenuState) -> Option<HMENU> {
             let flags = if possible { MF_STRING } else { MF_STRING | MF_GRAYED };
             AppendMenuW(menu, flags, item.id() as usize, wide(label).as_ptr());
         };
-        for (index, &(show, possible)) in state.shows.iter().enumerate() {
-            // 혼자서도 하는 행동, 창을 오르내리는 행동, 사용자가 건드렸을 때의 반응을 줄로 나눈다.
-            if index > 0 && matches!(show, Show::Climb | Show::Surprise) {
-                AppendMenuW(actions, MF_SEPARATOR, 0, null());
-            }
-            add_if(actions, possible, MenuItem::Show(show), show.label());
-        }
         for (index, link) in LINKS.iter().enumerate() {
             add(links, MenuItem::Link(index), link.name);
         }
@@ -252,11 +242,9 @@ fn build(state: &MenuState) -> Option<HMENU> {
         add(memos, MenuItem::MemoList, "메모 목록...");
         add(memos, MenuItem::MemoShow, "모두 앞으로 가져오기");
         add(memos, MenuItem::MemoTidy, "다시 줄 세우기");
-        AppendMenuW(menu, MF_POPUP, actions as usize, wide("행동").as_ptr());
-        add_if(menu, state.can_call, MenuItem::CallOne, "꽃핀 하나 더");
+        add_if(menu, state.can_call, MenuItem::CallOne, "꽃핀 초대하기");
         add_if(menu, state.can_send, MenuItem::SendAll, "모두 보내기");
         AppendMenuW(menu, MF_SEPARATOR, 0, null());
-        AppendMenuW(menu, MF_POPUP, links as usize, wide("바로 가기").as_ptr());
         AppendMenuW(menu, MF_POPUP, memos as usize, wide("메모").as_ptr());
         AppendMenuW(menu, MF_SEPARATOR, 0, null());
         if state.hidden {
@@ -269,6 +257,7 @@ fn build(state: &MenuState) -> Option<HMENU> {
             AppendMenuW(menu, MF_POPUP, hides as usize, wide("잠깐 숨기기").as_ptr());
         }
         AppendMenuW(menu, MF_SEPARATOR, 0, null());
+        AppendMenuW(menu, MF_POPUP, links as usize, wide("바로 가기").as_ptr());
         // 이름 끝의 "..."은 창이 열린다는 뜻이다.
         add(menu, MenuItem::Settings, "설정...");
         add(menu, MenuItem::Quit, "끝내기");
@@ -647,15 +636,7 @@ mod tests {
 
     #[test]
     fn the_menu_lists_what_can_be_done_now() {
-        let shows = [(Show::Stretch, true), (Show::Sit, false)];
-        let state = |guest, can_call, can_send| MenuState {
-            shows: &shows,
-            live: None,
-            guest,
-            can_call,
-            can_send,
-            hidden: false,
-        };
+        let state = |guest, can_call, can_send| MenuState { live: None, guest, can_call, can_send, hidden: false };
         let names = |state: &MenuState| {
             let menu = build(state).expect("메뉴");
             let read = lines(menu);
@@ -665,28 +646,13 @@ mod tests {
         // 기본 꽃핀의 메뉴. 보낼 꽃핀이 없으면 "모두 보내기"가 흐리다.
         assert_eq!(
             names(&state(false, true, false)),
-            [
-                "행동",
-                "꽃핀 하나 더",
-                "(모두 보내기)",
-                "-",
-                "바로 가기",
-                "메모",
-                "-",
-                "잠깐 숨기기",
-                "-",
-                "설정...",
-                "끝내기"
-            ]
+            ["꽃핀 초대하기", "(모두 보내기)", "-", "메모", "-", "잠깐 숨기기", "-", "바로 가기", "설정...", "끝내기"]
         );
         // 숨겨 둔 동안에는 "잠깐 숨기기" 자리에 "다시 보이기"가 온다.
         let hidden = MenuState { hidden: true, ..state(false, false, false) };
-        assert_eq!(names(&hidden)[6..], ["-", "다시 보이기", "-", "설정...", "끝내기"]);
-        // 더 부른 꽃핀의 메뉴에는 맨 위에 "이 꽃핀 보내기"가 붙는다. 더 부를 수 없으면 "꽃핀 하나 더"가 흐리다.
-        assert_eq!(
-            names(&state(true, false, true))[..5],
-            ["이 꽃핀 보내기", "-", "행동", "(꽃핀 하나 더)", "모두 보내기"]
-        );
+        assert_eq!(names(&hidden)[4..], ["-", "다시 보이기", "-", "바로 가기", "설정...", "끝내기"]);
+        // 초대한 꽃핀의 메뉴에는 맨 위에 "이 꽃핀 보내기"가 붙는다. 더 초대할 수 없으면 "꽃핀 초대하기"가 흐리다.
+        assert_eq!(names(&state(true, false, true))[..4], ["이 꽃핀 보내기", "-", "(꽃핀 초대하기)", "모두 보내기"]);
         // 방송 중이면 방송 정보가 그 아래에 들어간다.
         let live = ("제목 & 제목".to_string(), "게임 · 시청자 10명".to_string());
         let on_air = MenuState { live: Some(&live), ..state(true, true, true) };

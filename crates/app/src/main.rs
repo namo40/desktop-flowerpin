@@ -79,11 +79,10 @@ fn run(options: dev::Options) -> Result<Vec<String>, PackError> {
             Flow::Menu(x, y) => {
                 let owner = app.menu_owner();
                 let shows = app.menu_shows();
-                // 행동을 고르는 동안에는 그 꽃핀이 멈춰서 기다린다.
+                // 메뉴가 떠 있는 동안에는 메뉴를 띄운 꽃핀이 멈춰서 기다린다.
                 app.hold_for_menu(&shows);
                 let live = app.live_menu();
                 let state = tray::MenuState {
-                    shows: &shows,
                     live: live.as_ref(),
                     guest: app.menu_on_guest(),
                     can_call: app.can_call(),
