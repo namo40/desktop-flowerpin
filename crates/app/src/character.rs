@@ -300,6 +300,16 @@ impl Character {
         self.wake(now);
     }
 
+    /// 말풍선이 따라갈 자리. 머리 꼭대기의 가운데, 몸 너비의 절반쯤, 말풍선이 벗어나면 안 되는 범위,
+    /// 그리고 그 모니터의 DPI다.
+    pub fn head(&self, stage: &Stage) -> ((i32, i32), i32, Rect, u32) {
+        let monitor = self.monitor(stage);
+        let (x, y) = self.actor.position();
+        let head = (x.round() as i32, (y - self.layout.headroom).round() as i32);
+        // 창은 효과까지 들어가는 너비라 몸보다 넓다. 몸은 그 3분의 2쯤이다.
+        (head, self.layout.size.0 / 3, monitor.work, self.look.dpi_override.unwrap_or(monitor.dpi))
+    }
+
     /// 메뉴에서 고를 수 있는 행동마다, 지금 보여 줄 수 있는지.
     pub fn showable(&self, stage: &Stage) -> Vec<(Show, bool)> {
         let around = Surroundings { perches: &self.perches, ..self.surroundings(self.monitor(stage)) };

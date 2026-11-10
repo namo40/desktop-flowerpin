@@ -99,7 +99,7 @@ impl Options {
 }
 
 /// `--script`로 시킬 수 있는 일.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Command {
     /// `grab`: 첫 꽃핀을 그 자리에서 잡는다.
     Grab,
@@ -127,6 +127,11 @@ pub enum Command {
     Menu(u32),
     /// `settings ...`: 설정 창을 다룬다.
     Settings(Dialog),
+    /// `say 초 제목 | 내용`: 말풍선으로 알릴 것을 줄에 세운다. 초가 0이면 클릭할 때까지 떠 있다.
+    /// `|`와 내용은 빼도 된다.
+    Say(f64, String, String),
+    /// `bubble click`: 떠 있는 말풍선을 클릭한 것으로 친다.
+    BubbleClick,
 }
 
 /// `--script`의 `settings` 명령. 사람이 창에서 하는 일을 흉내 낸다.
@@ -152,7 +157,7 @@ pub enum Dialog {
 }
 
 /// `--script`의 한 줄. 시작하고 `at`이 지났을 때 `command`를 한다.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Step {
     pub at: Duration,
     pub command: Command,
@@ -187,6 +192,12 @@ pub fn parse_script(text: &str) -> Result<Vec<Step>, String> {
             }),
             (Some("away"), 3) if words[2] == "on" || words[2] == "off" => Command::Away(words[2] == "on"),
             (Some("menu"), 3) => Command::Menu(number(2)? as u32),
+            (Some("say"), 4..) => {
+                let text = words[3..].join(" ");
+                let (title, body) = text.split_once(" | ").unwrap_or((&text, ""));
+                Command::Say(number(2)?, title.trim().to_string(), body.trim().to_string())
+            }
+            (Some("bubble"), 3) if words[2] == "click" => Command::BubbleClick,
             (Some("settings"), _) => Command::Settings(match (words.get(2).copied(), words.len()) {
                 (Some("open"), 3) => Dialog::Open,
                 (Some("close"), 3) => Dialog::Close,
@@ -436,14 +447,14 @@ mod tests {
     #[test]
     fn script_is_read_and_sorted_by_time() {
         let more = parse_script("1 click; 2 rub 80.5; 3 do jump; 4 away on; 5 away off").unwrap();
-        let commands: Vec<Command> = more.iter().map(|step| step.command).collect();
+        let commands: Vec<Command> = more.iter().map(|step| step.command.clone()).collect();
         assert_eq!(
             commands,
             [Command::Click, Command::Rub(80.5), Command::Do(Whim::Jump), Command::Away(true), Command::Away(false)]
         );
         let dialog =
             parse_script("1 settings open; 2 settings tab 1; 3 settings pick 1103 2; 4 settings toggle 1201").unwrap();
-        let commands: Vec<Command> = dialog.iter().map(|step| step.command).collect();
+        let commands: Vec<Command> = dialog.iter().map(|step| step.command.clone()).collect();
         assert_eq!(
             commands,
             [
@@ -455,7 +466,7 @@ mod tests {
         );
         assert_eq!(parse_script("1 menu 3").unwrap()[0].command, Command::Menu(3));
         let steps = parse_script(" 4 release; 1.5 grab ; 2 drag 300 -400;; 9 leave; 0 roam off; 3 dpi 144 ").unwrap();
-        let commands: Vec<Command> = steps.iter().map(|step| step.command).collect();
+        let commands: Vec<Command> = steps.iter().map(|step| step.command.clone()).collect();
         assert_eq!(
             commands,
             [

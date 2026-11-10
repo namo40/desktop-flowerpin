@@ -18,6 +18,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 };
 
 use crate::actor::{Habits, Mode, Show};
+use crate::bubble::{Bubble, Speech};
 use crate::character::{self, Character, Look};
 use crate::character_window::{self, WindowEvent};
 use crate::clock::WakeTimer;
@@ -26,6 +27,7 @@ use crate::dev;
 use crate::frames::Frames;
 use crate::links::LINKS;
 use crate::motions::{MotionId, Motions};
+use crate::notices::{Click, Kind, Notice, Notices};
 use crate::settings::{Key, Settings};
 use crate::settings_window::{self, DialogEvent, SettingsWindow, TAB_NAMES};
 use crate::stage::Stage;
@@ -136,6 +138,9 @@ pub struct App {
     menu_target: Option<HWND>,
     /// 메뉴가 떠 있는 동안 멈춰 세워 둔 꽃핀의 창.
     held: Option<HWND>,
+    /// 말풍선으로 알릴 것들의 줄과, 지금 떠 있는 말풍선.
+    notices: Notices,
+    bubble: Option<Bubble>,
     /// 화면에 보이는 다른 창들과, 마지막으로 읽은 시각.
     desktop: Desktop,
     scanned: Option<Instant>,
@@ -229,6 +234,8 @@ impl App {
             _watch: Watch::start(),
             menu_target: None,
             held: None,
+            notices: Notices::default(),
+            bubble: None,
             desktop: Desktop::default(),
             scanned: None,
             dev: Dev {
@@ -237,7 +244,7 @@ impl App {
                 screen_check: options.check_screen.then(|| dev::ScreenCheck::new(started)),
                 usage: None,
                 click_checked: false,
-                script: options.script.iter().copied().collect(),
+                script: options.script.iter().cloned().collect(),
                 script_origin: (0.0, 0.0),
                 play,
                 hellos: 0,
@@ -338,6 +345,9 @@ impl App {
         self.look.topmost = self.settings.is_on(Key::AlwaysOnTop);
         let look = self.look;
         self.characters.iter_mut().for_each(|character| character.set_look(look, now));
+        if let Some(bubble) = &self.bubble {
+            bubble.window().set_topmost(look.topmost);
+        }
         self.apply_habits();
         self.store.settings_changed(now);
     }
@@ -388,6 +398,11 @@ impl App {
         // 1. 꽃핀 창에서 온 일: 누르기, 끌기, 떼기, 문지르기, 모니터가 바뀜.
         for event in character_window::take_events() {
             match event {
+                WindowEvent::Press { hwnd, .. } if self.is_bubble(hwnd) => {
+                    // 말풍선은 누르면 바로 클릭으로 친다. 끌 것이 없으므로 누르고 있기를 그만둔다.
+                    character_window::stop_pressing();
+                    self.bubble_clicked();
+                }
                 WindowEvent::Press { hwnd, x, y } => {
                     let grabbable = self.find(hwnd).is_some_and(|i| self.characters[i].actor().can_grab());
                     if grabbable && matches!(self.pointer, Pointer::Idle) {
@@ -485,6 +500,9 @@ impl App {
                         self.dev.notes.push(format!("{at:.2}초 맨 앞 창이 바뀌었다는 알림"));
                     }
                     self.characters.iter().for_each(Character::keep_on_top);
+                    if let (Some(bubble), true) = (&self.bubble, self.look.topmost) {
+                        bubble.window().set_topmost(true);
+                    }
                     // 창들의 앞뒤가 바뀌었을 것이다. 다음 걸음에서 바로 다시 읽는다.
                     self.scanned = None;
                 }
@@ -620,7 +638,56 @@ impl App {
             self.dev.notes.push(dev::click_check(first.window()));
         }
         self.characters.retain(|character| !character.actor().is_gone());
+        self.update_bubble(now);
         Ok(!self.characters.is_empty())
+    }
+
+    fn is_bubble(&self, hwnd: HWND) -> bool {
+        self.bubble.as_ref().is_some_and(|bubble| bubble.window().hwnd() == hwnd)
+    }
+
+    /// 말풍선을 때맞춰 띄우고 닫는다. 떠 있으면 첫 꽃핀의 머리를 따라가게 한다.
+    fn update_bubble(&mut self, now: Instant) {
+        if self.notices.is_over(now) {
+            self.notices.dismiss();
+            self.close_bubble(now);
+        }
+        let Some(first) = self.characters.first() else {
+            self.bubble = None;
+            return;
+        };
+        let (head, half_body, bounds, dpi) = first.head(&self.stage);
+        // 꽃핀이 떠 있거나 잡혀 있는 동안에는 띄우지 않고 기다린다. 끝내는 중에는 새로 띄우지 않는다.
+        let ready = first.actor().can_speak() && self.quitting.is_none();
+        if self.bubble.is_none()
+            && let Some(notice) = self.notices.next(now, ready)
+        {
+            self.bubble = Some(Bubble::new(&notice.speech, dpi, self.look.topmost));
+            if self.dev.options.report.is_some() {
+                let at = now.saturating_duration_since(self.started).as_secs_f64();
+                self.dev.notes.push(format!("{at:.2}초 말풍선 띄움: {} / {}", notice.speech.title, notice.speech.body));
+            }
+        }
+        if let Some(bubble) = &mut self.bubble {
+            bubble.follow(head, half_body, bounds);
+        }
+    }
+
+    fn close_bubble(&mut self, now: Instant) {
+        if let Some(bubble) = self.bubble.take()
+            && self.dev.options.report.is_some()
+        {
+            let (at, rect) = (now.saturating_duration_since(self.started).as_secs_f64(), bubble.window().screen_rect());
+            self.dev.notes.push(format!("{at:.2}초 말풍선 닫음: 자리 ({}, {}) {}x{}", rect.x, rect.y, rect.w, rect.h));
+        }
+    }
+
+    /// 떠 있는 말풍선을 클릭했다. 닫고, 그 말풍선에 딸린 일을 한다. 다음 것은 다음 걸음에서 뜬다.
+    fn bubble_clicked(&mut self) {
+        self.close_bubble(Instant::now());
+        if let Some(Notice { click: Click::Open(target), .. }) = self.notices.dismiss() {
+            self.open(&target);
+        }
     }
 
     /// 보이는 다른 창들을 때맞춰 다시 읽는다. 꽃핀이 올라서 있는 창은 걸음마다 다시 본다.
@@ -666,6 +733,7 @@ impl App {
         }
         sooner(self.window.is_some().then_some(self.next_usage));
         sooner(self.store.due());
+        sooner(self.notices.closes_at());
         sooner(self.dev.deadline);
         sooner(self.quitting);
         sooner(self.dev.script.front().map(|step| self.started + step.at));
@@ -894,6 +962,18 @@ impl App {
             dev::Command::Away(on) => {
                 self.away_forced = true;
                 self.set_away(on, now);
+            }
+            dev::Command::Say(lasts, title, body) => self.notices.push(Notice {
+                kind: Kind::Note,
+                speech: Speech { title, body },
+                lasts: (lasts > 0.0).then(|| Duration::from_secs_f64(lasts)),
+                click: Click::Close,
+                tag: None,
+            }),
+            dev::Command::BubbleClick => {
+                if self.bubble.is_some() {
+                    self.bubble_clicked();
+                }
             }
             dev::Command::Menu(id) => {
                 if self.picked(MenuItem::from_id(id), now) {

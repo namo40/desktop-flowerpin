@@ -445,6 +445,11 @@ impl Actor {
             || (self.mode == Mode::Jump && self.launched)
     }
 
+    /// 말풍선을 띄워도 되는가. 무엇인가를 딛고 서 있을 때다. 떠 있거나 잡혀 있을 때는 내려앉은 뒤에 띄운다.
+    pub fn can_speak(&self) -> bool {
+        matches!(self.mode, Mode::Ground | Mode::Act | Mode::Sleep | Mode::Sit | Mode::Land | Mode::Settle)
+    }
+
     /// 발밑에 있는 바닥의 y. 창 위에 있거나 창 윗변으로 내려앉는 중이면 그 윗변이다. 그림자가 여기에 진다.
     pub fn ground_below(&self, around: &Surroundings) -> f64 {
         if self.through {

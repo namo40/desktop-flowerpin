@@ -5,6 +5,7 @@
 
 mod actor;
 mod app;
+mod bubble;
 mod character;
 mod character_window;
 mod clock;
@@ -15,6 +16,7 @@ mod geom;
 mod key;
 mod links;
 mod motions;
+mod notices;
 mod perch;
 mod scale;
 mod settings;
@@ -22,6 +24,7 @@ mod settings_window;
 mod shadow;
 mod stage;
 mod store;
+mod text;
 mod tray;
 mod usage;
 mod watch;
