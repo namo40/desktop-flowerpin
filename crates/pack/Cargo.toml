@@ -6,6 +6,16 @@ edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[features]
+# 팩을 만드는 쪽만 켠다. 앱은 읽기만 한다.
+write = ["dep:getrandom"]
+
 [dependencies]
-chacha20poly1305 = "0.11"
+# 난수(nonce 만들기)는 팩을 쓸 때만 필요하므로, 기본 기능에 딸려 오는 난수 crate를 뺀다.
+chacha20poly1305 = { version = "0.11", default-features = false }
+getrandom = { version = "0.4", optional = true }
 zstd = "0.14"
+
+[dev-dependencies]
+# 테스트는 팩을 만들어서 다시 읽어 보므로 쓰기 기능이 있어야 한다.
+dfp-pack = { path = ".", features = ["write"] }
