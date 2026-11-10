@@ -8,7 +8,7 @@ use crate::actor::{Actor, Mode, Surroundings};
 use crate::character_window::CharacterWindow;
 use crate::frames::Frames;
 use crate::geom::Rect;
-use crate::motions::Motions;
+use crate::motions::{BEAT_MS, Motions};
 use crate::scale::Scale;
 use crate::shadow::Shadow;
 use crate::stage::{Monitor, Stage};
@@ -23,12 +23,53 @@ const HEAD_BELOW_HOLD: f64 = 0.31;
 /// 할 일이 없을 때(다 사라진 뒤) 다음에 깨어날 때까지의 시간.
 const IDLE_WAKE: Duration = Duration::from_secs(3600);
 /// 모든 꽃핀이 함께 맞추는 박자(초). 그림이 1초에 24장이라 장 하나의 길이와 같다.
-const BEAT: f64 = 1.0 / 24.0;
+const BEAT: f64 = BEAT_MS / 1000.0;
+/// 박자를 셀 때 봐주는 오차(박자 단위, 약 40나노초). 시각을 나노초로 적으면서 생기는 끝자리 오차를 넘는다.
+const BEAT_SLACK: f64 = 1e-6;
 
-/// `due`를 그 뒤의 가장 가까운 박자로 미룬다. 박자는 `origin`에서 시작한다.
+/// 깨어났을 때 이만큼 앞선 시각까지 본다. 곧 올 박자를 지금 함께 밟으려는 것이다.
+/// [`Character::tick`]에는 "지금 + 이 값"을 넘긴다.
+pub const LOOKAHEAD: Duration = Duration::from_millis(3);
+
+/// `origin`에서 시작한 박자로 `at`이 몇 번째인지(소수).
+fn beats_until(origin: Instant, at: Instant) -> f64 {
+    at.saturating_duration_since(origin).as_secs_f64() / BEAT
+}
+
+fn beat_at(origin: Instant, index: f64) -> Instant {
+    origin + Duration::from_secs_f64(index.max(0.0) * BEAT)
+}
+
+/// `due`나 그 뒤의 가장 가까운 박자. 박자는 `origin`에서 시작한다.
 fn next_beat(origin: Instant, due: Instant) -> Instant {
-    let beats = (due.saturating_duration_since(origin).as_secs_f64() / BEAT - 1e-6).ceil().max(0.0);
-    origin + Duration::from_secs_f64(beats * BEAT)
+    beat_at(origin, (beats_until(origin, due) - BEAT_SLACK).ceil())
+}
+
+/// `at`이나 그 앞의 가장 가까운 박자.
+fn last_beat(origin: Instant, at: Instant) -> Instant {
+    beat_at(origin, (beats_until(origin, at) + BEAT_SLACK).floor())
+}
+
+/// 상태 기계의 시간을 어디까지 흘릴지 정한다. `last`는 지난번에 흘린 시각이다.
+///
+/// 박자에 맞춰 사는 동안(`smooth`가 아닐 때)에는 `horizon` 앞의 마지막 박자까지만 흘린다. 그러면 조금
+/// 일찍 깨든 늦게 깨든 상태 기계의 시간은 꼭 박자만큼씩 흐르고, 장도 박자마다 꼭 하나씩 넘어간다.
+/// 깨어난 시각을 그대로 쓰면, 장이 바뀌는 시각이 깨어난 시각과 거의 겹칠 때 그 작은 차이에 따라
+/// 어떤 장은 두 박자 동안 보이고 어떤 장은 건너뛴다.
+fn clock_at(origin: Instant, horizon: Instant, last: Instant, smooth: bool) -> Instant {
+    if smooth { horizon } else { last_beat(origin, horizon).max(last) }
+}
+
+/// `from`까지 시간을 흘린 뒤 다음에 깨어날 시각. `wait`은 상태 기계가 기다려도 된다고 한 시간(초)이다.
+fn due_after(origin: Instant, from: Instant, wait: f64, smooth: bool) -> Instant {
+    if !wait.is_finite() {
+        from + IDLE_WAKE
+    } else if smooth {
+        from + Duration::from_secs_f64(wait)
+    } else {
+        // 적어도 반 박자 뒤의 박자를 고른다. 방금 밟은 박자를 다시 고르면 시간이 흐르지 않은 채 맴돈다.
+        next_beat(origin, from + Duration::from_secs_f64(wait.max(BEAT / 2.0)))
+    }
 }
 
 /// 꽃핀을 어떻게 보여 줄지에 대한 설정.
@@ -262,8 +303,9 @@ impl Character {
         monitor.surroundings(self.layout.wall_margin, self.layout.headroom)
     }
 
-    /// 시각이 됐으면 상태 기계의 시간을 `horizon`까지 흘리고, 달라진 모습을 화면에 넘긴다.
-    /// 걸음을 밟았으면 `true`를 돌려준다.
+    /// 시각이 됐으면 상태 기계의 시간을 흘리고, 달라진 모습을 화면에 넘긴다. 걸음을 밟았으면 `true`다.
+    ///
+    /// `horizon`은 "지금 + [`LOOKAHEAD`]"다. 시간을 어디까지 흘리는지는 [`clock_at`]이 정한다.
     pub fn tick(
         &mut self,
         frames: &mut Frames,
@@ -274,8 +316,9 @@ impl Character {
         if horizon < self.due {
             return Ok(false);
         }
-        let dt = horizon.saturating_duration_since(self.last).as_secs_f64();
-        self.last = horizon;
+        let at = clock_at(self.beat, horizon, self.last, self.actor.moves_smoothly());
+        let dt = at.saturating_duration_since(self.last).as_secs_f64();
+        self.last = at;
 
         let monitor = *self.monitor(stage);
         // 배율이 다른 모니터로 옮겨졌으면 크기를 다시 잡는다. 잡혀 있는 동안에는 창을 바꾸지 않는다.
@@ -287,26 +330,19 @@ impl Character {
         let around = self.surroundings(&monitor);
         self.actor.update(dt, motions, &around);
         self.render(frames, motions, &around)?;
-        self.schedule(motions, horizon);
+        self.schedule(motions, at);
         Ok(true)
     }
 
-    /// 다음에 깨어날 시각을 잡는다.
+    /// 다음에 깨어날 시각을 잡는다. `from`은 방금 시간을 흘린 시각이다.
     ///
     /// 장을 넘기려고 깨는 것은 모든 꽃핀이 함께 쓰는 박자에 맞춘다. 동작을 시작한 시각이 꽃핀마다 달라도
-    /// 같은 순간에 함께 깨어나므로, 꽃핀 수가 늘어도 깨어나는 횟수는 1초에 24번 그대로다. 장이 조금
-    /// (한 박자 안에서) 늦게 넘어가지만, 시간은 실제로 흐른 만큼 세므로 전체 빠르기는 그대로다.
+    /// 같은 순간에 함께 깨어나므로, 꽃핀 수가 늘어도 깨어나는 횟수는 1초에 24번 그대로다. 박자 사이에
+    /// 시작한 동작은 장이 조금(한 박자 안에서) 늦게 넘어가지만, 시간은 흐른 만큼 세므로 빠르기는 그대로다.
     ///
     /// 떨어지거나 끌려가는 동안에는 박자보다 자주 움직여야 하므로 박자에 맞추지 않는다.
     fn schedule(&mut self, motions: &Motions, from: Instant) {
-        let wake = self.actor.wake_in(motions);
-        self.due = if !wake.is_finite() {
-            from + IDLE_WAKE
-        } else if self.actor.moves_smoothly() {
-            from + Duration::from_secs_f64(wake)
-        } else {
-            next_beat(self.beat, from + Duration::from_secs_f64(wake))
-        };
+        self.due = due_after(self.beat, from, self.actor.wake_in(motions), self.actor.moves_smoothly());
     }
 
     /// 배율을 바꾼다. 창 버퍼의 크기가 달라지므로 창을 새로 만든다.
@@ -380,6 +416,66 @@ mod tests {
         // 박자 위에 있는 시각은 그대로 둔다.
         assert!((beat_of(1000.0 / 24.0 * 5.0) - 5.0).abs() < 1e-6);
         assert!((beat_of(0.0) - 0.0).abs() < 1e-6);
+        // 박자를 나노초로 적은 시각은 그 박자 그대로다. 앞으로 찾든 뒤로 찾든 같다.
+        for beat in 0..2000 {
+            let on = beat_at(origin, beat as f64);
+            assert_eq!(next_beat(origin, on), on);
+            assert_eq!(last_beat(origin, on), on);
+            assert_eq!(last_beat(origin, on + Duration::from_millis(41)), on);
+            assert_eq!(next_beat(origin, on + Duration::from_millis(1)), beat_at(origin, beat as f64 + 1.0));
+        }
+    }
+
+    #[test]
+    fn waiting_never_picks_the_beat_just_taken() {
+        let origin = Instant::now();
+        let beat = |index: f64| beat_at(origin, index);
+        // 박자 위에서 기다릴 시간이 0이어도 다음 박자다.
+        assert_eq!(due_after(origin, beat(7.0), 0.0, false), beat(8.0));
+        assert_eq!(due_after(origin, beat(7.0), BEAT, false), beat(8.0));
+        assert_eq!(due_after(origin, beat(7.0), BEAT * 6.0, false), beat(13.0));
+        // 떨어지거나 끌려가는 동안에는 박자에 맞추지 않는다.
+        assert_eq!(due_after(origin, beat(7.0), 0.01, true), beat(7.0) + Duration::from_millis(10));
+        // 사라진 뒤에는 깨어날 일이 없다.
+        assert_eq!(due_after(origin, beat(7.0), f64::INFINITY, false), beat(7.0) + IDLE_WAKE);
+    }
+
+    #[test]
+    fn every_beat_shows_exactly_the_next_frame() {
+        // 진짜 팩처럼 장 시간이 41ms와 42ms로 적힌 동작을, 박자에 맞춰 깨어나며 재생해 본다. 동작을 시작한
+        // 시각이 박자와 어떻게 어긋나 있든(0~41ms), 일찍 깨든 늦게 깨든, 박자마다 꼭 한 장씩 넘어가야 한다.
+        let durations: Vec<u16> = (0..48).map(|i| if i % 3 == 0 { 41 } else { 42 }).collect();
+        let clip = crate::motions::Clip::new("x", 0, &durations, true);
+        let origin = Instant::now();
+        let ms = |ms: f64| Duration::from_secs_f64(ms / 1000.0);
+        for phase in 0..420 {
+            // 깨어나는 시각이 박자에서 어긋난 정도(ms). 음수는 다른 일로 조금 일찍 깬 것이다.
+            for late in [-2.9, 0.0, 0.4, 1.5, 20.0, 38.0] {
+                // 동작은 열 번째 박자에서 `phase / 10`ms 지난 때 시작했다. 상태 기계처럼 시각을 센다.
+                let started = beat_at(origin, 10.0) + ms(phase as f64 / 10.0);
+                let (mut last, mut t, mut laps) = (started, 0.0, 0);
+                let mut due = due_after(origin, started, clip.until_next_frame(t) / 1000.0, false);
+                let mut shown = 0;
+                for step in 0..200 {
+                    let now = if late < 0.0 { due - ms(-late) } else { due + ms(late) };
+                    let horizon = now + LOOKAHEAD;
+                    assert!(horizon >= due);
+                    let at = clock_at(origin, horizon, last, false);
+                    t = clip.settle(t + (at - last).as_secs_f64() * 1000.0);
+                    if t >= clip.total_ms {
+                        t = clip.settle(t % clip.total_ms);
+                        laps += 1;
+                    }
+                    last = at;
+                    let frame = laps * durations.len() + clip.frame_at(t);
+                    assert_eq!(frame, shown + 1, "어긋남 {}ms, {late}ms 늦음, {step}번째", phase as f64 / 10.0);
+                    shown = frame;
+                    let next = due_after(origin, at, clip.until_next_frame(t) / 1000.0, false);
+                    assert!(next > due, "같은 박자에 두 번 깨어남");
+                    due = next;
+                }
+            }
+        }
     }
 
     #[test]

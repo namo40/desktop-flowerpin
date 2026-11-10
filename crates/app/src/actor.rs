@@ -582,14 +582,31 @@ impl Actor {
         }
     }
 
+    /// 지금 동작의 시각을 `dt`초만큼 흘린다.
+    ///
+    /// 장이 바뀌는 시각에 아주 가까워지면 꼭 그 시각으로 맞춘다([`Clip::settle`]). 박자마다 시간을 흘릴 때
+    /// 끝자리 오차 때문에 장이 한 박자 늦게 넘어가는 일을 막는다.
+    ///
+    /// [`Clip::settle`]: crate::motions::Clip::settle
+    fn pass(&mut self, dt: f64, motions: &Motions) {
+        self.t = motions.clip(self.motion).settle(self.t + dt * 1000.0);
+    }
+
     /// 반복 동작의 시간을 한 바퀴 안으로 되돌린다. 한 바퀴를 돌았으면 `true`다.
     fn wrap(&mut self, motions: &Motions) -> bool {
         let clip = motions.clip(self.motion);
         if clip.looping && self.t >= clip.total_ms {
-            self.t %= clip.total_ms;
+            self.t = clip.settle(self.t % clip.total_ms);
             return true;
         }
         false
+    }
+
+    /// 방금 넘어온 동작의 시각을 맞춘다. `carried`는 앞 동작에서 넘친 시간(ms)이다.
+    /// 넘친 만큼 지난 데서 시작해야 동작이 이어져도 전체 빠르기가 그대로다.
+    fn carry(&mut self, carried: f64, motions: &Motions) {
+        let clip = motions.clip(self.motion);
+        self.t = clip.settle(carried.min(clip.total_ms / 2.0));
     }
 
     /// `motion`으로 넘어가고, 상태도 그 동작에 맞춘다. `carried`는 앞 동작에서 넘친 시간(ms)이다.
@@ -597,7 +614,7 @@ impl Actor {
         let landed = self.motion == motions.land_to_idle2;
         self.mode = mode_of(motion, motions);
         self.motion = motion;
-        self.t = carried.min(motions.clip(motion).total_ms / 2.0);
+        self.carry(carried, motions);
         if self.mode == Mode::Ground {
             self.rest(motions, if landed { SETTLE_REST } else { AFTER_ACT });
         }
@@ -650,7 +667,7 @@ impl Actor {
 
     /// 바닥에 있지 않을 때의 한 걸음.
     fn air_step(&mut self, dt: f64, motions: &Motions, around: &Surroundings) {
-        self.t += dt * 1000.0;
+        self.pass(dt, motions);
         match self.mode {
             Mode::Drag => {
                 // 목표와의 거리를 일정한 비율로 줄여 간다. 멀수록 빨리, 가까울수록 천천히 따라간다.
@@ -745,11 +762,15 @@ impl Actor {
             // 차례로 보여 줄 때는 떨어지거나 잡히는 동작도 제자리에서 그림만 보여 준다.
             Some(next) if self.showcase => {
                 self.motion = next;
-                self.t = carried.min(motions.clip(next).total_ms / 2.0);
+                self.carry(carried, motions);
                 self.loops_left = SHOWCASE_LOOPS;
             }
             Some(next) => self.enter(next, carried, motions),
-            None => self.rest(motions, REST),
+            None => {
+                // 쉬는 그림도 첫 장부터 보여 준다. 시각을 그대로 두면 쉬는 그림이 중간 장에서 시작한다.
+                self.rest(motions, REST);
+                self.carry(carried, motions);
+            }
         }
     }
 
@@ -777,7 +798,7 @@ impl Actor {
             self.motion = motions.idle2;
             self.t = 0.0;
         } else {
-            self.t += dt * 1000.0;
+            self.pass(dt, motions);
             self.wrap(motions);
         }
         motions.clip(motions.idle2).frame_at(self.t) == 0
@@ -877,7 +898,7 @@ impl Actor {
             self.motion = want;
             self.t = 0.0;
         } else {
-            self.t += dt * 1000.0;
+            self.pass(dt, motions);
             self.wrap(motions);
         }
         if let Some(dir) = self.walk {
@@ -892,7 +913,7 @@ impl Actor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::motions::tests::sample;
+    use crate::motions::tests::{sample, sample_24fps};
 
     /// 화면의 아래 끝이 바닥인 곳. 걸터앉을 단이 없다.
     const AROUND: Surroundings = Surroundings { floor: 1000.0, left: 100.0, right: 1900.0, top: 150.0, ledge: false };
@@ -919,6 +940,43 @@ mod tests {
         let mut names: Vec<&str> = seen.iter().map(|(_, name)| name.as_str()).collect();
         names.dedup();
         names
+    }
+
+    #[test]
+    fn on_the_beat_every_frame_shows_exactly_once() {
+        // 진짜 팩처럼 1초에 24장인 표로, 박자마다 시간을 흘린다. 무엇을 하든 장은 박자마다 꼭 하나씩 넘어가야
+        // 한다. 같은 장이 두 박자 동안 보이거나 장을 건너뛰면 안 된다.
+        let motions = sample_24fps();
+        // 흐르는 시간은 앱에서처럼 나노초로 적은 박자 시각의 차이다. 그래서 박자와 끝자리가 조금 다르다.
+        let beat_ns = |beat: u64| (beat as f64 * 1e9 / 24.0).round() as u64;
+        for (seed, around) in [(1, AROUND), (2, ON_LEDGE), (3, AROUND), (4, ON_LEDGE)] {
+            let mut actor = Actor::appear(&motions, 500.0, 400.0, 1.0, seed);
+            let mut before = (actor.motion(), actor.frame(&motions));
+            // 10분.
+            for beat in 1..=24 * 600 {
+                if beat == 24 * 300 {
+                    actor.set_away(true);
+                }
+                if beat == 24 * 420 {
+                    actor.set_away(false);
+                }
+                let dt = (beat_ns(beat) - beat_ns(beat - 1)) as f64 / 1e9;
+                actor.update(dt, &motions, &around);
+                let now = (actor.motion(), actor.frame(&motions));
+                let clip = motions.clip(now.0);
+                let first = clip.first_frame;
+                let last = first + clip.frame_at(clip.total_ms - 1.0);
+                let ok = if now.0 != before.0 {
+                    // 다른 동작으로 넘어가면 첫 장부터다.
+                    now.1 == first
+                } else {
+                    // 같은 동작에서는 다음 장이다. 반복 동작의 마지막 장 다음은 첫 장이다.
+                    now.1 == before.1 + 1 || (clip.looping && before.1 == last && now.1 == first)
+                };
+                assert!(ok, "씨앗 {seed}, {beat}번째 박자: {} {} -> {} {}", before.0, before.1, clip.name, now.1);
+                before = now;
+            }
+        }
     }
 
     #[test]

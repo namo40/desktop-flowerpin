@@ -32,13 +32,6 @@ use stage::Stage;
 use tray::{MenuItem, Tray, TrayEvent};
 use windows_sys::Win32::Foundation::HWND;
 
-/// 깨어난 김에 함께 넘기는 범위. 이 시간 안에 넘길 장은 조금 일찍 지금 넘긴다.
-///
-/// 장마다 보여 줄 시간이 41ms와 42ms로 섞여 있어서, 여러 명의 넘길 시각이 1ms씩 어긋난다.
-/// 그때마다 따로 깨어나면 깨어나는 횟수가 꽃핀 수만큼 는다. 시간은 늘 이만큼 앞선 시각까지 흘리므로
-/// 전체 빠르기는 그대로다.
-const COALESCE: Duration = Duration::from_millis(3);
-
 /// 누른 뒤 이만큼 움직이거나(px, 그림 1배 기준) 이만큼 누르고 있으면 잡는 것으로 본다.
 /// 그 전에 떼면 클릭이다.
 const CLICK_MOVE: f64 = 6.0;
@@ -388,7 +381,7 @@ fn run(frames: &mut Frames, options: &dev::Options, report: &mut dev::Report) ->
         }
 
         // 5. 때가 된 꽃핀의 시간을 흘리고 화면에 넘긴다.
-        let horizon = now + COALESCE;
+        let horizon = now + character::LOOKAHEAD;
         // 다음 장을 그리기 바로 전에, 앞 장이 화면에 제대로 나와 있는지 본다. 첫 꽃핀이 멈춰 있을 때만 본다.
         if let Some(check) = &mut screen_check
             && horizon >= characters[0].due()

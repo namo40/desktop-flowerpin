@@ -1,9 +1,36 @@
 //! 팩의 동작을 재생하는 데 필요한 값만 추린 표.
 //!
-//! 동작은 장마다 보여 줄 시간이 다르다(대부분 41~42ms, 어떤 장은 더 길다). 그래서 "몇 번째 장인가"는
+//! 동작은 장마다 보여 줄 시간이 다르다(대부분 한 박자, 어떤 장은 더 길다). 그래서 "몇 번째 장인가"는
 //! 장 번호를 세지 않고 동작을 시작한 뒤 흐른 시간으로 정한다.
+//!
+//! # 장 시간과 박자
+//!
+//! 그림은 1초에 24장이고, 앱은 1/24초 박자에 맞춰 깨어나 장을 넘긴다. 그런데 팩은 장 시간을 정수 ms로
+//! 적어서, 장 하나(41.67ms)가 41이나 42로 적혀 있다. 이것을 그대로 쓰면 장이 바뀌는 시각이 박자에서 조금씩
+//! 어긋난다. 그러다 깨어나는 시각과 거의 겹치면 어떤 장은 두 박자 동안 보이고 어떤 장은 건너뛴다.
+//! 그래서 박자의 배수를 반올림한 것으로 보이는 시간은 박자의 배수로 되돌려 쓴다([`ticks_of`]).
+//! 그러면 장이 바뀌는 시각이 꼭 박자 위에 놓이고, 박자마다 시간을 흘리면 장이 꼭 하나씩 넘어간다.
 
 use dfp_pack::{Pack, PackError};
+
+/// 박자 하나의 길이(ms). 그림이 1초에 24장이라 장 하나의 길이와 같다.
+pub const BEAT_MS: f64 = 1000.0 / 24.0;
+
+/// 장 시간을 셀 때 쓰는 눈금. 1ms가 24눈금이고 한 박자가 1000눈금이다. 팩에 적힌 시간(ms)도 박자도
+/// 눈금으로는 정수라서, 더해 가도 오차가 쌓이지 않는다.
+const TICKS_PER_MS: u64 = 24;
+const TICKS_PER_BEAT: u64 = 1000;
+
+/// 장이 바뀌는 시각에 이만큼 가까운 시각은 꼭 그 시각으로 친다(ms). [`Clip::settle`]을 보라.
+const SNAP_MS: f64 = 1e-3;
+
+/// 팩에 적힌 장 시간(ms)을 눈금으로 바꾼다. 박자의 배수에서 1ms 안쪽이면 박자의 배수로 되돌린다.
+fn ticks_of(duration_ms: u16) -> u64 {
+    let ticks = duration_ms as u64 * TICKS_PER_MS;
+    let beats = (ticks + TICKS_PER_BEAT / 2) / TICKS_PER_BEAT;
+    let on_beat = beats * TICKS_PER_BEAT;
+    if beats > 0 && ticks.abs_diff(on_beat) < TICKS_PER_MS { on_beat } else { ticks }
+}
 
 /// 동작 번호. [`Motions::clip`]으로 재생 정보를 찾는다.
 pub type MotionId = u16;
@@ -32,17 +59,18 @@ pub struct Clip {
 
 impl Clip {
     pub fn new(name: &str, first_frame: usize, durations_ms: &[u16], looping: bool) -> Clip {
+        let ms = |ticks: u64| ticks as f64 / TICKS_PER_MS as f64;
         let mut starts = Vec::with_capacity(durations_ms.len());
-        let mut total = 0.0;
+        let mut total = 0;
         for &duration in durations_ms {
-            starts.push(total);
-            total += duration as f64;
+            starts.push(ms(total));
+            total += ticks_of(duration);
         }
         Clip {
             name: name.to_string(),
             first_frame,
             starts,
-            total_ms: total,
+            total_ms: ms(total),
             looping,
             next: None,
             launch_ms: None,
@@ -73,6 +101,28 @@ impl Clip {
     /// 한 번짜리 동작이 끝났는가.
     pub fn is_over(&self, t_ms: f64) -> bool {
         !self.looping && t_ms >= self.total_ms
+    }
+
+    /// 장이 바뀌는 시각(동작이 끝나는 시각도)에 아주 가까운 `t_ms`를 꼭 그 시각으로 맞춘다.
+    ///
+    /// 시각은 흐른 시간을 더해 가며 센다. 박자마다 더하면 장이 바뀌는 시각과 같아져야 하는데, 끝자리 오차로
+    /// 아주 조금 모자라거나 넘칠 수 있다. 모자라면 넘어갔어야 할 장이 한 박자 늦게 넘어간다. 그래서 시각을
+    /// 고칠 때마다 이것을 거쳐, 장이 바뀌는 시각과 견줄 때 늘 같은 답이 나오게 한다.
+    pub fn settle(&self, t_ms: f64) -> f64 {
+        if self.total_ms <= 0.0 {
+            return t_ms;
+        }
+        // 반복 동작은 몇 바퀴를 돌았든 그 바퀴 안에서 본다. 한 번짜리는 끝난 뒤에 바뀌는 장이 없다.
+        let laps = if self.looping { ((t_ms + SNAP_MS) / self.total_ms).floor().max(0.0) } else { 0.0 };
+        let base = laps * self.total_ms;
+        let local = t_ms - base;
+        let after = self.starts.partition_point(|&start| start <= local);
+        let before = after.checked_sub(1).map(|frame| self.starts[frame]);
+        let next = self.starts.get(after).copied().unwrap_or(self.total_ms);
+        match [before, Some(next)].into_iter().flatten().find(|edge| (local - edge).abs() <= SNAP_MS) {
+            Some(edge) => base + edge,
+            None => t_ms,
+        }
     }
 }
 
@@ -177,6 +227,18 @@ pub mod tests {
 
     /// 시험용 동작 표. 이름과 다음 동작은 진짜 팩과 같고, 길이는 계산하기 쉬운 값이다.
     pub fn sample() -> Motions {
+        table(|durations| durations.to_vec())
+    }
+
+    /// [`sample`]과 길이가 (거의) 같은 표인데, 진짜 팩처럼 1초에 24장이고 장 시간이 41ms와 42ms로 적혀 있다.
+    pub fn sample_24fps() -> Motions {
+        table(|durations| {
+            let total: u32 = durations.iter().map(|&ms| ms as u32).sum();
+            (0..(total * 24 + 500) / 1000).map(|frame| if frame % 3 == 0 { 41 } else { 42 }).collect()
+        })
+    }
+
+    fn table(frames_of: impl Fn(&[u16]) -> Vec<u16>) -> Motions {
         let spec: &[(&str, &[u16], bool, Option<&str>)] = &[
             ("idle", &[250, 250], true, None),
             ("idle2", &[100, 100, 100, 100], true, None),
@@ -208,7 +270,8 @@ pub mod tests {
         let mut clips: Vec<Clip> = Vec::new();
         let mut first = 0;
         for (name, durations, looping, _) in spec {
-            clips.push(Clip::new(name, first, durations, *looping));
+            let durations = frames_of(durations);
+            clips.push(Clip::new(name, first, &durations, *looping));
             first += durations.len();
         }
         for (i, (_, _, _, next)) in spec.iter().enumerate() {
@@ -231,6 +294,39 @@ pub mod tests {
         let clip = Clip::new("x", 0, &[100, 300, 50], false);
         assert_eq!(clip.total_ms, 450.0);
         assert_eq!([0.0, 99.9, 100.0, 399.9, 400.0, 449.0].map(|t| clip.frame_at(t)), [0, 0, 1, 1, 2, 2]);
+    }
+
+    #[test]
+    fn frame_times_written_in_whole_ms_go_back_on_the_beat() {
+        // 24fps의 장 하나는 41.67ms인데 팩에는 41이나 42로 적혀 있다. 박자의 배수로 되돌린다.
+        let clip = Clip::new("x", 0, &[41, 42, 42, 41, 42, 42, 83, 250], true);
+        let beats = [0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 8.0];
+        assert_eq!(clip.starts, beats.map(|beat| beat * 1000.0 / 24.0));
+        assert_eq!(clip.total_ms, 14.0 * 1000.0 / 24.0);
+        // 진짜 팩의 24장짜리 동작은 꼭 1초다.
+        let second: Vec<u16> = (0..24).map(|frame| if frame % 3 == 0 { 41 } else { 42 }).collect();
+        assert_eq!(Clip::new("x", 0, &second, true).total_ms, 1000.0);
+        // 박자의 배수가 아닌 시간은 적힌 대로 쓴다.
+        assert_eq!(Clip::new("x", 0, &[100, 300, 50, 20], false).starts, [0.0, 100.0, 400.0, 450.0]);
+    }
+
+    #[test]
+    fn time_near_a_frame_change_settles_on_it() {
+        let clip = Clip::new("x", 0, &[100, 300, 50], true);
+        // 장이 바뀌는 시각에서 끝자리만 어긋난 시각은 그 시각이 된다.
+        assert_eq!(clip.settle(100.0 - 1e-7), 100.0);
+        assert_eq!(clip.settle(400.0 + 1e-7), 400.0);
+        assert_eq!(clip.settle(-1e-9), 0.0);
+        // 한 바퀴를 돈 뒤에도 마찬가지다. 바퀴 수는 그대로 둔다.
+        assert_eq!(clip.settle(450.0 - 1e-7), 450.0);
+        assert_eq!(clip.settle(450.0 + 100.0 + 1e-7), 550.0);
+        // 가깝지 않으면 그대로다.
+        assert_eq!(clip.settle(99.9), 99.9);
+        assert_eq!(clip.settle(250.0), 250.0);
+        // 한 번짜리 동작은 끝나는 시각까지만 본다.
+        let once = Clip::new("x", 0, &[100, 300, 50], false);
+        assert_eq!(once.settle(450.0 - 1e-7), 450.0);
+        assert_eq!(once.settle(550.0 + 1e-7), 550.0 + 1e-7);
     }
 
     #[test]
