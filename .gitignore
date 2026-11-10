@@ -1,0 +1,17 @@
+/target/
+
+# 그림, 진짜 그림 팩, 키는 이 저장소에 넣지 않는다.
+*.png
+*.bmp
+*.gif
+*.jpg
+*.jpeg
+*.webp
+*.pak
+*.dfpk
+*.bin
+*.key
+/out/
+
+# 대체 그림 팩(코드로 그린 도형)만 예외로 둔다.
+!/placeholder/**

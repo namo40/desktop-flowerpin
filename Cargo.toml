@@ -1,0 +1,16 @@
+[workspace]
+resolver = "3"
+members = ["crates/app", "crates/pack"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+publish = false
+
+# 하루 종일 켜 두는 프로그램이라 크기와 속도를 함께 챙긴다
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
