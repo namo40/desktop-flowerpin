@@ -86,6 +86,9 @@ pub struct Options {
     /// `--run-key 자리`: "Windows 시작할 때 실행"을 진짜 자리 대신 레지스트리(`HKEY_CURRENT_USER` 아래)의
     /// 이 자리에 적는다. `--for`와 함께 쓸 때 이것을 주지 않으면 레지스트리를 건드리지 않는다.
     pub run_key: Option<String>,
+    /// `--monitor-dpi 번호=값,번호=값`: 그 번호의 모니터(보고서에 적히는 차례, 0부터)의 DPI를 이 값으로 친다.
+    /// 화면 배율이 서로 다른 모니터가 없어도, 꽃핀이나 포스트잇을 배율이 다른 모니터로 옮기는 것을 확인할 수 있다.
+    pub monitor_dpi: Vec<(usize, u32)>,
 }
 
 impl Options {
@@ -119,6 +122,15 @@ impl Options {
             clock: value("--clock")
                 .map(|s| parse_clock(&s).unwrap_or_else(|| crate::win::fatal("--clock을 읽을 수 없습니다."))),
             run_key: value("--run-key"),
+            monitor_dpi: value("--monitor-dpi")
+                .map(|list| {
+                    let pair = |text: &str| {
+                        let (index, dpi) = text.split_once('=')?;
+                        Some((index.trim().parse().ok()?, dpi.trim().parse().ok()?))
+                    };
+                    list.split(',').filter_map(pair).collect()
+                })
+                .unwrap_or_default(),
         }
     }
 }

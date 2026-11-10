@@ -32,6 +32,7 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, VK_CONTROL};
 use windows_sys::Win32::UI::WindowsAndMessaging::{MSG, WM_KEYDOWN};
 
 use crate::dev::MemoStep;
+use crate::geom::Rect;
 use crate::memos::{Memo, Memos, Sheet, TEXT_LIMIT};
 use crate::when::When;
 use crate::win;
@@ -173,6 +174,8 @@ struct Note {
     rest: f32,
     /// 기울기가 없을 때 종이 왼쪽 위가 놓이는 화면 좌표(px).
     at: (f32, f32),
+    /// 화면 배율(100%면 1). 종이의 한가운데가 놓인 모니터의 것을 따른다.
+    scale: f32,
     glide: Option<Glide>,
     phase: Phase,
     then: Option<Then>,
@@ -220,15 +223,20 @@ impl Note {
     }
 
     /// 포스트잇 창의 크기(px). 종이의 크기에 따라 달라진다.
-    fn canvas_px(&self, scale: f32) -> (i32, i32) {
+    fn canvas_px(&self) -> (i32, i32) {
         let size = draw::canvas(self.paper);
-        ((size.0 * scale).ceil() as i32, (size.1 * scale).ceil() as i32)
+        ((size.0 * self.scale).ceil() as i32, (size.1 * self.scale).ceil() as i32)
     }
 
     /// 포스트잇의 창이 놓일 화면 좌표.
-    fn window_at(&self, scale: f32) -> (i32, i32) {
+    fn window_at(&self) -> (i32, i32) {
         let offset = draw::paper_offset(self.paper);
-        ((self.at.0 - offset.0 * scale).round() as i32, (self.at.1 - offset.1 * scale).round() as i32)
+        ((self.at.0 - offset.0 * self.scale).round() as i32, (self.at.1 - offset.1 * self.scale).round() as i32)
+    }
+
+    /// 종이의 한가운데쯤. 이 점이 놓인 모니터의 화면 배율을 따른다.
+    fn middle(&self) -> (f32, f32) {
+        (self.at.0 + self.paper.0 / 2.0 * self.scale, self.at.1 + self.paper.1 / 2.0 * self.scale)
     }
 
     /// 지금의 모습을 메모에 적을 모양으로 바꾼다.
@@ -255,7 +263,12 @@ struct Tools {
 }
 
 pub struct Postits {
+    /// 주 모니터의 화면 배율(100%면 1). 모니터를 알 수 없을 때 쓴다.
     scale: f32,
+    /// 모니터마다의 범위와 화면 배율. 포스트잇은 자기가 놓인 모니터의 배율로 그린다.
+    monitors: Vec<(Rect, f32)>,
+    /// 떠 있는 판의 화면 배율. 판을 띄운 포스트잇의 배율을 따른다.
+    panel_scale: f32,
     /// 확인용으로 도는 중이다. 새 포스트잇을 쓰던 창들 앞으로 가져오지 않는다.
     quiet: bool,
     tools: Option<Tools>,
@@ -289,12 +302,14 @@ fn overshoot(t: f32) -> f32 {
 }
 
 impl Postits {
-    /// `dpi`는 포스트잇의 크기를 정할 화면 배율이다. `quiet`이면 글을 적는 칸을 띄워도 쓰던 창에서
-    /// 키보드 입력을 가져오지 않는다(확인용으로 돌릴 때).
+    /// `dpi`는 주 모니터의 화면 배율이다. 모니터들을 알려 주기 전까지 이것을 쓴다.
+    /// `quiet`이면 글을 적는 칸을 띄워도 쓰던 창에서 키보드 입력을 가져오지 않는다(확인용으로 돌릴 때).
     pub fn new(dpi: u32, quiet: bool, seed: u64, wall: When) -> Postits {
         window::QUIET.store(quiet, Ordering::Relaxed);
         Postits {
             scale: dpi.max(96) as f32 / 96.0,
+            monitors: Vec::new(),
+            panel_scale: 1.0,
             quiet,
             tools: None,
             written: None,
@@ -309,6 +324,35 @@ impl Postits {
             wall,
             seed: seed as u32 ^ (seed >> 32) as u32,
             outcomes: Vec::new(),
+        }
+    }
+
+    /// 모니터마다의 범위와 DPI를 알려 준다. 시작할 때와 모니터 구성이 바뀔 때 부른다.
+    /// 화면 배율이 달라진 모니터에 놓인 포스트잇은 그 배율로 다시 그린다.
+    pub fn set_monitors(&mut self, monitors: &[(Rect, u32)]) {
+        self.monitors = monitors.iter().map(|&(area, dpi)| (area, dpi.max(96) as f32 / 96.0)).collect();
+        for index in 0..self.notes.len() {
+            self.settle(index);
+        }
+    }
+
+    /// 화면의 한 점이 놓인 모니터의 화면 배율. 어느 모니터에도 들지 않으면 가장 가까운 모니터의 것이다.
+    fn scale_at(&self, (x, y): (f32, f32)) -> f32 {
+        let away = |area: &Rect| {
+            let dx = (area.x as f32 - x).max(x - area.right() as f32).max(0.0);
+            let dy = (area.y as f32 - y).max(y - area.bottom() as f32).max(0.0);
+            dx * dx + dy * dy
+        };
+        let nearest = self.monitors.iter().min_by(|a, b| away(&a.0).total_cmp(&away(&b.0)));
+        nearest.map_or(self.scale, |&(_, scale)| scale)
+    }
+
+    /// 포스트잇이 지금 놓인 모니터의 화면 배율을 따르게 한다. 배율이 다른 모니터로 옮겨졌으면 다시 그린다.
+    fn settle(&mut self, index: usize) {
+        let scale = self.scale_at(self.notes[index].middle());
+        if scale != self.notes[index].scale {
+            (self.notes[index].scale, self.notes[index].stale) = (scale, true);
+            self.wake();
         }
     }
 
@@ -361,8 +405,9 @@ impl Postits {
     /// 줄 세울 때 `index`번째 포스트잇이 놓일 자리. 마우스 커서가 있는 모니터의 왼쪽 위부터 차례로 놓는다.
     /// `cell`은 가장 큰 포스트잇의 크기다.
     fn grid(&self, index: usize, cell: (f32, f32)) -> (f32, f32) {
-        let work = window::work_area(win::cursor_position(), true).unwrap_or((0, 0, 1920, 1040));
-        let scale = self.scale;
+        let cursor = win::cursor_position();
+        let work = window::work_area(cursor, true).unwrap_or((0, 0, 1920, 1040));
+        let scale = self.scale_at((cursor.0 as f32, cursor.1 as f32));
         let (wide, tall) = ((cell.0 + 26.0) * scale, (cell.1 + 54.0) * scale);
         let columns = ((((work.2 - work.0) as f32 * 0.42) / wide).floor() as usize).max(1);
         (
@@ -405,6 +450,7 @@ impl Postits {
             top: sheet.top,
             rest,
             at: (at.0 as f32, at.1 as f32),
+            scale: self.scale,
             glide: None,
             phase: if born { Phase::Born(0.0) } else { Phase::Idle },
             then: None,
@@ -425,7 +471,10 @@ impl Postits {
             stale: true,
             since_drawn: 0.0,
         };
-        note.hwnd = window::create(note.window_at(self.scale), note.canvas_px(self.scale), false);
+        // 종이의 한가운데가 놓인 모니터의 배율을 따른다. 한가운데가 배율에 따라 달라지므로 한 번 더 맞춘다.
+        note.scale = self.scale_at(note.middle());
+        note.scale = self.scale_at(note.middle());
+        note.hwnd = window::create(note.window_at(), note.canvas_px(), false);
         self.notes.push(note);
         let last = self.notes.len() - 1;
         // 처음 한 장을 넘긴 뒤에 보여 준다.
@@ -475,7 +524,7 @@ impl Postits {
         // 글자 그림에 들어가는 것이 지난번과 모두 같으면 그려 둔 것을 그대로 쓴다.
         let mut hasher = DefaultHasher::new();
         (note.hwnd as usize, &note.text, &chip, look.editing).hash(&mut hasher);
-        [look.paper.0, look.paper.1, look.tools, look.answers].map(f32::to_bits).hash(&mut hasher);
+        [look.paper.0, look.paper.1, look.tools, look.answers, note.scale].map(f32::to_bits).hash(&mut hasher);
         let print = hasher.finish();
         if let Some((last, written)) = self.written
             && last == print
@@ -486,7 +535,7 @@ impl Postits {
         // 너비를 재면 걸어 둔 변환이 풀리므로 먼저 잰다.
         let chip_width = chip.as_ref().map(|label| draw::chip_width(painter.measure(Font::Label, label)));
         let (origin, extent) = draw::sheet(look.paper);
-        let density = draw::SUPER * self.scale;
+        let density = draw::SUPER * note.scale;
         let size = ((extent.0 * density).ceil() as i32, (extent.1 * density).ceil() as i32);
         painter.begin(size.0, size.1, density, origin);
         let dim = note.text.trim().is_empty();
@@ -524,9 +573,9 @@ impl Postits {
     fn paint(&mut self, index: usize) -> (i32, i32) {
         self.ready();
         let look = self.look(&self.notes[index]);
-        let size = self.notes[index].canvas_px(self.scale);
+        let size = self.notes[index].canvas_px();
         let (sheet, text_bottom, chip, dim, body) = self.write(index, &look);
-        let scale = self.scale;
+        let scale = self.notes[index].scale;
         let Some(tools) = &mut self.tools else { return size };
         tools.canvas.fit(size.0, size.1);
         let stride = tools.canvas.width as usize;
@@ -552,7 +601,7 @@ impl Postits {
         let note = &mut self.notes[index];
         (note.stale, note.since_drawn) = (false, 0.0);
         if let Some(tools) = &self.tools {
-            tools.canvas.present(note.hwnd, note.window_at(self.scale), size);
+            tools.canvas.present(note.hwnd, note.window_at(), size);
         }
     }
 
@@ -630,7 +679,6 @@ impl Postits {
     fn tick(&mut self, now: Instant, memos: &mut Memos) {
         let dt = now.saturating_duration_since(self.last).as_secs_f32().min(0.05);
         self.last = now;
-        let scale = self.scale;
 
         let mut moving = false;
         let mut gone = Vec::new();
@@ -739,11 +787,12 @@ impl Postits {
             } else if redraw {
                 self.render(index);
             } else if moved {
-                window::move_to(note.hwnd, note.window_at(scale));
+                window::move_to(note.hwnd, note.window_at());
             }
         }
-        // 미끄러져 간 자리를 메모에 적는다.
+        // 미끄러져 간 자리를 메모에 적는다. 배율이 다른 모니터로 갔으면 그 배율로 다시 그린다.
         for index in settled {
+            self.settle(index);
             self.keep(index, memos);
         }
         // 붙는 움직임이 끝난 포스트잇의 미뤄 둔 일.
@@ -776,16 +825,17 @@ impl Postits {
     fn open_editor(&mut self, index: usize) {
         let note = &self.notes[index];
         let text = draw::text_rect(note.paper);
+        let px = |units: f32| (units * note.scale).round() as i32;
         let rect = (
-            note.at.0.round() as i32 + self.px(text.0),
-            note.at.1.round() as i32 + self.px(text.1),
-            self.px(text.2 - text.0),
-            self.px(text.3 - text.1),
+            note.at.0.round() as i32 + px(text.0),
+            note.at.1.round() as i32 + px(text.1),
+            px(text.2 - text.0),
+            px(text.3 - text.1),
         );
         let byte = |value: f32| (value * 255.0 + 0.5) as u32;
         let paper = byte(note.color.2) << 16 | byte(note.color.1) << 8 | byte(note.color.0);
         let ink = if draw::is_dark(note.color) { 0x00F9_FDFF } else { 0x003D_3A4A };
-        let font = text::clear_font(text::FACE, self.px(15.0), false);
+        let font = text::clear_font(text::FACE, px(15.0), false);
         self.editor = Some((note.hwnd, Editor::open(note.hwnd, rect, &note.text, (paper, ink), font, note.top)));
     }
 
@@ -811,7 +861,7 @@ impl Postits {
         match event {
             Event::Press { hwnd, x, y } => {
                 let Some(index) = self.find(hwnd) else { return };
-                let (u, v) = local(x, y, self.scale);
+                let (u, v) = local(x, y, self.notes[index].scale);
                 let hit = draw::hit(&self.look(&self.notes[index]), u, v);
                 let phase = self.notes[index].phase;
                 let cursor = win::cursor_position();
@@ -844,11 +894,11 @@ impl Postits {
             Event::Move { hwnd, x, y } => {
                 let Some(index) = self.find(hwnd) else { return };
                 let cursor = win::cursor_position();
-                let scale = self.scale;
+                let scale = self.notes[index].scale;
                 if let Some(offset) = self.notes[index].drag {
                     let note = &mut self.notes[index];
                     note.at = (cursor.0 as f32 - offset.0, cursor.1 as f32 - offset.1);
-                    window::move_to(note.hwnd, note.window_at(scale));
+                    window::move_to(note.hwnd, note.window_at());
                 } else if let Some((start, from)) = self.notes[index].resize {
                     // 커서가 움직인 만큼을 종이의 방향으로 돌려, 그만큼 늘이거나 줄인다.
                     let (dx, dy) = ((cursor.0 - from.0) as f32 / scale, (cursor.1 - from.1) as f32 / scale);
@@ -879,6 +929,8 @@ impl Postits {
                     let touched = note.drag.is_some() || note.resize.is_some();
                     (note.drag, note.resize, note.stale) = (None, None, true);
                     if touched {
+                        // 배율이 다른 모니터에 놓았으면 그 배율로 다시 그린다.
+                        self.settle(index);
                         // 옮긴 자리와 바꾼 크기를 메모에 적는다.
                         self.keep(index, memos);
                     }
@@ -897,7 +949,7 @@ impl Postits {
             }
             Event::Double { hwnd, x, y } => {
                 let Some(index) = self.find(hwnd) else { return };
-                let (u, v) = local(x, y, self.scale);
+                let (u, v) = local(x, y, self.notes[index].scale);
                 let hit = draw::hit(&self.look(&self.notes[index]), u, v);
                 if hit == Some(Hit::Paper) && self.notes[index].phase == Phase::Idle && self.editor.is_none() {
                     self.close_panel();
@@ -1030,7 +1082,7 @@ impl Postits {
     /// 더 둘 수 없으면 `None`이다.
     pub fn create(&mut self, memos: &mut Memos, near: (i32, i32), write: bool) -> Option<u64> {
         let id = memos.add(self.wall)?;
-        let scale = self.scale;
+        let scale = self.scale_at((near.0 as f32, near.1 as f32));
         // 화면 밖으로 나가지 않게 한다. 위로는 단추가, 아래로는 답하는 단추가 나올 자리를 남긴다.
         let work = window::work_area(near, true).unwrap_or((0, 0, 1920, 1040));
         let paper = draw::PAPER;
@@ -1075,10 +1127,9 @@ impl Postits {
 
     /// 모니터 구성이 바뀌었다. 화면 밖에 남은 포스트잇을 가장 가까운 화면 안으로 데려온다.
     pub fn rescue(&mut self) {
-        let scale = self.scale;
         for note in &mut self.notes {
-            let middle =
-                ((note.at.0 + note.paper.0 / 2.0 * scale) as i32, (note.at.1 + note.paper.1 / 2.0 * scale) as i32);
+            let scale = note.scale;
+            let middle = (note.middle().0 as i32, note.middle().1 as i32);
             if window::work_area(middle, false).is_some() {
                 continue;
             }
@@ -1116,15 +1167,18 @@ impl Postits {
             return;
         }
         let size = Panel::size(kind);
-        let (wide, tall) = (self.px(size.0), self.px(size.1));
         let note = &self.notes[index];
+        // 판은 포스트잇과 같은 배율로 그린다.
+        let scale = note.scale;
+        self.panel_scale = scale;
+        let (wide, tall) = ((size.0 * scale).round() as i32, (size.1 * scale).round() as i32);
         // 오른쪽에 띄우고, 자리가 없으면 왼쪽에 띄운다.
         let work = window::work_area((note.at.0 as i32, note.at.1 as i32), true).unwrap_or((0, 0, 1920, 1040));
-        let mut x = (note.at.0 + (note.paper.0 + 6.0) * self.scale) as i32;
+        let mut x = (note.at.0 + (note.paper.0 + 6.0) * scale) as i32;
         if x + wide > work.2 {
-            x = (note.at.0 - 6.0 * self.scale) as i32 - wide;
+            x = (note.at.0 - 6.0 * scale) as i32 - wide;
         }
-        let y = ((note.at.1 - 24.0 * self.scale) as i32).clamp(work.1, (work.3 - tall).max(work.1));
+        let y = ((note.at.1 - 24.0 * scale) as i32).clamp(work.1, (work.3 - tall).max(work.1));
         self.panel_at = (x, y);
         self.draft = Draft::from(note.alarm, (self.wall.day(), self.wall.minute_of_day()));
         self.hsv = draw::to_hsv(note.color);
@@ -1151,7 +1205,8 @@ impl Postits {
         let note = self.panel.as_ref().and_then(|panel| self.find(panel.note))?;
         let (panel, tools) = (self.panel.as_mut()?, self.tools.as_mut()?);
         let size = Panel::size(panel.kind);
-        let (wide, tall) = ((size.0 * self.scale).round() as i32, (size.1 * self.scale).round() as i32);
+        let scale = self.panel_scale;
+        let (wide, tall) = ((size.0 * scale).round() as i32, (size.1 * scale).round() as i32);
         tools.canvas.fit(wide, tall);
         let draft = self.draft;
         let model = Model {
@@ -1166,8 +1221,7 @@ impl Postits {
             past: draft.mode == 1 && draft.alarm().is_past(self.wall),
         };
         let stride = tools.canvas.width as usize;
-        let mut surface =
-            Surface { pixels: tools.canvas.pixels(), stride, width: wide, height: tall, scale: self.scale };
+        let mut surface = Surface { pixels: tools.canvas.pixels(), stride, width: wide, height: tall, scale };
         panel.paint(&mut surface, &model);
         Some((wide, tall))
     }
@@ -1182,7 +1236,7 @@ impl Postits {
     /// 판에서 일어난 일이면 처리하고 `true`를 돌려준다.
     fn panel_event(&mut self, event: Event, memos: &mut Memos) -> bool {
         let Some(panel) = &mut self.panel else { return false };
-        let scale = self.scale;
+        let scale = self.panel_scale;
         match event {
             Event::Press { hwnd, x, y } if hwnd == panel.hwnd => match panel.hit(x as f32 / scale, y as f32 / scale) {
                 Some(Action::Slide(which)) => {
@@ -1238,7 +1292,7 @@ impl Postits {
     fn slide(&mut self, x: i32) {
         let Some(panel) = &self.panel else { return };
         let (Some(which), Some(index)) = (panel.sliding, self.find(panel.note)) else { return };
-        let value = panel.slider_value(which, x as f32 / self.scale);
+        let value = panel.slider_value(which, x as f32 / self.panel_scale);
         match which {
             0 => self.hsv.0 = value,
             1 => self.hsv.1 = value,
@@ -1405,12 +1459,11 @@ impl Postits {
     /// 확인용: 지금의 포스트잇들과 판을 화면에 놓인 자리대로 한 장의 그림(BMP)으로 저장한다.
     fn snap(&mut self, path: &Path) {
         // 창마다 자리와 크기.
-        let scale = self.scale;
         let mut windows: Vec<((i32, i32), (i32, i32))> =
-            self.notes.iter().map(|note| (note.window_at(scale), note.canvas_px(scale))).collect();
+            self.notes.iter().map(|note| (note.window_at(), note.canvas_px())).collect();
         if let Some(panel) = &self.panel {
-            let size = Panel::size(panel.kind);
-            windows.push((self.panel_at, (self.px(size.0), self.px(size.1))));
+            let (size, scale) = (Panel::size(panel.kind), self.panel_scale);
+            windows.push((self.panel_at, ((size.0 * scale).round() as i32, (size.1 * scale).round() as i32)));
         }
         let left = windows.iter().map(|w| w.0.0).min().unwrap_or(0);
         let top = windows.iter().map(|w| w.0.1).min().unwrap_or(0);
@@ -1458,11 +1511,12 @@ impl Postits {
                 };
                 let sheet = note.sheet();
                 format!(
-                    "포스트잇 {}: {phase}, 자리 {:?}, 크기 {}x{}, 색 #{:06X}, 기울기 {:.1}도, 항상 위 {}, 알림 {}",
+                    "포스트잇 {}: {phase}, 자리 {:?}, 크기 {}x{}(배율 {:.0}%), 색 #{:06X}, 기울기 {:.1}도, 항상 위 {}, 알림 {}",
                     note.id,
                     sheet.at.unwrap_or_default(),
                     sheet.size.0,
                     sheet.size.1,
+                    note.scale * 100.0,
                     sheet.color,
                     sheet.tilt as f32 / 10.0,
                     if note.top { "켬" } else { "끔" },

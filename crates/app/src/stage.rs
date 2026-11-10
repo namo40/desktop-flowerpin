@@ -83,6 +83,17 @@ impl Stage {
         &self.monitors
     }
 
+    /// 몇 번째 모니터의 DPI를 정해 준 값으로 친다. 화면 배율이 서로 다른 모니터가 없어도 그런 경우를
+    /// 확인해 보려고 둔다.
+    pub fn pretend_dpi(mut self, pretend: &[(usize, u32)]) -> Stage {
+        for &(index, dpi) in pretend {
+            if let Some(monitor) = self.monitors.get_mut(index) {
+                monitor.dpi = dpi;
+            }
+        }
+        self
+    }
+
     /// 주 모니터. 표시가 없으면 첫 모니터다.
     pub fn primary(&self) -> &Monitor {
         self.monitors.iter().find(|monitor| monitor.primary).unwrap_or(&self.monitors[0])

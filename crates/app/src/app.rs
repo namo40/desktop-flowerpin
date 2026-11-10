@@ -277,7 +277,7 @@ impl App {
     pub fn new(options: dev::Options) -> Result<App, PackError> {
         let mut frames = Frames::load()?;
         let motions = Motions::from_pack(frames.pack())?;
-        let stage = Stage::read();
+        let stage = Stage::read().pretend_dpi(&options.monitor_dpi);
         let started = Instant::now();
 
         // 정한 시간만 돌고 끝나는 확인용 실행은 폴더를 따로 주지 않으면 파일을 읽지도 쓰지도 않는다.
@@ -325,7 +325,7 @@ impl App {
         let seed = options
             .seed
             .unwrap_or_else(|| SystemTime::now().duration_since(UNIX_EPOCH).map_or(1, |d| d.as_nanos() as u64));
-        // 포스트잇의 크기는 주 모니터의 화면 배율을 따른다.
+        // 포스트잇은 놓인 모니터의 화면 배율을 따른다. 모니터를 알 수 없을 때는 주 모니터의 것을 쓴다.
         let postit_dpi = options.dpi.unwrap_or(stage.primary().dpi);
         let mut app = App {
             frames,
@@ -405,6 +405,7 @@ impl App {
             app.characters.push(character);
         }
         app.apply_habits();
+        app.tell_postits_monitors();
         app.describe();
         app.sync_autostart(started);
         app.greet();
@@ -427,6 +428,14 @@ impl App {
             });
         }
         Ok(app)
+    }
+
+    /// 포스트잇에게 모니터마다의 범위와 화면 배율을 알려 준다. 포스트잇은 자기가 놓인 모니터의 배율로 그린다.
+    fn tell_postits_monitors(&mut self) {
+        let forced = self.dev.options.dpi;
+        let monitors: Vec<_> =
+            self.stage.monitors().iter().map(|monitor| (monitor.area, forced.unwrap_or(monitor.dpi))).collect();
+        self.postits.set_monitors(&monitors);
     }
 
     fn next_seed(&mut self) -> u64 {
@@ -1207,7 +1216,8 @@ impl App {
 
         // 3. 모니터가 바뀌었으면 무대를 다시 읽는다. 화면 밖에 남은 꽃핀은 주 모니터에 다시 나타난다.
         if stage_changed {
-            self.stage = Stage::read();
+            self.stage = Stage::read().pretend_dpi(&self.dev.options.monitor_dpi);
+            self.tell_postits_monitors();
             // 화면 밖에 남은 포스트잇도 가까운 화면 안으로 데려온다.
             self.postits.rescue();
             for i in 0..self.characters.len() {
