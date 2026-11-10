@@ -719,6 +719,11 @@ impl App {
                     self.apply_settings(now);
                 }
             }
+            DialogEvent::Tidy => {
+                if let Some(window) = &self.window {
+                    window.tidy(&self.settings);
+                }
+            }
             DialogEvent::Reset => return self.window.as_ref().map(SettingsWindow::tab),
             DialogEvent::Close => self.close_settings(now),
             DialogEvent::Tab(tab) => {
@@ -792,6 +797,7 @@ impl App {
                         }
                         dev::Dialog::Pick(id, index) => window.pick(id, index),
                         dev::Dialog::Toggle(id) => window.toggle(id),
+                        dev::Dialog::Type(id, value) => window.type_text(id, &value.to_string()),
                         dev::Dialog::Press(id) => window.press(id),
                         dev::Dialog::Reset => flow = Flow::ConfirmReset(window.tab()),
                         dev::Dialog::Snap => {

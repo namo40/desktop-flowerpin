@@ -140,6 +140,8 @@ pub enum Dialog {
     Pick(i32, usize),
     /// `settings toggle 컨트롤`: 체크 상자를 누른다.
     Toggle(i32),
+    /// `settings type 컨트롤 수`: 수를 적는 칸에 그 수를 적고 다른 곳으로 간다.
+    Type(i32, i64),
     /// `settings press 컨트롤`: 버튼을 누른다.
     Press(i32),
     /// `settings reset`: "기본값으로"를 누르고, 묻는 창에는 "예"라고 답한 것으로 친다.
@@ -191,6 +193,7 @@ pub fn parse_script(text: &str) -> Result<Vec<Step>, String> {
                 (Some("toggle"), 4) => Dialog::Toggle(number(3)? as i32),
                 (Some("press"), 4) => Dialog::Press(number(3)? as i32),
                 (Some("pick"), 5) => Dialog::Pick(number(3)? as i32, number(4)? as usize),
+                (Some("type"), 5) => Dialog::Type(number(3)? as i32, number(4)? as i64),
                 _ => return Err(bad()),
             }),
             _ => return Err(bad()),

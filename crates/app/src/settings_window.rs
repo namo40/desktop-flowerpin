@@ -6,6 +6,9 @@
 //! 창에서 일어난 일(값을 바꿈, 버튼을 누름)은 대화 상자 함수에서 처리하지 않고 [`DialogEvent`]로 적어
 //! 두기만 한다. 메인 루프가 [`take_events`]로 꺼내 처리한다. 값은 [`SettingsWindow::read`]로 한꺼번에
 //! 읽으므로, 어느 컨트롤이 바뀌었는지는 가리지 않는다.
+//!
+//! 수를 적는 칸은 적는 동안에는 글을 건드리지 않는다. 비어 있거나 범위를 벗어난 채로 칸을 떠나면
+//! 그때 저장된 값으로 고쳐 적는다([`SettingsWindow::tidy`]).
 
 use std::cell::RefCell;
 use std::ffi::c_void;
@@ -30,11 +33,11 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     BM_GETCHECK, BM_SETCHECK, BN_CLICKED, CB_ADDSTRING, CB_GETCURSEL, CB_RESETCONTENT, CB_SETCURSEL, CBN_SELCHANGE,
-    CreateDialogParamW, DestroyIcon, DestroyWindow, GW_CHILD, GW_HWNDNEXT, GetClassNameW, GetClientRect, GetDlgCtrlID,
-    GetDlgItem, GetNextDlgTabItem, GetWindow, GetWindowRect, GetWindowTextW, HICON, IsDialogMessageW, MSG,
-    MapDialogRect, STM_SETICON, SW_HIDE, SW_SHOW, SW_SHOWNA, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER,
-    SendDlgItemMessageW, SendMessageW, SetDlgItemTextW, SetForegroundWindow, SetWindowPos, ShowWindow, WM_CLOSE,
-    WM_COMMAND, WM_KEYDOWN, WM_NOTIFY,
+    CreateDialogParamW, DestroyIcon, DestroyWindow, EN_CHANGE, EN_KILLFOCUS, GW_CHILD, GW_HWNDNEXT, GetClassNameW,
+    GetClientRect, GetDlgCtrlID, GetDlgItem, GetNextDlgTabItem, GetWindow, GetWindowRect, GetWindowTextW, HICON,
+    IsDialogMessageW, MSG, MapDialogRect, STM_SETICON, SW_HIDE, SW_SHOW, SW_SHOWNA, SWP_NOACTIVATE, SWP_NOSIZE,
+    SWP_NOZORDER, SendDlgItemMessageW, SendMessageW, SetDlgItemTextW, SetForegroundWindow, SetWindowPos, ShowWindow,
+    WM_CLOSE, WM_COMMAND, WM_KEYDOWN, WM_NOTIFY,
 };
 
 use crate::links::LINKS;
@@ -62,12 +65,14 @@ pub const TAB_NAMES: [&str; 5] = ["일반", "꽃핀", "방송", "방해하지 �
 const INFO_TAB: usize = 4;
 /// 탭 쪽에 탭 안쪽과 같은 바탕을 입히라는 값(`ETDT_ENABLETAB`).
 const TAB_TEXTURE: u32 = 6;
+/// 글을 적는 칸에 적을 수 있는 글자 수를 정하는 메시지(`EM_SETLIMITTEXT`).
+const SET_TEXT_LIMIT: u32 = 0x00C5;
 
 /// 설정 항목과 컨트롤의 짝.
 struct Control {
     key: Key,
     id: i32,
-    /// 콤보 상자 앞의 이름. 흐리게 할 때 함께 흐리게 한다.
+    /// 콤보 상자나 수를 적는 칸 앞의 이름. 흐리게 할 때 함께 흐리게 한다.
     label: Option<i32>,
     /// 이 항목이 켜져 있어야 고를 수 있다. 꺼지면 숨기지 않고 흐리게 한다(배치가 밀리지 않게).
     needs: Option<Key>,
@@ -81,12 +86,38 @@ const fn combo(key: Key, id: i32, label: i32, needs: Option<Key>) -> Control {
     Control { key, id, label: Some(label), needs }
 }
 
+/// 수를 직접 적는 칸.
+const fn field(key: Key, id: i32, label: i32) -> Control {
+    Control { key, id, label: Some(label), needs: None }
+}
+
+/// 컨트롤의 종류. 설정 항목의 생김새로 정해진다.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    Check,
+    Combo,
+    Field,
+}
+
+impl Control {
+    fn kind(&self) -> Kind {
+        let spec = settings::spec(self.key);
+        if spec.is_flag() {
+            Kind::Check
+        } else if spec.range.is_some() {
+            Kind::Field
+        } else {
+            Kind::Combo
+        }
+    }
+}
+
 const CONTROLS: [Control; settings::COUNT] = [
     check(Key::StartWithWindows, 1101),
     combo(Key::Size, 1103, 1112, None),
     check(Key::AlwaysOnTop, 1104),
     combo(Key::IdleActions, 1203, 1212, None),
-    combo(Key::ExtraStay, 1205, 1214, None),
+    field(Key::Stay, 1205, 1214),
     combo(Key::MaxCharacters, 1206, 1215, None),
     check(Key::LiveCheck, 1301),
     combo(Key::LiveCheckInterval, 1302, 1311, Some(Key::LiveCheck)),
@@ -99,8 +130,10 @@ const CONTROLS: [Control; settings::COUNT] = [
 /// 설정 창에서 일어난 일.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DialogEvent {
-    /// 체크 상자나 콤보 상자의 값이 바뀌었다.
+    /// 체크 상자, 콤보 상자, 수를 적는 칸의 값이 바뀌었다.
     Changed,
+    /// 수를 적는 칸을 떠났다. 적다 만 글을 저장된 값으로 고쳐 적을 때다.
+    Tidy,
     /// "기본값으로"를 눌렀다.
     Reset,
     /// 닫기 버튼, 제목 줄의 닫기, Esc.
@@ -215,11 +248,19 @@ impl SettingsWindow {
         let mut window = SettingsWindow { hwnd, tabs, pages, current: 0, icon };
         for control in &CONTROLS {
             let spec = settings::spec(control.key);
-            if !spec.is_flag() {
-                let combo = window.item(control.id);
-                unsafe { SendMessageW(combo, CB_RESETCONTENT, 0, 0) };
-                for pick in spec.picks {
-                    unsafe { SendMessageW(combo, CB_ADDSTRING, 0, wide(pick.label).as_ptr() as LPARAM) };
+            let item = window.item(control.id);
+            match control.kind() {
+                Kind::Check => {}
+                Kind::Combo => {
+                    unsafe { SendMessageW(item, CB_RESETCONTENT, 0, 0) };
+                    for pick in spec.picks {
+                        unsafe { SendMessageW(item, CB_ADDSTRING, 0, wide(pick.label).as_ptr() as LPARAM) };
+                    }
+                }
+                Kind::Field => {
+                    // 가장 큰 수의 자릿수까지만 적게 한다.
+                    let digits = spec.range.map_or(1, |(_, most)| most.to_string().len());
+                    unsafe { SendMessageW(item, SET_TEXT_LIMIT, digits, 0) };
                 }
             }
         }
@@ -275,6 +316,12 @@ impl SettingsWindow {
         unsafe { SetDlgItemTextW(self.owner_of(id), id, wide(text).as_ptr()) };
     }
 
+    fn text(&self, id: i32) -> String {
+        let mut buffer = [0u16; 32];
+        let length = unsafe { GetWindowTextW(self.item(id), buffer.as_mut_ptr(), buffer.len() as i32) };
+        String::from_utf16_lossy(&buffer[..length.max(0) as usize])
+    }
+
     /// 탭을 바꾼다.
     pub fn show_tab(&mut self, tab: usize) {
         self.current = tab;
@@ -294,17 +341,45 @@ impl SettingsWindow {
     pub fn fill(&self, settings: &Settings) {
         for control in &CONTROLS {
             let picked = settings.get(control.key);
-            let message = if settings::spec(control.key).is_flag() { BM_SETCHECK } else { CB_SETCURSEL };
-            unsafe { SendMessageW(self.item(control.id), message, picked, 0) };
+            match control.kind() {
+                Kind::Check => unsafe { SendMessageW(self.item(control.id), BM_SETCHECK, picked, 0) },
+                Kind::Combo => unsafe { SendMessageW(self.item(control.id), CB_SETCURSEL, picked, 0) },
+                Kind::Field => {
+                    self.set_text(control.id, &settings.number(control.key).to_string());
+                    0
+                }
+            };
         }
         self.update_dependents(settings);
+    }
+
+    /// 수를 적는 칸의 글이 저장된 값과 다르면 저장된 값으로 고쳐 적는다. 칸을 떠났을 때 부른다.
+    ///
+    /// 비워 두었거나 범위를 벗어난 수를 적은 채로 두면, 보이는 것과 실제 값이 달라지기 때문이다.
+    pub fn tidy(&self, settings: &Settings) {
+        for control in CONTROLS.iter().filter(|control| control.kind() == Kind::Field) {
+            let value = settings.number(control.key).to_string();
+            if self.text(control.id) != value {
+                self.set_text(control.id, &value);
+            }
+        }
     }
 
     /// 컨트롤의 값을 설정으로 읽는다. 달라진 것이 있으면 `true`를 돌려준다.
     pub fn read(&self, settings: &mut Settings) -> bool {
         let before = settings.clone();
         for control in &CONTROLS {
-            let message = if settings::spec(control.key).is_flag() { BM_GETCHECK } else { CB_GETCURSEL };
+            let message = match control.kind() {
+                Kind::Check => BM_GETCHECK,
+                Kind::Combo => CB_GETCURSEL,
+                Kind::Field => {
+                    // 비어 있거나 수가 아니면 바꾸지 않는다. 적는 중일 수 있다.
+                    if let Ok(value) = self.text(control.id).trim().parse::<i64>() {
+                        settings.set_number(control.key, value);
+                    }
+                    continue;
+                }
+            };
             let picked = unsafe { SendMessageW(self.item(control.id), message, 0, 0) };
             // 콤보 상자에서 아무것도 고르지 않았으면 음수가 온다.
             if let Ok(picked) = usize::try_from(picked) {
@@ -375,6 +450,15 @@ impl SettingsWindow {
         let checked = unsafe { SendMessageW(control, BM_GETCHECK, 0, 0) } == 1;
         unsafe { SendMessageW(control, BM_SETCHECK, (!checked) as usize, 0) };
         self.press(id);
+    }
+
+    /// 사람이 칸에 글을 적고 다른 곳으로 간 것처럼 한다. 만드는 동안 확인용이다.
+    pub fn type_text(&self, id: i32, text: &str) {
+        let (owner, control) = (self.owner_of(id), self.item(id));
+        self.set_text(id, text);
+        for code in [EN_CHANGE, EN_KILLFOCUS] {
+            unsafe { SendMessageW(owner, WM_COMMAND, (code as usize) << 16 | id as usize, control as LPARAM) };
+        }
     }
 
     /// 사람이 버튼을 누른 것처럼 한다. 만드는 동안 확인용이다.
@@ -511,8 +595,9 @@ unsafe extern "system" fn page_proc(_page: HWND, message: u32, wparam: WPARAM, _
             (BN_CLICKED, id) if links.contains(&id) => push(DialogEvent::Link((id - ID_FIRST_LINK) as usize)),
             (BN_CLICKED, ID_OPEN_FOLDER) => push(DialogEvent::OpenFolder),
             (BN_CLICKED, ID_OPEN_PROJECT) => push(DialogEvent::OpenProject),
-            // 체크 상자를 눌렀거나 콤보 상자에서 골랐다.
-            (BN_CLICKED, _) | (CBN_SELCHANGE, _) => push(DialogEvent::Changed),
+            // 체크 상자를 눌렀거나, 콤보 상자에서 골랐거나, 칸에 적은 글이 바뀌었다.
+            (BN_CLICKED, _) | (CBN_SELCHANGE, _) | (EN_CHANGE, _) => push(DialogEvent::Changed),
+            (EN_KILLFOCUS, _) => push(DialogEvent::Tidy),
             _ => {}
         }
     }
@@ -561,7 +646,11 @@ mod tests {
             // 번호의 앞 두 자리가 탭이다.
             assert_eq!((control.id / 100 - 11) as usize, spec.tab, "{}", spec.name);
             let body = dialog_body(FIRST_PAGE + spec.tab as u16);
-            let kind = if spec.is_flag() { "AUTOCHECKBOX" } else { "COMBOBOX" };
+            let kind = match control.kind() {
+                Kind::Check => "AUTOCHECKBOX",
+                Kind::Combo => "COMBOBOX",
+                Kind::Field => "EDITTEXT",
+            };
             let line = body.lines().find(|line| line.contains(&format!(" {},", control.id)));
             assert!(line.is_some_and(|line| line.trim_start().starts_with(kind)), "{} ({})", spec.name, control.id);
             assert_eq!(control.label.is_some(), !spec.is_flag(), "{}", spec.name);
@@ -594,12 +683,15 @@ mod tests {
     #[test]
     fn every_page_uses_the_same_grid() {
         // 콤보 상자는 모두 B열(x 118, 너비 107), 체크 상자는 x 7에서 B열 끝까지(너비 218)다.
+        // 수를 적는 칸은 B열의 왼쪽 끝에서 시작한다.
         for tab in 0..TAB_NAMES.len() {
             for line in dialog_body(FIRST_PAGE + tab as u16).lines().map(str::trim) {
                 let numbers: Vec<i32> =
                     line.rsplit('"').next().unwrap_or("").split(',').filter_map(|n| n.trim().parse().ok()).collect();
                 if line.starts_with("COMBOBOX") {
                     assert_eq!((numbers[0], numbers[2]), (118, 107), "{line}");
+                } else if line.starts_with("EDITTEXT") {
+                    assert_eq!(numbers[0], 118, "{line}");
                 } else if line.starts_with("AUTOCHECKBOX") {
                     assert_eq!((numbers[1], numbers[3], numbers[4]), (7, 218, 10), "{line}");
                 } else if line.starts_with("PUSHBUTTON") {

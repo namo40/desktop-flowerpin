@@ -6,6 +6,7 @@
 //
 // windows.h를 쓰지 않으려고 스타일 값은 숫자로 적는다.
 //   0x00210003 = CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP      (콤보 상자)
+//   0x2080     = ES_NUMBER | ES_AUTOHSCROLL                       (수를 적는 칸. 테두리와 Tab 멈춤은 기본으로 붙는다)
 //   0x50000010 = WS_CHILD | WS_VISIBLE | SS_ETCHEDHORZ            (섹션 가로선)
 //   0x4080     = SS_ENDELLIPSIS | SS_NOPREFIX                     (길면 끝을 줄이는 글)
 //   0x80       = SS_NOPREFIX
@@ -53,10 +54,11 @@ BEGIN
     CONTROL "", -1, "Static", 0x50000010, 32, 11, 194, 1
     LTEXT "가끔 하는 행동(&A):", 1212, 7, 21, 107, 8
     COMBOBOX 1203, 118, 19, 107, 120, 0x00210003
-    LTEXT "여러 명", -1, 7, 44, 30, 8
-    CONTROL "", -1, "Static", 0x50000010, 41, 48, 185, 1
-    LTEXT "더 부른 꽃핀 머무르기(&K):", 1214, 7, 58, 107, 8
-    COMBOBOX 1205, 118, 56, 107, 120, 0x00210003
+    LTEXT "꽃핀 더 부르기", -1, 7, 44, 46, 8
+    CONTROL "", -1, "Static", 0x50000010, 57, 48, 169, 1
+    LTEXT "머무르기(&K):", 1214, 7, 58, 107, 8
+    EDITTEXT 1205, 118, 56, 40, 12, 0x2080
+    LTEXT "초 (0이면 계속)", 1216, 162, 58, 63, 8
     LTEXT "한 번에 최대(&M):", 1215, 7, 76, 107, 8
     COMBOBOX 1206, 118, 74, 107, 160, 0x00210003
 END
