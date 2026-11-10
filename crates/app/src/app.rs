@@ -38,6 +38,8 @@ const CLICK_MOVE: f64 = 6.0;
 const CLICK_HOLD: Duration = Duration::from_millis(250);
 /// 자리를 비웠는지 확인하는 간격.
 const AWAY_CHECK: Duration = Duration::from_secs(1);
+/// 마우스와 키보드를 이만큼 쓰지 않으면 자리를 비운 것으로 친다. 그러면 꽃핀도 잠든다.
+const AWAY_AFTER: Duration = Duration::from_secs(5 * 60);
 /// 머리 위에서 움직인 것을 이어서 문지른 것으로 치는 한계. 이보다 오래 끊겼거나 한 번에 이보다 멀리(px, 그림
 /// 1배 기준) 뛰었으면 커서가 꽃핀을 벗어났다 돌아온 것이라 세지 않는다.
 const RUB_GAP: Duration = Duration::from_millis(250);
@@ -310,16 +312,14 @@ impl App {
         let look = self.look;
         self.characters.iter_mut().for_each(|character| character.set_look(look, now));
         self.apply_habits();
-        // 잠드는 시간이 바뀌었을 수 있으므로 자리를 비웠는지 바로 다시 본다.
-        self.next_away_check = now;
         self.store.settings_changed(now);
     }
 
-    /// 마우스와 키보드를 이만큼 쓰지 않으면 자리를 비운 것으로 친다. 껐으면 `None`이다.
+    /// 마우스와 키보드를 이만큼 쓰지 않으면 자리를 비운 것으로 친다. 확인용 인자로 껐으면 `None`이다.
     fn away_after(&self) -> Option<Duration> {
         match self.dev.options.away_after {
             Some(forced) => (!forced.is_zero()).then_some(forced),
-            None => self.settings.away_after(),
+            None => Some(AWAY_AFTER),
         }
     }
 

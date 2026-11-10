@@ -3,10 +3,8 @@
 //! 모든 항목은 "몇 가지 가운데 하나를 고르는 것"으로 다룬다. 켜고 끄는 항목도 [끔, 켬] 가운데 하나를 고르는
 //! 것이다. 그래서 설정 창, 파일 읽기와 쓰기, 기본값으로 되돌리기가 항목 표([`SPECS`]) 하나만 보고 돌아간다.
 //!
-//! 파일(`settings.json`)에는 고른 순번이 아니라 뜻이 있는 값을 적는다(크기는 100, 잠드는 시간은 5처럼).
+//! 파일(`settings.json`)에는 고른 순번이 아니라 뜻이 있는 값을 적는다(크기는 100, 확인 간격은 3처럼).
 //! 고를 수 있는 것을 나중에 더하거나 순서를 바꿔도 예전 파일이 그대로 읽힌다.
-
-use std::time::Duration;
 
 use serde_json::Value;
 
@@ -19,11 +17,9 @@ pub const VERSION: i64 = 1;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Key {
     StartWithWindows,
-    StartupCharacters,
     Size,
     AlwaysOnTop,
     IdleActions,
-    SleepWhenAway,
     ExtraStay,
     MaxCharacters,
     LiveCheck,
@@ -35,7 +31,7 @@ pub enum Key {
 }
 
 /// 항목 수.
-pub const COUNT: usize = 14;
+pub const COUNT: usize = 12;
 
 /// 파일에 적는 값.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -93,13 +89,6 @@ pub const SPECS: [Spec; COUNT] = [
     // 일반
     flag(Key::StartWithWindows, "start_with_windows", 0, false),
     Spec {
-        key: Key::StartupCharacters,
-        name: "startup_characters",
-        tab: 0,
-        picks: &[word("1명", "one"), word("지난번 인원", "last")],
-        default: 0,
-    },
-    Spec {
         key: Key::Size,
         name: "size",
         tab: 0,
@@ -114,13 +103,6 @@ pub const SPECS: [Spec; COUNT] = [
         tab: 1,
         picks: &[number("적게", 50), number("보통", 100), number("자주", 200)],
         default: 1,
-    },
-    Spec {
-        key: Key::SleepWhenAway,
-        name: "sleep_when_away_min",
-        tab: 1,
-        picks: &[number("끄기", 0), number("3분", 3), number("5분", 5), number("10분", 10), number("15분", 15)],
-        default: 2,
     },
     Spec {
         key: Key::ExtraStay,
@@ -225,12 +207,6 @@ impl Settings {
         Habits { whim_rate: self.number(Key::IdleActions) as f64 / 100.0, ..Habits::default() }
     }
 
-    /// 마우스와 키보드를 이만큼 쓰지 않으면 자리를 비운 것으로 친다. 껐으면 `None`이다.
-    pub fn away_after(&self) -> Option<Duration> {
-        let minutes = self.number(Key::SleepWhenAway) as u64;
-        (minutes > 0).then(|| Duration::from_secs(minutes * 60))
-    }
-
     /// 파일에 적을 글을 만든다.
     pub fn to_json(&self) -> String {
         let mut text = format!("{{\n  \"version\": {VERSION}");
@@ -298,7 +274,6 @@ mod tests {
         assert!(settings.is_on(Key::AlwaysOnTop));
         assert_eq!(settings.size_percent(), 100);
         assert_eq!(settings.habits(), Habits::default());
-        assert_eq!(settings.away_after(), Some(Duration::from_secs(300)));
         assert_eq!(settings.number(Key::MaxCharacters), 9);
         assert_eq!(settings.number(Key::ExtraStay), 0);
         assert_eq!(spec(Key::LiveStartNotice).picks[settings.get(Key::LiveStartNotice)].label, "말풍선 + Windows 알림");
@@ -311,7 +286,6 @@ mod tests {
         settings.set(Key::Size, 2);
         settings.set(Key::AlwaysOnTop, 0);
         settings.set(Key::IdleActions, 2);
-        settings.set(Key::SleepWhenAway, 0);
         settings.set(Key::LiveEndNotice, 2);
         let text = settings.to_json();
         assert!(
@@ -322,7 +296,6 @@ mod tests {
         assert_eq!(Settings::from_json(&text), Some(settings.clone()));
         assert_eq!(settings.size_percent(), 125);
         assert_eq!(settings.habits(), Habits { roam: true, whim_rate: 2.0 });
-        assert_eq!(settings.away_after(), None);
     }
 
     #[test]

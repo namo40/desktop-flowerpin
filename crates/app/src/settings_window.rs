@@ -83,11 +83,9 @@ const fn combo(key: Key, id: i32, label: i32, needs: Option<Key>) -> Control {
 
 const CONTROLS: [Control; settings::COUNT] = [
     check(Key::StartWithWindows, 1101),
-    combo(Key::StartupCharacters, 1102, 1111, None),
     combo(Key::Size, 1103, 1112, None),
     check(Key::AlwaysOnTop, 1104),
     combo(Key::IdleActions, 1203, 1212, None),
-    combo(Key::SleepWhenAway, 1204, 1213, None),
     combo(Key::ExtraStay, 1205, 1214, None),
     combo(Key::MaxCharacters, 1206, 1215, None),
     check(Key::LiveCheck, 1301),
