@@ -3,6 +3,7 @@
 // 콘솔 창을 띄우지 않는다.
 #![windows_subsystem = "windows"]
 
+mod character;
 mod character_window;
 mod clock;
 mod dev;
@@ -12,13 +13,11 @@ mod win;
 
 use std::time::Instant;
 
+use character::Character;
 use character_window::CharacterWindow;
 use clock::WakeTimer;
 use frames::Frames;
 use geom::Rect;
-
-/// 꽃핀의 발바닥이 놓이는 점(칸 좌표). 이 점을 바닥 위의 서 있을 자리에 맞춘다.
-const FOOT: (i32, i32) = (128, 232);
 
 /// 그림 팩 없이 빌드했을 때 띄우는 시험 그림의 한 변 길이.
 const TEST_SIZE: i32 = 200;
@@ -32,68 +31,81 @@ fn main() {
     let work = win::primary_work_area();
     let floor = (work.x + work.w / 2, work.bottom());
 
-    let mut frames = match Frames::load() {
-        Ok(frames) => frames,
+    match Frames::load() {
+        Ok(Some(mut frames)) => {
+            if let Err(error) = run(&mut frames, floor, &options, &mut report) {
+                win::fatal(&format!("{error}."));
+            }
+        }
+        Ok(None) => run_test_pattern(floor, &options, &mut report),
         Err(error) => win::fatal(&format!("{error}.")),
-    };
-    let _character = match &mut frames {
-        Some(frames) => show_first_frame(frames, floor, &mut report),
-        None => show_test_pattern(floor, &mut report),
-    };
+    }
+    report.write(&options);
+}
+
+/// 꽃핀을 띄우고, 끝내라고 할 때까지 idle2를 되풀이해 재생한다.
+fn run(
+    frames: &mut Frames,
+    floor: (i32, i32),
+    options: &dev::Options,
+    report: &mut dev::Report,
+) -> Result<(), dfp_pack::temp::PackError> {
+    let idle2 = frames.motion_frames(frames::MOTION_IDLE2);
+    let mut character = Character::new(frames, idle2, 0, floor, Instant::now())?;
+    report.add(format!("창 {}x{}", character.window().width(), character.window().height()));
 
     let timer = WakeTimer::new();
+    let mut pace = dev::Pace::default();
+    let mut screen_check = options.check_screen.then(|| dev::ScreenCheck::new(Instant::now()));
     let deadline = options.run_for.map(|d| Instant::now() + d);
     loop {
         if !win::pump_messages() {
             break;
         }
-        if deadline.is_some_and(|d| Instant::now() >= d) {
+        let now = Instant::now();
+        if deadline.is_some_and(|d| now >= d) {
             break;
         }
-        timer.sleep_until(deadline);
+        // 다음 장을 그리기 바로 전에, 앞 장이 화면에 제대로 나와 있는지 본다.
+        if let Some(check) = &mut screen_check
+            && now >= character.due()
+        {
+            check.sample(character.window(), now);
+        }
+        if character.tick(frames, now)? {
+            pace.frame_shown(now);
+        }
+        // 다음 장 시각까지 잔다. 끝낼 시각이 더 이르면 그때 깬다.
+        let wake = deadline.map_or(character.due(), |d| d.min(character.due()));
+        timer.sleep_until(Some(wake));
     }
-    report.write(&options);
-}
-
-/// 꽃핀 창을 만들고 idle2의 첫 장을 그려 띄운다.
-fn show_first_frame(frames: &mut Frames, floor: (i32, i32), report: &mut dev::Report) -> CharacterWindow {
-    // 창은 모든 장이 들어가는 크기로 한 번만 만든다. 창의 왼쪽 위는 칸 안의 `bounds` 왼쪽 위와 같다.
-    let bounds = frames.bounds();
-    let x = floor.0 - (FOOT.0 - bounds.x);
-    let y = floor.1 - (FOOT.1 - bounds.y);
-    let mut character = CharacterWindow::new(bounds.w, bounds.h, x, y);
-
-    let first = frames.motion_frames(frames::MOTION_IDLE2)[0];
-    let drawn = match frames.draw(first, character.pixels(), bounds.w, (bounds.x, bounds.y)) {
-        Ok(rect) => rect,
-        Err(error) => win::fatal(&format!("{error}.")),
-    };
-    character.present(drawn);
-
-    win::pump_messages();
-    let body = dev::receives_click(character.hwnd(), floor.0, floor.1 - 70);
-    let corner = dev::receives_click(character.hwnd(), x + 2, y + 2);
-    report.add(format!("창 {}x{} 화면 ({x}, {y}), 칸 안의 범위 {bounds:?}", character.width(), character.height()));
-    report.add(format!("idle2 첫 장 {first}번, 그린 범위 {drawn:?}"));
-    report.add(format!("클릭을 받는가: 몸 {body}, 창 모서리 {corner}"));
-    character
+    report.add(pace.summary());
+    if let Some(check) = &screen_check {
+        report.add(check.summary());
+    }
+    Ok(())
 }
 
 /// 그림 팩이 없을 때 창이 제대로 뜨는지 보려는 시험 그림(분홍 고리)을 띄운다.
-fn show_test_pattern(floor: (i32, i32), report: &mut dev::Report) -> CharacterWindow {
+fn run_test_pattern(floor: (i32, i32), options: &dev::Options, report: &mut dev::Report) {
     let (x, y) = (floor.0 - TEST_SIZE / 2, floor.1 - TEST_SIZE);
-    let mut character = CharacterWindow::new(TEST_SIZE, TEST_SIZE, x, y);
-    draw_test_pattern(character.pixels(), TEST_SIZE);
-    character.present(Rect::new(0, 0, TEST_SIZE, TEST_SIZE));
+    let mut window = CharacterWindow::new(TEST_SIZE, TEST_SIZE, x, y);
+    draw_test_pattern(window.pixels(), TEST_SIZE);
+    window.present(Rect::new(0, 0, TEST_SIZE, TEST_SIZE));
 
     // 고리 위는 클릭을 받고, 뚫린 가운데와 바깥 모서리는 뒤 창으로 넘겨야 한다.
     win::pump_messages();
-    let ring = dev::receives_click(character.hwnd(), x + TEST_SIZE / 2 + 50, y + TEST_SIZE / 2);
-    let hole = dev::receives_click(character.hwnd(), x + TEST_SIZE / 2, y + TEST_SIZE / 2);
-    let corner = dev::receives_click(character.hwnd(), x + 3, y + 3);
-    report.add(format!("시험 그림 창 {}x{} 화면 ({x}, {y})", character.width(), character.height()));
+    let ring = dev::receives_click(window.hwnd(), x + TEST_SIZE / 2 + 50, y + TEST_SIZE / 2);
+    let hole = dev::receives_click(window.hwnd(), x + TEST_SIZE / 2, y + TEST_SIZE / 2);
+    let corner = dev::receives_click(window.hwnd(), x + 3, y + 3);
+    report.add(format!("시험 그림 창 {}x{} 화면 ({x}, {y})", window.width(), window.height()));
     report.add(format!("클릭을 받는가: 고리 위 {ring}, 뚫린 가운데 {hole}, 모서리 {corner}"));
-    character
+
+    let timer = WakeTimer::new();
+    let deadline = options.run_for.map(|d| Instant::now() + d);
+    while win::pump_messages() && !deadline.is_some_and(|d| Instant::now() >= d) {
+        timer.sleep_until(deadline);
+    }
 }
 
 /// 가장자리가 부드러운 분홍 고리를 그린다.

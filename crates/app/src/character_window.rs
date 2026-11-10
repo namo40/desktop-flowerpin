@@ -107,16 +107,30 @@ impl CharacterWindow {
         self.height
     }
 
+    /// 창이 화면에서 차지하는 범위.
+    pub fn screen_rect(&self) -> Rect {
+        Rect::new(self.pos.0, self.pos.1, self.width, self.height)
+    }
+
     /// 창 버퍼. 한 줄이 `width`개이고 위에서 아래로 놓인다. 값은 미리 곱한 알파의 BGRA(0xAARRGGBB)다.
     pub fn pixels(&mut self) -> &mut [u32] {
         // 버퍼는 창과 함께 만들어져 창이 없어질 때까지 살아 있고, 크기는 width × height로 고정이다.
         unsafe { std::slice::from_raw_parts_mut(self.bits, (self.width * self.height) as usize) }
     }
 
+    /// 창 버퍼를 읽기만 할 때 쓴다.
+    pub fn shown(&self) -> &[u32] {
+        unsafe { std::slice::from_raw_parts(self.bits, (self.width * self.height) as usize) }
+    }
+
     /// 창 버퍼에서 `dirty` 범위를 화면에 넘기고, 자리가 바뀌었으면 함께 옮긴다.
     ///
     /// 화면에 넘기는 호출은 넘기는 픽셀 수보다 부를 때마다 드는 비용이 크다. 그래서 그림과 위치를
     /// 한 번에 넘기고, 바뀐 것이 없으면 부르지 않는다.
+    ///
+    /// 그림을 넘길 때는 창 크기(`psize`)를 꼭 함께 넘긴다. 크기가 그대로라고 `psize`를 비우면
+    /// 호출은 성공했다고 돌려주면서 화면의 그림은 바뀌지 않는다(Windows 11에서 확인).
+    /// 실제로 바뀌는지는 `--check-screen`으로 본다.
     pub fn present(&mut self, dirty: Rect) {
         let first = self.presented_pos.is_none();
         let moved = self.presented_pos != Some(self.pos);
@@ -140,8 +154,8 @@ impl CharacterWindow {
             cbSize: size_of::<UPDATELAYEREDWINDOWINFO>() as u32,
             hdcDst: null_mut(),
             pptDst: if moved { &pos } else { null() },
-            psize: if first { &size } else { null() },
-            // 그림이 그대로면 원본을 넘기지 않는다. 그러면 창의 모양은 두고 위치만 바뀐다.
+            // 그림이 그대로면 원본과 크기를 넘기지 않는다. 그러면 창의 모양은 두고 위치만 바뀐다.
+            psize: if draw { &size } else { null() },
             hdcSrc: if draw { self.mem_dc } else { null_mut() },
             pptSrc: if draw { &src } else { null() },
             crKey: 0,
