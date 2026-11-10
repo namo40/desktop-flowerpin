@@ -122,11 +122,16 @@ fn read(hwnd: HWND) -> Option<Pane> {
 
     let style = unsafe { GetWindowLongPtrW(hwnd, GWL_STYLE) } as u32;
     let taskbar = class == "Shell_TrayWnd" || class == "Shell_SecondaryTrayWnd";
-    // 제목 줄이 있는 창이거나, 주인 없이 혼자 떠 있는 보통 창이면 올라설 수 있다.
-    // 메뉴, 풍선 도움말, 펼친 목록 같은 것은 둘 다 아니다.
+    // 제목 줄이 있는 창이거나, 주인 없이 혼자 떠 있는 보통 창만 창으로 친다.
+    // 메뉴, 풍선 도움말, 펼친 목록처럼 잠깐 떴다 사라지는 것은 둘 다 아니다. 이런 것은 없는 것으로 친다.
+    // 가리는 것으로 치면, 꽃핀을 오른쪽 클릭해 메뉴를 띄우기만 해도 선 자리가 가려진 것이 되어 창에서 떨어진다.
     let captioned = style & WS_CAPTION == WS_CAPTION;
     let on_its_own = unsafe { GetWindow(hwnd, GW_OWNER) }.is_null() && ex_style & WS_EX_TOOLWINDOW == 0;
-    Some(Pane { id: hwnd as isize, rect, standable: !taskbar && (captioned || on_its_own) })
+    if !taskbar && !captioned && !on_its_own {
+        return None;
+    }
+    // 작업표시줄은 다른 것을 가리기만 하고, 그 위는 창 윗변이 아니라 바닥이다.
+    Some(Pane { id: hwnd as isize, rect, standable: !taskbar })
 }
 
 #[cfg(test)]

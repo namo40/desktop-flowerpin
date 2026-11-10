@@ -19,7 +19,7 @@ pub struct Pane {
     pub id: isize,
     /// 화면에서 차지하는 범위.
     pub rect: Rect,
-    /// 윗변에 올라설 수 있는 창인가. 메뉴나 풍선 도움말 같은 것은 가리기만 하고 올라설 수는 없다.
+    /// 윗변에 올라설 수 있는 창인가. 작업표시줄은 가리기만 하고 올라설 수는 없다.
     pub standable: bool,
 }
 
@@ -182,9 +182,10 @@ mod tests {
     }
 
     #[test]
-    fn a_menu_covers_but_cannot_be_stood_on() {
-        let menu = Pane { id: 9, rect: Rect::new(900, 300, 400, 400), standable: false };
-        let perches = find(&[menu, window(2, 400, 500, 1600, 600)], BODY, STAGE);
+    fn a_taskbar_covers_but_cannot_be_stood_on() {
+        // 작업표시줄을 위쪽에 둔 것처럼, 올라설 수 없는 것이 윗변 위를 가리고 있다.
+        let bar = Pane { id: 9, rect: Rect::new(900, 300, 400, 400), standable: false };
+        let perches = find(&[bar, window(2, 400, 500, 1600, 600)], BODY, STAGE);
         assert_eq!(spans(&perches), [(2, 500.0, 470.0, 820.0), (2, 500.0, 1370.0, 1920.0)]);
     }
 
