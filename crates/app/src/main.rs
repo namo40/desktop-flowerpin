@@ -9,6 +9,7 @@ mod clock;
 mod dev;
 mod frames;
 mod geom;
+mod key;
 mod scale;
 mod win;
 

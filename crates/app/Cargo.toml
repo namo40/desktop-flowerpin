@@ -10,6 +10,11 @@ publish.workspace = true
 name = "DesktopFlowerpin"
 path = "src/main.rs"
 
+[build-dependencies]
+# 빌드할 때 키를 두 조각으로 나누고, 공식 빌드에 써도 되는 키와 팩인지 검사한다.
+dfp-pack = { path = "../pack" }
+getrandom = "0.4"
+
 [dependencies]
 dfp-pack = { path = "../pack" }
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Security", "Win32_System_LibraryLoader", "Win32_System_ProcessStatus", "Win32_System_Threading", "Win32_System_WindowsProgramming", "Win32_UI_HiDpi", "Win32_UI_WindowsAndMessaging"] }

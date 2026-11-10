@@ -16,8 +16,6 @@ pub const MOTION_IDLE2: u16 = 8;
 
 #[cfg(dfp_has_pack)]
 static PACK_BYTES: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/pack.bin"));
-#[cfg(dfp_has_pack)]
-static PACK_KEY: &[u8; 32] = include_bytes!(concat!(env!("OUT_DIR"), "/key.bin"));
 
 pub struct Frames {
     pack: TempPack<'static>,
@@ -33,7 +31,7 @@ impl Frames {
     pub fn load() -> Result<Option<Frames>, PackError> {
         #[cfg(dfp_has_pack)]
         {
-            let (pack, decoder) = TempPack::open(PACK_BYTES, PACK_KEY)?;
+            let (pack, decoder) = crate::key::with_pack_key(|key| TempPack::open(PACK_BYTES, key))?;
             Ok(Some(Frames { pack, decoder, indices: vec![0; (CELL * CELL) as usize], scalers: Vec::new() }))
         }
         #[cfg(not(dfp_has_pack))]

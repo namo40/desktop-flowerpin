@@ -12,8 +12,10 @@ write = ["dep:getrandom"]
 
 [dependencies]
 # 난수(nonce 만들기)는 팩을 쓸 때만 필요하므로, 기본 기능에 딸려 오는 난수 crate를 뺀다.
-chacha20poly1305 = { version = "0.11", default-features = false }
+chacha20poly1305 = { version = "0.11", default-features = false, features = ["zeroize"] }
 getrandom = { version = "0.4", optional = true }
+# 키와 암호 풀기 상태를 다 쓴 뒤 메모리에서 지운다.
+zeroize = "1"
 zstd = "0.14"
 
 [dev-dependencies]
