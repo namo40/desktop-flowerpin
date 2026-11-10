@@ -107,10 +107,6 @@ impl CharacterWindow {
         self.height
     }
 
-    pub fn pos(&self) -> (i32, i32) {
-        self.pos
-    }
-
     /// 창 버퍼. 한 줄이 `width`개이고 위에서 아래로 놓인다. 값은 미리 곱한 알파의 BGRA(0xAARRGGBB)다.
     pub fn pixels(&mut self) -> &mut [u32] {
         // 버퍼는 창과 함께 만들어져 창이 없어질 때까지 살아 있고, 크기는 width × height로 고정이다.

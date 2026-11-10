@@ -28,6 +28,19 @@ impl Rect {
         self.y + self.h
     }
 
+    /// 두 범위를 모두 덮는 가장 작은 범위. 빈 범위는 없는 것으로 친다.
+    pub fn union(self, other: Rect) -> Rect {
+        if self.is_empty() {
+            return other;
+        }
+        if other.is_empty() {
+            return self;
+        }
+        let x = self.x.min(other.x);
+        let y = self.y.min(other.y);
+        Rect { x, y, w: self.right().max(other.right()) - x, h: self.bottom().max(other.bottom()) - y }
+    }
+
     /// `(0, 0)`에서 `(width, height)`까지의 범위 안으로 자른다.
     pub fn clip(self, width: i32, height: i32) -> Rect {
         let x = self.x.clamp(0, width);
@@ -40,6 +53,20 @@ impl Rect {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn union_covers_both() {
+        let a = Rect::new(10, 20, 30, 40);
+        let b = Rect::new(0, 50, 20, 30);
+        assert_eq!(a.union(b), Rect::new(0, 20, 40, 60));
+    }
+
+    #[test]
+    fn union_ignores_empty() {
+        let a = Rect::new(10, 20, 30, 40);
+        assert_eq!(a.union(Rect::EMPTY), a);
+        assert_eq!(Rect::EMPTY.union(a), a);
+    }
 
     #[test]
     fn clip_keeps_inside() {
