@@ -10,7 +10,8 @@
 //!
 //! 길이의 단위는 화면 배율 100%일 때의 픽셀이다. 창을 모른다. 받은 버퍼에 그리기만 한다.
 
-use std::f32::consts::{PI, SQRT_2};
+use std::f32::consts::{FRAC_1_SQRT_2, PI, SQRT_2};
+use std::sync::LazyLock;
 
 /// 종이 크기의 처음 값과, 줄이고 늘릴 수 있는 범위.
 pub const PAPER: (f32, f32) = (196.0, 196.0);
@@ -205,13 +206,55 @@ pub enum Hit {
     Answer(usize),
 }
 
+/// 창 안의 점을 포스트잇 위의 점으로 바꾸는 셈. 한 장을 그리는 동안에는 달라지지 않으므로 한 번만 구해 둔다.
+/// 픽셀마다 사인과 코사인을 다시 구하면 그리는 시간의 큰 몫이 거기에 든다.
+#[derive(Clone, Copy)]
+struct Inverse {
+    center: (f32, f32),
+    origin: (f32, f32),
+    sin: f32,
+    cos: f32,
+    /// 크기로 나누는 대신 곱할 값. 픽셀마다 하는 나눗셈은 곱셈보다 몇 배 느리다.
+    per_size: (f32, f32),
+}
+
+impl Inverse {
+    fn of(look: &Look) -> Inverse {
+        let (sin, cos) = look.tilt.sin_cos();
+        let per_size = (1.0 / look.size.0, 1.0 / look.size.1);
+        Inverse { center: pivot_canvas(look.paper), origin: pivot(look.paper), sin, cos, per_size }
+    }
+
+    /// 창 안의 한 점(100% 기준 단위)이 포스트잇의 어디인지 거꾸로 셈한다.
+    fn local(&self, x: f32, y: f32) -> (f32, f32) {
+        let (dx, dy) = (x - self.center.0, y - self.center.1);
+        (
+            self.origin.0 + (dx * self.cos + dy * self.sin) * self.per_size.0,
+            self.origin.1 + (-dx * self.sin + dy * self.cos) * self.per_size.1,
+        )
+    }
+}
+
 /// 창 안의 한 점(100% 기준 단위)이 포스트잇의 어디인지 거꾸로 셈한다.
 fn to_local(look: &Look, x: f32, y: f32) -> (f32, f32) {
-    let (center, origin) = (pivot_canvas(look.paper), pivot(look.paper));
-    let (dx, dy) = (x - center.0, y - center.1);
-    let (sin, cos) = look.tilt.sin_cos();
-    (origin.0 + (dx * cos + dy * sin) / look.size.0, origin.1 + (-dx * sin + dy * cos) / look.size.1)
+    Inverse::of(look).local(x, y)
 }
+
+/// 꽃 핀의 모양에서 한 번만 구해 두는 값.
+struct PinShape {
+    /// 꽃잎 다섯 장의 가운데. 위에서부터 72도씩 돌아간다.
+    petals: [(f32, f32); 5],
+    /// "항상 위"일 때 돌아간 각도의 사인과 코사인.
+    turned: (f32, f32),
+}
+
+static PIN: LazyLock<PinShape> = LazyLock::new(|| {
+    let center = |k: usize| {
+        let angle = (-90.0 + 72.0 * k as f32).to_radians();
+        (7.6 * angle.cos(), 7.6 * angle.sin())
+    };
+    PinShape { petals: std::array::from_fn(center), turned: (18.0f32).to_radians().sin_cos() }
+});
 
 /// 모서리가 둥근 네모까지의 거리. 안쪽이 음수다. `rect`는 (왼쪽, 위, 오른쪽, 아래)다.
 pub fn round_box(u: f32, v: f32, rect: (f32, f32, f32, f32), radius: f32) -> f32 {
@@ -225,22 +268,20 @@ pub fn round_box(u: f32, v: f32, rect: (f32, f32, f32, f32), radius: f32) -> f32
 fn paper_edge(u: f32, v: f32, paper: (f32, f32), crumple: f32) -> f32 {
     let radius = 3.0 + crumple * (paper.0.min(paper.1) / 2.0 - 3.0);
     let body = round_box(u, v, (0.0, 0.0, paper.0, paper.1), radius);
-    let cut = (u + v - (paper.0 + paper.1 - FOLD * (1.0 - crumple))) / SQRT_2;
+    let cut = (u + v - (paper.0 + paper.1 - FOLD * (1.0 - crumple))) * FRAC_1_SQRT_2;
     body.max(cut)
 }
 
 /// 꽃 핀(꽃잎 다섯 장)까지의 거리와, 가운데 동그라미까지의 거리.
 fn flower(u: f32, v: f32, paper: (f32, f32), top: bool) -> (f32, f32) {
     let (mut x, mut y) = (u - paper.0 / 2.0, v - PIN_Y);
+    let (centers, (sin, cos)) = (&PIN.petals, PIN.turned);
     if top {
         // "항상 위"면 조금 커지고 돌아가 있다.
-        let (sin, cos) = (18.0f32).to_radians().sin_cos();
         (x, y) = ((x * cos + y * sin) / 1.18, (-x * sin + y * cos) / 1.18);
     }
     let mut petals = f32::MAX;
-    for k in 0..5 {
-        let angle = (-90.0 + 72.0 * k as f32).to_radians();
-        let (cx, cy) = (7.6 * angle.cos(), 7.6 * angle.sin());
+    for (cx, cy) in centers {
         petals = petals.min(((x - cx).powi(2) + (y - cy).powi(2)).sqrt() - 6.4);
     }
     (petals, (x * x + y * y).sqrt() - 4.0)
@@ -333,10 +374,65 @@ fn petal(look: &Look, index: usize, progress: f32) -> ((f32, f32), f32, f32, f32
     (at, 0.3 + 0.7 * ease - 0.2 * fall, turn * (ease + fall), 1.0 - fall)
 }
 
+/// 종이 밖으로 무엇인가 그려질 수 있는 가장 먼 거리(옆, 위, 아래). 종이의 길이 단위다.
+/// 무엇이 나와 있든 이 밖은 셈하지 않는다.
+const FAR: (f32, f32, f32) = (26.0, 52.0, 50.0);
+
+/// 지금 모습에서 종이 밖으로 무엇인가 그려질 수 있는 거리(옆, 위, 아래). 이 밖은 셈하지 않고 비워 둔다.
+///
+/// 그림자, 빛, 꽃 핀, 단추가 닿는 데까지다. 나와 있지 않은 것의 몫을 빼면 셈할 넓이가 크게 준다.
+/// 가만히 붙어 있을 때는 [`FAR`]로 셈할 때의 3분의 2쯤이다. 그려지는 그림은 [`FAR`]로 셈한 것과 같다.
+fn reach(look: &Look, scale: f32) -> (f32, f32, f32) {
+    let (drop, blur) = (7.0 + 9.0 * look.lift, 7.0 + 7.0 * look.lift);
+    let half = look.paper.0 / 2.0;
+    // 가장자리를 부드럽게 하는 폭. 작게 그릴수록 종이의 길이로는 넓어진다.
+    let soft = 0.5 / (scale * look.size.0.min(look.size.1)).max(0.01) + 1.0;
+    let glow = if look.glow > 0.0 { 15.0 } else { 0.0 };
+    let mut side = blur.max(glow);
+    // 꽃 핀은 종이 위로 조금 올라온다. "항상 위"일 때의 큰 핀까지 친다.
+    let mut top = glow.max(13.0);
+    let mut bottom = (drop + blur).max(glow);
+    if look.tools > 0.0 {
+        // 단추들과, 단추와 종이 사이에서 마우스를 받는 자리.
+        side = side.max((TOOLS as f32 * 18.0 + 8.0).max(70.0 + soft) - half);
+        top = FAR.1;
+    }
+    if look.answers > 0.0 {
+        side = side.max(81.0 - half);
+        bottom = bottom.max(40.0);
+    }
+    ((side + soft).min(FAR.0), (top + soft).min(FAR.1), (bottom + soft).min(FAR.2))
+}
+
 /// 포스트잇 한 장을 `pixels`에 그린다. 한 줄이 `stride`개인 버퍼의 왼쪽 위 `width`×`height`만 쓴다.
 /// 값은 미리 곱한 알파의 BGRA이고, `scale`은 화면 배율(100%면 1)이다.
 pub fn draw(pixels: &mut [u32], stride: usize, width: i32, height: i32, scale: f32, look: &Look, ink: &Ink) {
+    let plan = Plan { bound: reach(look, scale), shortcut: true };
+    draw_with(pixels, stride, (width, height), scale, look, ink, plan);
+}
+
+/// 셈을 줄이는 방법. 무엇을 고르든 그려지는 그림은 같다.
+#[derive(Clone, Copy)]
+struct Plan {
+    /// 종이 밖으로 어디까지 셈할지(옆, 위, 아래).
+    bound: (f32, f32, f32),
+    /// 아무것도 얹히지 않은 종이 한가운데는 색만 정해 칠한다.
+    shortcut: bool,
+}
+
+/// [`draw`]와 같다. 셈을 줄이는 방법을 따로 받는다.
+fn draw_with(
+    pixels: &mut [u32],
+    stride: usize,
+    (width, height): (i32, i32),
+    scale: f32,
+    look: &Look,
+    ink: &Ink,
+    plan: Plan,
+) {
     let (w, h) = look.paper;
+    let bound = plan.bound;
+    let inverse = Inverse::of(look);
     // 그늘진 아래쪽은 조금 더 진하고, 접힌 귀퉁이는 종이의 뒷면이라 더 밝다.
     let (hue, saturation, value) = to_hsv(look.color);
     let shade = from_hsv(hue, (saturation * 1.25 + 0.03).min(1.0), value * 0.975);
@@ -375,23 +471,51 @@ pub fn draw(pixels: &mut [u32], stride: usize, width: i32, height: i32, scale: f
             + tap(x + quarter, y + quarter))
     };
 
+    // 픽셀마다 나누는 대신 곱할 값들.
+    let (per_scale, per_h, per_blur) = (1.0 / scale, 1.0 / h, 1.0 / (2.0 * shadow_blur));
+    // 종이 색만 칠해도 되는 곳의 조건. 구겨지는 중에는 종이의 모양과 면이 달라지므로 쓰지 않는다.
+    // 가장자리에서 `inset`보다 깊이 들어와 있어야 한다. 가장자리를 부드럽게 하는 폭보다 넉넉히 깊다.
+    let shortcut = plan.shortcut && look.crumple == 0.0;
+    let inset = (1.0 / sharp.max(0.001)).max(3.0);
+    // 접혀 잘려 나간 귀퉁이의 선에서도 그만큼 떨어져 있어야 한다.
+    let uncut = w + h - FOLD - inset * SQRT_2;
     for py in 0..height {
+        let y = (py as f32 + 0.5) * per_scale;
         for px in 0..width {
-            let (x, y) = ((px as f32 + 0.5) / scale, (py as f32 + 0.5) / scale);
+            let x = (px as f32 + 0.5) * per_scale;
             let at = py as usize * stride + px as usize;
             let mut pixel = Pixel::default();
 
             if look.petals.is_none() {
-                let (u, v) = to_local(look, x, y);
+                let (u, v) = inverse.local(x, y);
                 // 포스트잇에서 먼 곳은 건너뛴다. 빛, 그림자, 단추가 닿는 데까지만 본다.
-                if !(-26.0..=w + 26.0).contains(&u) || !(-52.0..=h + 50.0).contains(&v) {
+                if !(-bound.0..=w + bound.0).contains(&u) || !(-bound.1..=h + bound.2).contains(&v) {
                     pixels[at] = 0;
+                    continue;
+                }
+                let body = ink.body;
+                let in_text = u > body.0 && u < body.2 && v > body.1 && v < body.3.min(ink.text_bottom + 2.0);
+                // 종이 한가운데의, 아무것도 얹히지 않은 곳은 가장 넓으면서 가장 단순하다. 가장자리에서 멀어
+                // 빛도 그림자도 닿지 않고, 글자도 핀도 접힌 귀퉁이도 없다. 종이 색만 정해 칠하고 넘어간다.
+                if shortcut
+                    && u >= inset
+                    && u <= w - inset
+                    && v >= inset
+                    && v <= h - inset
+                    && u + v <= uncut
+                    && !(u > w - FOLD && v > h - FOLD)
+                    && !(v < 26.0 && (u - w / 2.0).abs() < 22.0)
+                    && !in_text
+                    && !chip.is_some_and(|rect| {
+                        u >= rect.0 - 2.0 && u <= rect.2 + 2.0 && v >= rect.1 - 2.0 && v <= rect.3 + 2.0
+                    })
+                {
+                    let color = mix(look.color, shade, ((v * per_h - 0.7) * (1.0 / 0.3)).clamp(0.0, 1.0));
+                    pixels[at] = Pixel { r: color.0, g: color.1, b: color.2, a: 1.0 }.pack(look.opacity);
                     continue;
                 }
                 let distance = paper_edge(u, v, look.paper, look.crumple);
                 // 그 자리에 그려져 있는 글자나 아이콘이 덮은 정도. 글자가 있을 수 있는 곳에서만 읽는다.
-                let body = ink.body;
-                let in_text = u > body.0 && u < body.2 && v > body.1 && v < body.3.min(ink.text_bottom + 2.0);
                 let in_chip = chip.is_some_and(|rect| u > rect.0 && u < rect.2 && v > rect.1 && v < rect.3);
                 let inked = (distance < 1.0 && (in_text || in_chip))
                     || (look.tools > 0.0 && v < TOOL_Y + 26.0)
@@ -401,18 +525,18 @@ pub fn draw(pixels: &mut [u32], stride: usize, width: i32, height: i32, scale: f
                 // 빛과 그림자. 종이 안쪽 깊은 곳은 종이에 가려지므로 셈하지 않는다.
                 let edge = distance > -1.5;
                 if edge && look.glow > 0.0 {
-                    pixel.over(GLOW, look.glow * 0.9 * (1.0 - distance / 15.0).clamp(0.0, 1.0).powi(2));
+                    pixel.over(GLOW, look.glow * 0.9 * (1.0 - distance * (1.0 / 15.0)).clamp(0.0, 1.0).powi(2));
                 }
                 if edge {
                     let under = paper_edge(u, v - shadow_drop, look.paper, look.crumple);
-                    let soft = (0.5 - under / (2.0 * shadow_blur)).clamp(0.0, 1.0);
+                    let soft = (0.5 - under * per_blur).clamp(0.0, 1.0);
                     pixel.over(SHADOW, 0.34 * soft * soft * (3.0 - 2.0 * soft));
                 }
 
                 // 종이. 아래쪽 30%는 조금 그늘지고, 오른쪽 아래에는 접혀 올라온 귀퉁이가 있다.
                 let on_paper = cover(distance);
                 if on_paper > 0.0 {
-                    let mut color = mix(look.color, shade, ((v / h - 0.7) / 0.3).clamp(0.0, 1.0));
+                    let mut color = mix(look.color, shade, ((v * per_h - 0.7) * (1.0 / 0.3)).clamp(0.0, 1.0));
                     let corner = FOLD * (1.0 - look.crumple);
                     if u > w - corner && v > h - corner {
                         let crease = (u + v - (w + h - corner)) / SQRT_2;
@@ -435,6 +559,10 @@ pub fn draw(pixels: &mut [u32], stride: usize, width: i32, height: i32, scale: f
 
                     // 알림 시각. 그 안의 글자는 장밋빛이다.
                     let in_chip = chip.is_some_and(|rect| {
+                        // 칸에서 먼 곳은 거리를 재지 않는다.
+                        if u < rect.0 - 2.0 || u > rect.2 + 2.0 || v < rect.1 - 2.0 || v > rect.3 + 2.0 {
+                            return false;
+                        }
                         let pill = round_box(u, v, rect, 10.0);
                         if pill < 1.0 {
                             pixel.over(PINK, cover(pill));
@@ -522,7 +650,7 @@ pub fn draw(pixels: &mut [u32], stride: usize, width: i32, height: i32, scale: f
             // 완전히 투명한 픽셀 위에서는 마우스가 창을 벗어난 것이 되어, 단추로 가는 길에 단추가 사라진다.
             // 눈에 보이지 않을 만큼만(255분의 1) 칠해 둔다.
             if packed >> 24 == 0 && look.tools > 0.0 && look.petals.is_none() {
-                let (u, v) = to_local(look, x, y);
+                let (u, v) = inverse.local(x, y);
                 let reach = (TOOLS as f32 * 18.0 + 8.0).max(w / 2.0);
                 if (u - w / 2.0).abs() <= reach && (TOOL_Y - TOOL_R - 8.0..=2.0).contains(&v) {
                     packed = 1 << 24;
@@ -530,5 +658,97 @@ pub fn draw(pixels: &mut [u32], stride: usize, width: i32, height: i32, scale: f
             }
             pixels[at] = packed;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn plain(paper: (f32, f32)) -> Look {
+        Look {
+            paper,
+            color: rgb(0xFFF3A6),
+            tilt: 0.0,
+            size: (1.0, 1.0),
+            opacity: 1.0,
+            tools: 0.0,
+            hot_tool: None,
+            on: [false; TOOLS],
+            top: false,
+            glow: 0.0,
+            answers: 0.0,
+            hot_answer: None,
+            lift: 0.0,
+            editing: false,
+            crumple: 0.0,
+            petals: None,
+            seed: 1,
+        }
+    }
+
+    #[test]
+    fn narrowing_what_is_computed_changes_no_pixel() {
+        // 셈을 줄여 그린 그림이, 가장 먼 데까지 지름길 없이 다 셈한 그림과 한 픽셀도 다르지 않아야 한다.
+        let paper = SMALLEST;
+        let size = canvas(paper);
+        let scale = 0.75;
+        let (width, height) = ((size.0 * scale).ceil() as i32, (size.1 * scale).ceil() as i32);
+        let (origin, extent) = sheet(paper);
+        let density = SUPER * scale;
+        let ink_size = ((extent.0 * density).ceil() as i32, (extent.1 * density).ceil() as i32);
+        // 글자 대신 점을 고르게 찍어 둔 그림. 글이 있는 범위는 종이의 가운데쯤이다.
+        let dotted: Vec<u32> =
+            (0..ink_size.0 * ink_size.1).map(|at| if at % 7 < 3 { 0x0000_0000 } else { 0x00FF_FFFF }).collect();
+        let text = text_rect(paper);
+        let ink = |chip| Ink {
+            pixels: &dotted,
+            stride: ink_size.0 as usize,
+            size: ink_size,
+            origin,
+            density,
+            text_bottom: text.3,
+            body: (text.0 + 10.0, text.1 + 4.0, text.2 - 30.0, text.1 + 30.0),
+            chip,
+            dim: false,
+        };
+        let base = plain(paper);
+        let looks = [
+            base,
+            Look { tilt: 0.12, ..base },
+            Look { tilt: -0.3, lift: 1.0, size: (1.04, 1.04), ..base },
+            Look { top: true, tilt: 0.05, ..base },
+            Look { tools: 1.0, ..base },
+            Look { tools: 0.4, tilt: -0.1, top: true, ..base },
+            Look { glow: 1.0, answers: 1.0, size: (1.28, 1.28), tilt: 0.04, ..base },
+            Look { glow: 0.3, answers: 0.5, size: (1.1, 1.1), ..base },
+            Look { glow: 1.0, tools: 1.0, lift: 0.5, ..base },
+            // 붙을 때: 작게 나타나고, 눌리며 붙는다.
+            Look { size: (0.15, 0.15), opacity: 0.4, tilt: -0.25, ..base },
+            Look { size: (0.95, 0.95 * 1.08), ..base },
+            // 적는 중과 구겨지는 중.
+            Look { editing: true, tools: 1.0, ..base },
+            Look { crumple: 0.5, size: (0.7, 0.7), tilt: 0.6, ..base },
+            Look { crumple: 1.0, size: (0.16, 0.16), tilt: 1.2, ..base },
+        ];
+        let mut wide = vec![0u32; (width * height) as usize];
+        let mut tight = wide.clone();
+        for (number, look) in looks.iter().enumerate() {
+            for chip in [None, Some(84.0)] {
+                // 견줄 그림은 가장 먼 데까지, 지름길 없이 셈한다.
+                let slow = Plan { bound: FAR, shortcut: false };
+                draw_with(&mut wide, width as usize, (width, height), scale, look, &ink(chip), slow);
+                draw(&mut tight, width as usize, width, height, scale, look, &ink(chip));
+                assert!(wide == tight, "{number}번째 모습(알림 칸 {chip:?})의 그림이 달라졌다");
+                // 좁힌 범위가 가장 먼 범위를 넘지는 않는다.
+                let near = reach(look, scale);
+                assert!(near.0 <= FAR.0 && near.1 <= FAR.1 && near.2 <= FAR.2);
+            }
+            // 무엇인가 그려지기는 했다.
+            assert!(tight.iter().any(|pixel| *pixel != 0), "{number}번째 모습이 비어 있다");
+        }
+        // 가만히 붙어 있을 때는 셈할 넓이가 뚜렷이 준다.
+        let (near, area) = (reach(&base, 1.0), |r: (f32, f32, f32)| (paper.0 + 2.0 * r.0) * (paper.1 + r.1 + r.2));
+        assert!(area(near) < 0.7 * area(FAR));
     }
 }
