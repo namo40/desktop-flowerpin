@@ -231,8 +231,38 @@ pub enum MemoStep {
     Tidy,
     /// `memo show`: 모두 앞으로 가져온다.
     Show,
+    /// `memo list ...`: 메모 목록 창을 다룬다.
+    List(ListStep),
     /// `memo snap`: 지금 모습을 `--settings-shot`에 그림으로 쓰고, 보고서에 포스트잇마다 한 줄씩 적는다.
     Snap,
+}
+
+/// `--script`의 `memo list` 명령. 사람이 메모 목록 창에서 하는 일을 흉내 낸다.
+/// 자리(x, y)는 화면 배율 100%일 때의 창 안 좌표다.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ListStep {
+    /// `memo list open [x y]`: 화면의 그 자리 가까이에 연다. `memo list close`: 닫는다.
+    Open(Option<(i32, i32)>),
+    Close,
+    /// `memo list filter all|alarm|top|held`: 보여 줄 메모를 고른다.
+    Filter(String),
+    /// `memo list sort`: 차례 단추를 누른다. 누를 때마다 다음 차례로 바뀐다.
+    Sort,
+    /// `memo list find [글]`: 찾는 말을 적는다. 글이 없으면 지운다.
+    Find(String),
+    /// `memo list select 번호`: 그 메모의 줄을 누른다.
+    Select(u64),
+    /// `memo list press 무엇`: 단추를 누른다(find, top, hold, delete, yes, no, add, tidy, raise, search, clear, close).
+    Press(String),
+    /// `memo list wheel 칸`: 휠을 굴린다. 양수면 아래로 넘긴다.
+    Wheel(i32),
+    /// `memo list click x y`, `memo list double x y`, `memo list hover x y`: 창 안의 그 자리를 누르거나, 두 번
+    /// 누르거나, 마우스를 올린다.
+    Click(i32, i32),
+    Double(i32, i32),
+    Hover(i32, i32),
+    /// `memo list esc`: Esc를 누른다.
+    Esc,
 }
 
 /// 찍은 차례를 파일 이름에 붙인다. `창.txt`의 세 번째는 `창_3.txt`다.
@@ -284,6 +314,10 @@ pub enum Dialog {
     /// `settings snap`: 지금 모습을 `--settings-dump`와 `--settings-shot`에 쓴다.
     Snap,
 }
+
+/// `memo list press`로 누를 수 있는 단추들.
+const LIST_BUTTONS: [&str; 12] =
+    ["find", "top", "hold", "delete", "yes", "no", "add", "tidy", "raise", "search", "clear", "close"];
 
 /// `--script`의 한 줄. 시작하고 `at`이 지났을 때 `command`를 한다.
 #[derive(Clone, Debug, PartialEq)]
@@ -370,6 +404,24 @@ pub fn parse_script(text: &str) -> Result<Vec<Step>, String> {
                     (Some("tidy"), 3) => MemoStep::Tidy,
                     (Some("show"), 3) => MemoStep::Show,
                     (Some("snap"), 3) => MemoStep::Snap,
+                    (Some("list"), 4..) => MemoStep::List(match (words[3], words.len()) {
+                        ("open", 4) => ListStep::Open(None),
+                        ("open", 6) => ListStep::Open(Some((number(4)? as i32, number(5)? as i32))),
+                        ("close", 4) => ListStep::Close,
+                        ("filter", 5) if matches!(words[4], "all" | "alarm" | "top" | "held") => {
+                            ListStep::Filter(words[4].to_string())
+                        }
+                        ("sort", 4) => ListStep::Sort,
+                        ("find", _) => ListStep::Find(text(4)),
+                        ("select", 5) => ListStep::Select(id(4)?),
+                        ("press", 5) if LIST_BUTTONS.contains(&words[4]) => ListStep::Press(words[4].to_string()),
+                        ("wheel", 5) => ListStep::Wheel(number(4)? as i32),
+                        ("click", 6) => ListStep::Click(number(4)? as i32, number(5)? as i32),
+                        ("double", 6) => ListStep::Double(number(4)? as i32, number(5)? as i32),
+                        ("hover", 6) => ListStep::Hover(number(4)? as i32, number(5)? as i32),
+                        ("esc", 4) => ListStep::Esc,
+                        _ => return Err(bad()),
+                    }),
                     _ => return Err(bad()),
                 })
             }
@@ -775,6 +827,38 @@ mod tests {
             .map(Command::Memo)
         );
         assert_eq!(parse_script("1 bubble dismiss").unwrap()[0].command, Command::BubbleDismiss);
+        // 메모 목록 창.
+        let list = parse_script(
+            "1 memo list open; 2 memo list open 300 200; 3 memo list filter alarm; 4 memo list sort; \
+             5 memo list find 우유 사기; 6 memo list find; 7 memo list select 3; 8 memo list press delete; \
+             9 memo list wheel -2; 10 memo list click 100 150; 11 memo list double 100 150; \
+             12 memo list hover 30 40; 13 memo list esc; 14 memo list close",
+        )
+        .unwrap();
+        let commands: Vec<Command> = list.iter().map(|step| step.command.clone()).collect();
+        assert_eq!(
+            commands,
+            [
+                ListStep::Open(None),
+                ListStep::Open(Some((300, 200))),
+                ListStep::Filter("alarm".to_string()),
+                ListStep::Sort,
+                ListStep::Find("우유 사기".to_string()),
+                ListStep::Find(String::new()),
+                ListStep::Select(3),
+                ListStep::Press("delete".to_string()),
+                ListStep::Wheel(-2),
+                ListStep::Click(100, 150),
+                ListStep::Double(100, 150),
+                ListStep::Hover(30, 40),
+                ListStep::Esc,
+                ListStep::Close
+            ]
+            .map(|step| Command::Memo(MemoStep::List(step)))
+        );
+        for wrong in ["1 memo list", "1 memo list filter blue", "1 memo list press jump", "1 memo list select 0"] {
+            assert!(parse_script(wrong).is_err(), "{wrong}");
+        }
         // 확인용 시계.
         assert_eq!(parse_clock("1970-01-02 00:01:05"), Some(86_400 + 65));
         assert_eq!(parse_clock("1970-01-01 09:00"), Some(9 * 3_600));

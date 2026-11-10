@@ -1580,6 +1580,7 @@ impl App {
                 }
             }
             Outcome::Answered { id, snooze: false } => self.note(now, format!("알림을 확인함: 메모 {id}")),
+            Outcome::Create { x, y } => self.new_memo((x, y)),
         }
         None
     }
@@ -1614,6 +1615,7 @@ impl App {
             // 맡긴 메모는 꽃핀을 클릭하면 말풍선으로 보여 준다.
             (2, "꽃핀에게 맡기기", held),
             (0, "", false),
+            (5, "메모 목록...", false),
             (3, "모두 앞으로 가져오기", false),
             (4, "다시 줄 세우기", false),
         ]
@@ -1631,6 +1633,7 @@ impl App {
             }
             3 => self.postits.show_all(),
             4 => self.postits.tidy(),
+            5 => self.postits.open_list(at),
             _ => {}
         }
     }
@@ -1745,6 +1748,7 @@ impl App {
             Some(MenuItem::MemoNew) => self.new_memo(win::cursor_position()),
             Some(MenuItem::MemoShow) => self.postits.show_all(),
             Some(MenuItem::MemoTidy) => self.postits.tidy(),
+            Some(MenuItem::MemoList) => self.postits.open_list(win::cursor_position()),
             Some(MenuItem::Link(index)) => self.open(LINKS[index].url),
             Some(MenuItem::Show(show)) => {
                 let target = self.menu_character();
@@ -2023,7 +2027,7 @@ impl App {
                 if step == dev::MemoStep::Snap {
                     self.dev.snaps += 1;
                     shot = self.dev.options.settings_shot.as_deref().map(|path| dev::numbered(path, self.dev.snaps));
-                    self.dev.notes.extend(self.postits.describe());
+                    self.dev.notes.extend(self.postits.describe(&self.memos));
                 }
                 self.postits.script(&step, &mut self.memos, shot.as_deref());
             }

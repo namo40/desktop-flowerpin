@@ -10,12 +10,14 @@
 //! - 끌어서 옮긴다. 오른쪽 아래의 접힌 귀퉁이를 끌면 크기가 바뀐다.
 //! - 두 번 클릭하면 반듯하게 펴지고 글을 적을 수 있다. 다른 곳을 누르거나 Esc를 누르면 끝난다.
 //! - 알림이 울리면 커지고 빛나며 앞으로 나온다. 아래에 답하는 단추 둘이 나온다.
+//! - 메모를 한데 모아 보는 창(메모 목록)에서 찾고, 찾아가고, 지울 수 있다.
 //!
 //! 메모의 내용은 [`Memos`]가 들고 있다. 여기서는 화면에 붙은 모습과 움직임을 다루고, 바뀐 것은 그때그때
 //! 메모에 옮겨 적는다. 저장하거나 메뉴를 띄우는 것처럼 앱이 해야 할 일은 [`Outcome`]으로 알린다.
 
 mod alarm;
 mod draw;
+mod list;
 mod panel;
 mod text;
 mod window;
@@ -38,6 +40,7 @@ use crate::when::When;
 use crate::win;
 use alarm::Alarm;
 use draw::{COLORS, Hit, Ink, Look, Rgb, TOOLS};
+use list::{FOUND_SIZE, FOUND_TIME, List};
 use panel::{Action, Draft, Kind, Model, Panel, Surface};
 use text::{DT_EDITCONTROL, DT_WORDBREAK, Font, Painter};
 use window::{Canvas, Cursor, Editor, Event};
@@ -71,6 +74,8 @@ pub enum Outcome {
     AskDelete(u64),
     /// 울리는 알림에 답했다. `snooze`면 조금 뒤에 다시 알려 달라는 것이다.
     Answered { id: u64, snooze: bool },
+    /// 메모 목록에서 "새 메모"를 눌렀다. 새 포스트잇을 붙일 화면 좌표다.
+    Create { x: i32, y: i32 },
 }
 
 /// 목표로 다가가는 값. 용수철처럼 조금 지나쳤다가 돌아온다.
@@ -196,6 +201,8 @@ struct Note {
     drag: Option<(f32, f32)>,
     /// 크기를 바꾸는 중: 처음 크기와, 잡았을 때의 커서 자리.
     resize: Option<((f32, f32), (i32, i32))>,
+    /// 메모 목록에서 찾아가서 반짝이는 중: 반짝이기 시작한 뒤 흐른 초.
+    found: Option<f32>,
     seed: u32,
     /// 그림을 다시 그려야 한다.
     stale: bool,
@@ -282,6 +289,12 @@ pub struct Postits {
     panel_at: (i32, i32),
     draft: Draft,
     hsv: (f32, f32, f32),
+    /// 메모 목록 창. 열려 있을 때만 있다.
+    list: Option<List>,
+    /// 메모 목록에서 찾는 말을 적는 칸. 적는 동안에만 있다.
+    search: Option<Editor>,
+    /// 메모 목록을 닫을 때 있던 자리. 다시 열면 그 자리에 띄운다.
+    list_spot: Option<(i32, i32)>,
     /// 움직이는 것이 있다. 있는 동안에는 짧은 간격으로 시간을 흘린다.
     awake: bool,
     last: Instant,
@@ -319,6 +332,9 @@ impl Postits {
             panel_at: (0, 0),
             draft: Draft::from(Alarm::None, (wall.day(), wall.minute_of_day())),
             hsv: (0.0, 0.0, 1.0),
+            list: None,
+            search: None,
+            list_spot: None,
             awake: false,
             last: Instant::now(),
             wall,
@@ -334,6 +350,7 @@ impl Postits {
         for index in 0..self.notes.len() {
             self.settle(index);
         }
+        self.settle_list();
     }
 
     /// 화면의 한 점이 놓인 모니터의 화면 배율. 어느 모니터에도 들지 않으면 가장 가까운 모니터의 것이다.
@@ -467,6 +484,7 @@ impl Postits {
             away: None,
             drag: None,
             resize: None,
+            found: None,
             seed: self.seed.wrapping_add(memo.id as u32 * 97),
             stale: true,
             since_drawn: 0.0,
@@ -642,19 +660,22 @@ impl Postits {
         }
     }
 
-    /// 글을 적는 칸이 Ctrl+A를 받았으면 글을 모두 고르고 `true`를 돌려준다.
-    /// 여러 줄 입력 칸은 Ctrl+A를 스스로 처리하지 않는다.
-    pub fn handles(&self, message: &MSG) -> bool {
-        let select = message.message == WM_KEYDOWN
-            && message.wParam == 'A' as usize
-            && unsafe { GetKeyState(VK_CONTROL as i32) } < 0;
-        match self.editor.as_ref().filter(|(_, editor)| select && editor.edit() == message.hwnd) {
-            Some((_, editor)) => {
-                editor.select_all();
-                true
-            }
-            None => false,
+    /// 글을 적는 칸에서 누른 키 가운데 먼저 처리할 것이면 처리하고 `true`를 돌려준다.
+    /// 여러 줄 입력 칸은 Ctrl+A를 스스로 처리하지 않는다. 메모 목록의 찾는 말을 적는 칸은 Enter와 Esc로 적기를 마친다.
+    pub fn handles(&mut self, message: &MSG) -> bool {
+        if message.message != WM_KEYDOWN {
+            return false;
         }
+        let control = unsafe { GetKeyState(VK_CONTROL as i32) } < 0;
+        let key = message.wParam as u32;
+        if let Some((_, editor)) = self.editor.as_ref().filter(|(_, editor)| editor.edit() == message.hwnd) {
+            let all = control && key == 'A' as u32;
+            if all {
+                editor.select_all();
+            }
+            return all;
+        }
+        self.search_key(message.hwnd, key, control)
     }
 
     /// 한 바퀴의 일을 한다: 창에서 온 일을 처리하고, 움직이는 포스트잇의 시간을 흘린다.
@@ -672,6 +693,8 @@ impl Postits {
         if self.awake && now >= self.last + TICK {
             self.tick(now, memos);
         }
+        // 메모 목록이 열려 있으면, 보일 것이 달라졌을 때 다시 그린다.
+        self.sync_list(memos, now);
         std::mem::take(&mut self.outcomes)
     }
 
@@ -699,7 +722,17 @@ impl Postits {
             let (mut tilt_to, mut zoom_to) = (note.rest, if note.drag.is_some() { 1.04 } else { 1.0 });
             let (mut tools_to, mut glow_to, mut answers_to) = (if note.hover { 1.0 } else { 0.0 }, 0.0, 0.0);
             match note.phase {
-                Phase::Idle => {}
+                // 메모 목록에서 찾아간 포스트잇은 두 번 커졌다 돌아오며 빛난다.
+                Phase::Idle => {
+                    if let Some(t) = note.found {
+                        let t = t + dt;
+                        note.found = (t < FOUND_TIME).then_some(t);
+                        let beat = if t < FOUND_TIME { (2.0 * PI * t / FOUND_TIME).sin().powi(2) } else { 0.0 };
+                        (zoom_to, glow_to) = (1.0 + FOUND_SIZE * beat, beat);
+                        (note.zoom, note.glow) = (Spring::at(zoom_to), Spring::at(glow_to));
+                        (busy, redraw) = (true, true);
+                    }
+                }
                 Phase::Born(t) => {
                     let t = (t + dt / 0.5).min(1.0);
                     // 작게 튀어나와, 조금 크게 지나쳤다가, 눌리며 붙는다.
@@ -823,6 +856,8 @@ impl Postits {
     }
 
     fn open_editor(&mut self, index: usize) {
+        // 글을 적는 칸은 한 번에 하나만 둔다.
+        self.close_search();
         let note = &self.notes[index];
         let text = draw::text_rect(note.paper);
         let px = |units: f32| (units * note.scale).round() as i32;
@@ -853,7 +888,7 @@ impl Postits {
     }
 
     fn handle(&mut self, event: Event, memos: &mut Memos) {
-        if self.panel_event(event, memos) {
+        if self.list_event(event, memos) || self.panel_event(event, memos) {
             self.wake();
             return;
         }
@@ -962,8 +997,12 @@ impl Postits {
                     self.outcomes.push(Outcome::Menu { id: self.notes[index].id, x, y });
                 }
             }
-            Event::EditDone => self.close_editor(memos),
-            Event::Wheel { .. } => {}
+            Event::EditDone { host } => {
+                if self.editor.as_ref().is_some_and(|(_, editor)| editor.host() == host) {
+                    self.close_editor(memos);
+                }
+            }
+            Event::EditChanged { .. } | Event::Key { .. } | Event::Wheel { .. } => {}
         }
         self.wake();
     }
@@ -1142,6 +1181,7 @@ impl Postits {
                 note.glide = Some((note.at, to, 0.0));
             }
         }
+        self.settle_list();
         self.wake();
     }
 
@@ -1221,7 +1261,7 @@ impl Postits {
             past: draft.mode == 1 && draft.alarm().is_past(self.wall),
         };
         let stride = tools.canvas.width as usize;
-        let mut surface = Surface { pixels: tools.canvas.pixels(), stride, width: wide, height: tall, scale };
+        let mut surface = Surface::new(tools.canvas.pixels(), stride, (wide, tall), scale);
         panel.paint(&mut surface, &model);
         Some((wide, tall))
     }
@@ -1447,17 +1487,18 @@ impl Postits {
             }
             MemoStep::Tidy => self.tidy(),
             MemoStep::Show => self.show_all(),
+            MemoStep::List(step) => self.list_script(step, memos),
             MemoStep::Snap => {
                 if let Some(path) = shot {
-                    self.snap(path);
+                    self.snap(path, memos);
                 }
             }
         }
         self.wake();
     }
 
-    /// 확인용: 지금의 포스트잇들과 판을 화면에 놓인 자리대로 한 장의 그림(BMP)으로 저장한다.
-    fn snap(&mut self, path: &Path) {
+    /// 확인용: 지금의 포스트잇들과 판, 메모 목록을 화면에 놓인 자리대로 한 장의 그림(BMP)으로 저장한다.
+    fn snap(&mut self, path: &Path, memos: &Memos) {
         // 창마다 자리와 크기.
         let mut windows: Vec<((i32, i32), (i32, i32))> =
             self.notes.iter().map(|note| (note.window_at(), note.canvas_px())).collect();
@@ -1465,6 +1506,10 @@ impl Postits {
             let (size, scale) = (Panel::size(panel.kind), self.panel_scale);
             windows.push((self.panel_at, ((size.0 * scale).round() as i32, (size.1 * scale).round() as i32)));
         }
+        // 메모 목록은 맨 위에 얹는다.
+        let listed = self.list_frame();
+        windows.extend(listed);
+        let last = windows.len().saturating_sub(1);
         let left = windows.iter().map(|w| w.0.0).min().unwrap_or(0);
         let top = windows.iter().map(|w| w.0.1).min().unwrap_or(0);
         let right = windows.iter().map(|w| w.0.0 + w.1.0).max().unwrap_or(1);
@@ -1475,6 +1520,8 @@ impl Postits {
         for (index, &(at, size)) in windows.iter().enumerate() {
             if index < self.notes.len() {
                 self.paint(index);
+            } else if listed.is_some() && index == last {
+                self.draw_list(memos);
             } else {
                 self.draw_panel();
             }
@@ -1497,12 +1544,13 @@ impl Postits {
         self.written = None;
     }
 
-    /// 확인용: 포스트잇들이 지금 어떤지를 적은 줄들.
-    pub fn describe(&self) -> Vec<String> {
-        self.notes
-            .iter()
+    /// 확인용: 포스트잇들과 메모 목록이 지금 어떤지를 적은 줄들.
+    pub fn describe(&self, memos: &Memos) -> Vec<String> {
+        let notes = self.notes.iter();
+        let mut lines: Vec<String> = notes
             .map(|note| {
                 let phase = match note.phase {
+                    Phase::Idle if note.found.is_some() => "반짝이는 중",
                     Phase::Idle => "붙어 있음",
                     Phase::Born(_) => "붙는 중",
                     Phase::Ringing(_) => "울리는 중",
@@ -1523,6 +1571,8 @@ impl Postits {
                     note.chip(self.wall.day()).unwrap_or_else(|| "없음".to_string()),
                 )
             })
-            .collect()
+            .collect();
+        lines.extend(self.describe_list(memos));
+        lines
     }
 }

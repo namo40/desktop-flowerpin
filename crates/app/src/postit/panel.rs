@@ -73,9 +73,25 @@ pub struct Surface<'a> {
     pub width: i32,
     pub height: i32,
     pub scale: f32,
+    /// 이 안에만 그린다(px: 왼쪽, 위, 오른쪽, 아래). 넘치는 목록을 잘라 그릴 때 좁힌다.
+    pub clip: (i32, i32, i32, i32),
 }
 
-impl Surface<'_> {
+impl<'a> Surface<'a> {
+    pub fn new(pixels: &'a mut [u32], stride: usize, (width, height): (i32, i32), scale: f32) -> Surface<'a> {
+        Surface { pixels, stride, width, height, scale, clip: (0, 0, width, height) }
+    }
+
+    /// `rect`(100%일 때의 좌표) 안에만 그리게 한다. `None`이면 다시 전체에 그린다.
+    pub fn clip_to(&mut self, rect: Option<(f32, f32, f32, f32)>) {
+        let (scale, width, height) = (self.scale, self.width, self.height);
+        let px = |value: f32, limit: i32| ((value * scale).round() as i32).clamp(0, limit);
+        self.clip = match rect {
+            Some(rect) => (px(rect.0, width), px(rect.1, height), px(rect.2, width), px(rect.3, height)),
+            None => (0, 0, width, height),
+        };
+    }
+
     pub fn clear(&mut self) {
         for row in 0..self.height as usize {
             self.pixels[row * self.stride..row * self.stride + self.width as usize].fill(0);
@@ -83,10 +99,11 @@ impl Surface<'_> {
     }
 
     /// `rect`(왼쪽, 위, 오른쪽, 아래)에 걸친 픽셀마다 `paint`를 부른다.
-    fn each(&mut self, rect: (f32, f32, f32, f32), mut paint: impl FnMut(f32, f32, &mut Pixel)) {
-        let edge = |value: f32, limit: i32| ((value * self.scale) as i32).clamp(0, limit);
-        let (left, top) = (edge(rect.0 - 1.0, self.width), edge(rect.1 - 1.0, self.height));
-        let (right, bottom) = (edge(rect.2 + 2.0, self.width), edge(rect.3 + 2.0, self.height));
+    pub fn each(&mut self, rect: (f32, f32, f32, f32), mut paint: impl FnMut(f32, f32, &mut Pixel)) {
+        let clip = self.clip;
+        let edge = |value: f32, least: i32, most: i32| ((value * self.scale) as i32).clamp(least, most.max(least));
+        let (left, top) = (edge(rect.0 - 1.0, clip.0, clip.2), edge(rect.1 - 1.0, clip.1, clip.3));
+        let (right, bottom) = (edge(rect.2 + 2.0, clip.0, clip.2), edge(rect.3 + 2.0, clip.1, clip.3));
         for py in top..bottom {
             for px in left..right {
                 let at = py as usize * self.stride + px as usize;
@@ -153,7 +170,8 @@ impl Surface<'_> {
             for x in 0..block.w {
                 let (px, py) = (left + x, top + y);
                 let cover = block.cover[(y * block.w + x) as usize];
-                if cover == [0; 3] || px < 0 || py < 0 || px >= self.width || py >= self.height {
+                let clip = self.clip;
+                if cover == [0; 3] || px < clip.0 || py < clip.1 || px >= clip.2 || py >= clip.3 {
                     continue;
                 }
                 let at = py as usize * self.stride + px as usize;

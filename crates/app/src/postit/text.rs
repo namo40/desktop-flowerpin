@@ -232,6 +232,22 @@ impl Drop for Painter {
     }
 }
 
+/// 한 줄짜리 글의 너비(px)만 잰다. 칸에 맞춰 글을 줄일 때 쓴다.
+pub fn width(text: &str, pixels: i32, bold: bool) -> i32 {
+    let font = font_with(FACE, pixels, bold, CLEARTYPE_QUALITY);
+    let text = wide(text);
+    unsafe {
+        let dc = CreateCompatibleDC(null_mut());
+        let old_font = SelectObject(dc, font);
+        let mut rect = RECT { left: 0, top: 0, right: 4096, bottom: 0 };
+        DrawTextW(dc, text.as_ptr(), -1, &mut rect, DT_SINGLELINE | DT_NOPREFIX | DT_CALCRECT);
+        SelectObject(dc, old_font);
+        DeleteDC(dc);
+        DeleteObject(font);
+        rect.right
+    }
+}
+
 /// 미리 그려 둔 글자. 픽셀마다 빨강·초록·파랑이 덮인 정도(0~255)가 들어 있다.
 /// 기울이지 않는 곳(알림 설정 판 같은 곳)에 쓴다.
 #[derive(Default)]

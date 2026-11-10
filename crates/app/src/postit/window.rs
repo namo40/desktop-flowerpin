@@ -26,15 +26,15 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     GetCapture, ReleaseCapture, SetCapture, SetFocus, TRACKMOUSEEVENT, TrackMouseEvent,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, CS_DBLCLKS, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow,
-    GetWindowTextLengthW, GetWindowTextW, HWND_BOTTOM, HWND_NOTOPMOST, HWND_TOP, HWND_TOPMOST, IDC_ARROW, IDC_HAND,
-    IDC_SIZEALL, IDC_SIZENWSE, LoadCursorW, MA_NOACTIVATE, MF_CHECKED, MF_SEPARATOR, MF_STRING, PostMessageW,
-    RegisterClassExW, SW_SHOW, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SendMessageW,
-    SetCursor, SetForegroundWindow, SetWindowPos, ShowWindow, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON,
-    TrackPopupMenuEx, ULW_ALPHA, UPDATELAYEREDWINDOWINFO, UpdateLayeredWindowIndirect, WM_ACTIVATE, WM_CAPTURECHANGED,
-    WM_CLOSE, WM_CTLCOLOREDIT, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_NULL,
-    WM_RBUTTONUP, WM_SETCURSOR, WM_SETFONT, WNDCLASSEXW, WS_CHILD, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
-    WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
+    AppendMenuW, CS_DBLCLKS, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow, GWL_EXSTYLE,
+    GetWindowLongW, GetWindowTextLengthW, GetWindowTextW, HWND_BOTTOM, HWND_NOTOPMOST, HWND_TOP, HWND_TOPMOST,
+    IDC_ARROW, IDC_HAND, IDC_SIZEALL, IDC_SIZENWSE, LoadCursorW, MA_NOACTIVATE, MF_CHECKED, MF_SEPARATOR, MF_STRING,
+    PostMessageW, RegisterClassExW, SW_SHOW, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
+    SendMessageW, SetCursor, SetForegroundWindow, SetWindowPos, SetWindowTextW, ShowWindow, TPM_NONOTIFY,
+    TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenuEx, ULW_ALPHA, UPDATELAYEREDWINDOWINFO, UpdateLayeredWindowIndirect,
+    WM_ACTIVATE, WM_CAPTURECHANGED, WM_CLOSE, WM_COMMAND, WM_CTLCOLOREDIT, WM_KEYDOWN, WM_LBUTTONDBLCLK,
+    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_NULL, WM_RBUTTONUP, WM_SETCURSOR, WM_SETFONT,
+    WNDCLASSEXW, WS_CHILD, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
 };
 
 use crate::win::wide;
@@ -50,8 +50,16 @@ const WM_MOUSEWHEEL: u32 = 0x020A;
 const TME_LEAVE: u32 = 2;
 /// 여러 줄 입력 칸의 생김새: 여러 줄, 세로로 저절로 넘김, Enter로 줄 바꿈.
 const EDIT_STYLE: u32 = 0x0004 | 0x0040 | 0x1000;
+/// 한 줄 입력 칸의 생김새: 글이 길어지면 옆으로 넘긴다.
+const LINE_STYLE: u32 = 0x0080;
 const EM_SETSEL: u32 = 0x00B1;
 const EM_SETLIMITTEXT: u32 = 0x00C5;
+/// 입력 칸의 글이 바뀌었다는 알림.
+const EN_CHANGE: usize = 0x0300;
+/// Esc 키.
+pub const KEY_ESCAPE: u32 = 0x1B;
+/// Enter 키.
+pub const KEY_ENTER: u32 = 0x0D;
 
 /// 포스트잇 창에서 일어난 일. `x`, `y`는 창 안의 좌표(px)다.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -82,8 +90,19 @@ pub enum Event {
     Menu {
         hwnd: HWND,
     },
-    /// 글을 적는 칸에서 다른 곳으로 갔거나 Esc를 눌렀다.
-    EditDone,
+    /// 글을 적는 칸에서 다른 곳으로 갔거나 Esc를 눌렀다. `host`는 그 칸을 담은 창이다.
+    EditDone {
+        host: HWND,
+    },
+    /// 글을 적는 칸의 글이 바뀌었다.
+    EditChanged {
+        host: HWND,
+    },
+    /// 키보드를 받는 창(메모 목록)에서 키를 눌렀다.
+    Key {
+        hwnd: HWND,
+        key: u32,
+    },
     /// 마우스 휠을 굴렸다. 위로 굴리면 양수다.
     Wheel {
         hwnd: HWND,
@@ -268,6 +287,41 @@ pub fn show(hwnd: HWND) {
     unsafe { ShowWindow(hwnd, SW_SHOWNOACTIVATE) };
 }
 
+/// 누르면 앞으로 나오고 키보드를 받는 창을 만든다. 메모 목록이 이런 창이다.
+/// 포스트잇과 같은 종류라서 그리는 법과 일어난 일을 받는 법은 같다. 작업표시줄에는 나오지 않는다.
+pub fn create_active(at: (i32, i32), size: (i32, i32)) -> HWND {
+    let class = wide(NOTE_CLASS);
+    unsafe {
+        CreateWindowExW(
+            WS_EX_LAYERED | WS_EX_TOOLWINDOW,
+            class.as_ptr(),
+            class.as_ptr(),
+            WS_POPUP,
+            at.0,
+            at.1,
+            size.0,
+            size.1,
+            null_mut(),
+            null_mut(),
+            GetModuleHandleW(null()),
+            null(),
+        )
+    }
+}
+
+/// 키보드를 받는 창을 보여 주고 앞으로 가져온다. 확인용으로 도는 중이면 쓰던 창의 입력을 가져오지 않는다.
+pub fn show_active(hwnd: HWND) {
+    unsafe {
+        if QUIET.load(Ordering::Relaxed) {
+            ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+            SetWindowPos(hwnd, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        } else {
+            ShowWindow(hwnd, SW_SHOW);
+            SetForegroundWindow(hwnd);
+        }
+    }
+}
+
 pub fn destroy(hwnd: HWND) {
     unsafe { DestroyWindow(hwnd) };
 }
@@ -353,6 +407,31 @@ impl Editor {
         font: HFONT,
         top: bool,
     ) -> Editor {
+        Editor::build(owner, rect, text, colors, font, top, (EDIT_STYLE, 300))
+    }
+
+    /// 한 줄만 적는 칸. 메모 목록의 찾기 칸에 쓴다. 글자는 `limit`자까지다.
+    pub fn open_line(
+        owner: HWND,
+        rect: (i32, i32, i32, i32),
+        text: &str,
+        colors: (COLORREF, COLORREF),
+        font: HFONT,
+        limit: usize,
+    ) -> Editor {
+        Editor::build(owner, rect, text, colors, font, false, (LINE_STYLE, limit))
+    }
+
+    /// `kind`는 입력 칸의 생김새와 적을 수 있는 글자 수다.
+    fn build(
+        owner: HWND,
+        rect: (i32, i32, i32, i32),
+        text: &str,
+        colors: (COLORREF, COLORREF),
+        font: HFONT,
+        top: bool,
+        kind: (u32, usize),
+    ) -> Editor {
         let brush = unsafe { CreateSolidBrush(colors.0) };
         EDIT_PAINT.set((brush, colors.0, colors.1));
         let (host_class, edit_class) = (wide(HOST_CLASS), wide("EDIT"));
@@ -375,7 +454,7 @@ impl Editor {
                 instance,
                 null(),
             );
-            let style = WS_CHILD | WS_VISIBLE | EDIT_STYLE;
+            let style = WS_CHILD | WS_VISIBLE | kind.0;
             let edit = CreateWindowExW(
                 0,
                 edit_class.as_ptr(),
@@ -391,7 +470,7 @@ impl Editor {
                 null(),
             );
             SendMessageW(edit, WM_SETFONT, font as WPARAM, 1);
-            SendMessageW(edit, EM_SETLIMITTEXT, 300, 0);
+            SendMessageW(edit, EM_SETLIMITTEXT, kind.1, 0);
             // 커서를 글의 끝에 둔다.
             SendMessageW(edit, EM_SETSEL, 32_767, 32_767);
             if QUIET.load(Ordering::Relaxed) {
@@ -408,6 +487,16 @@ impl Editor {
     /// 글을 적는 칸의 창.
     pub fn edit(&self) -> HWND {
         self.edit
+    }
+
+    /// 글을 적는 칸을 담은 창. 이 창에서 일어난 일인지 가리는 데 쓴다.
+    pub fn host(&self) -> HWND {
+        self.host
+    }
+
+    /// 적힌 글을 바꾼다. 글이 바뀌었다는 알림이 따라온다.
+    pub fn set_text(&self, text: &str) {
+        unsafe { SetWindowTextW(self.edit, wide(text).as_ptr()) };
     }
 
     /// 적힌 글을 모두 고른다. 여러 줄 입력 칸은 Ctrl+A를 스스로 처리하지 않아서 따로 해 준다.
@@ -437,7 +526,19 @@ impl Drop for Editor {
 unsafe extern "system" fn note_proc(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     let at = || ((lparam & 0xFFFF) as i16 as i32, ((lparam >> 16) & 0xFFFF) as i16 as i32);
     match message {
-        WM_MOUSEACTIVATE => MA_NOACTIVATE as LRESULT,
+        // 포스트잇과 판은 눌러도 쓰던 창의 포커스를 빼앗지 않는다. 메모 목록은 보통 창처럼 앞으로 나온다.
+        WM_MOUSEACTIVATE if unsafe { GetWindowLongW(hwnd, GWL_EXSTYLE) } as u32 & WS_EX_NOACTIVATE != 0 => {
+            MA_NOACTIVATE as LRESULT
+        }
+        WM_KEYDOWN => {
+            push(Event::Key { hwnd, key: wparam as u32 });
+            0
+        }
+        // Alt+F4처럼 닫으라는 말은 Esc를 누른 것으로 친다. 창을 없애는 것은 앱이 한다.
+        WM_CLOSE => {
+            push(Event::Key { hwnd, key: KEY_ESCAPE });
+            0
+        }
         // 누른 동안은 커서가 창 밖으로 나가도 움직임을 계속 받는다. 끌어서 옮기려면 그래야 한다.
         WM_LBUTTONDOWN => {
             unsafe { SetCapture(hwnd) };
@@ -515,12 +616,17 @@ unsafe extern "system" fn host_proc(hwnd: HWND, message: u32, wparam: WPARAM, lp
         }
         // 다른 창으로 갔다(low word가 0이면 비활성). 적기를 마친다.
         WM_ACTIVATE if wparam & 0xFFFF == 0 => {
-            push(Event::EditDone);
+            push(Event::EditDone { host: hwnd });
             0
         }
         // 여러 줄 입력 칸은 Esc를 누르면 주인 창에 닫으라고 알린다.
         WM_CLOSE => {
-            push(Event::EditDone);
+            push(Event::EditDone { host: hwnd });
+            0
+        }
+        // 입력 칸이 글이 바뀌었다고 알려 왔다(high word가 알림의 종류).
+        WM_COMMAND if (wparam >> 16) & 0xFFFF == EN_CHANGE => {
+            push(Event::EditChanged { host: hwnd });
             0
         }
         _ => unsafe { DefWindowProcW(hwnd, message, wparam, lparam) },
