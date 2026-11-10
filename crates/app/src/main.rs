@@ -15,6 +15,7 @@ mod motions;
 mod scale;
 mod shadow;
 mod stage;
+mod tray;
 mod win;
 
 use std::collections::VecDeque;
@@ -28,6 +29,7 @@ use dfp_pack::PackError;
 use frames::Frames;
 use motions::{MotionId, Motions};
 use stage::Stage;
+use tray::{MenuItem, Tray, TrayEvent};
 use windows_sys::Win32::Foundation::HWND;
 
 /// 깨어난 김에 함께 넘기는 범위. 이 시간 안에 넘길 장은 조금 일찍 지금 넘긴다.
@@ -64,6 +66,19 @@ fn main() {
     let options = dev::Options::from_args();
     let mut report = dev::Report::default();
     win::enable_per_monitor_dpi();
+
+    // 앱은 하나만 실행한다. 이미 실행 중이면 그쪽에 알리고 끝낸다.
+    // 정한 시간만 돌고 끝나는 확인용 실행은 막지 않는다. 재는 동안 다른 실행이 떠 있어도 되게 하려는 것이다.
+    let _instance = if options.run_for.is_none() {
+        let Some(instance) = tray::claim() else {
+            report.add("이미 실행 중이라 끝냅니다");
+            report.write(&options);
+            return;
+        };
+        Some(instance)
+    } else {
+        None
+    };
 
     let result = Frames::load().and_then(|mut frames| run(&mut frames, &options, &mut report));
     if let Err(error) = result {
@@ -145,6 +160,15 @@ fn run(frames: &mut Frames, options: &dev::Options, report: &mut dev::Report) ->
     report.add(format!("꽃핀 {}명, 배율 {} (크기 {}%)", characters.len(), characters[0].scale(), options.size));
     report.add(format!("창 {}x{}", characters[0].window().width(), characters[0].window().height()));
 
+    // 트레이 아이콘은 서 있는 그림(idle2의 첫 장)의 얼굴로 만든다.
+    let icon_size = tray::icon_size();
+    let face = frames.portrait(motions.clip(motions.idle2).first_frame, icon_size as usize)?;
+    let tray = Tray::new(&face, icon_size);
+    report.add(match tray.icon_rect() {
+        Some(rect) => format!("트레이 아이콘 {}x{} 등록됨", rect.w, rect.h),
+        None => "트레이 아이콘이 등록되지 않음".to_string(),
+    });
+
     let timer = WakeTimer::new();
     let mut pace = dev::Pace::default();
     let mut trace = dev::Trace::default();
@@ -155,6 +179,7 @@ fn run(frames: &mut Frames, options: &dev::Options, report: &mut dev::Report) ->
     let mut script_origin = (0.0, 0.0);
     let mut pointer = Pointer::Idle;
     let mut quitting: Option<Instant> = None;
+    let mut hellos = 0;
     let deadline = options.run_for.map(|d| started + d);
 
     loop {
@@ -173,6 +198,7 @@ fn run(frames: &mut Frames, options: &dev::Options, report: &mut dev::Report) ->
         };
         let mut quit_asked = false;
         let mut stage_changed = false;
+        let mut menu_at = None;
 
         // 1. 창에서 온 일: 누르기, 끌기, 떼기, 모니터가 바뀜.
         for event in character_window::take_events() {
@@ -218,10 +244,23 @@ fn run(frames: &mut Frames, options: &dev::Options, report: &mut dev::Report) ->
                         _ => {}
                     }
                 }
-                // 메뉴가 생길 때까지는 오른쪽 클릭이 끝내기다.
-                WindowEvent::Menu { .. } => quit_asked = true,
+                WindowEvent::Menu { x, y } => menu_at = Some((x, y)),
                 WindowEvent::StageChanged => stage_changed = true,
             }
+        }
+        for event in tray::take_events() {
+            match event {
+                TrayEvent::Menu { x, y } => menu_at = Some((x, y)),
+                TrayEvent::TaskbarCreated => tray.add(),
+                // 앱을 한 번 더 켰다. 꽃핀이 어디 있는지 알려 주는 일은 아직 하지 않는다.
+                TrayEvent::Hello => hellos += 1,
+            }
+        }
+        // 꽃핀을 오른쪽 클릭해도 트레이 아이콘과 같은 메뉴가 뜬다. 메뉴가 떠 있는 동안에는 여기서 기다린다.
+        if let Some((x, y)) = menu_at
+            && tray.pick(x, y) == Some(MenuItem::Quit)
+        {
+            quit_asked = true;
         }
         // 누른 채로 가만히 있어도 시간이 지나면 잡는다.
         if let Pointer::Pressing { hwnd, since, .. } = pointer
@@ -334,6 +373,9 @@ fn run(frames: &mut Frames, options: &dev::Options, report: &mut dev::Report) ->
     }
     if let Some(usage) = &usage {
         report.add(usage.summary());
+    }
+    if hellos > 0 {
+        report.add(format!("실행 중에 앱을 한 번 더 켠 횟수 {hellos}"));
     }
     trace.lines().into_iter().for_each(|line| report.add(line));
     Ok(())

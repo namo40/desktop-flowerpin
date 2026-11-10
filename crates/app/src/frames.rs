@@ -32,6 +32,39 @@ impl Frames {
         &self.pack
     }
 
+    /// `frame`번 장의 윗부분을 한 변이 `size`인 작은 그림으로 줄인다. 트레이 아이콘으로 쓴다.
+    ///
+    /// 장의 너비만큼을 위에서부터 정사각형으로 잘라 쓴다. 서 있는 그림이면 얼굴이 들어온다.
+    /// 결과는 미리 곱한 알파의 BGRA다.
+    pub fn portrait(&mut self, frame: usize, size: usize) -> Result<Vec<u32>, PackError> {
+        self.decoder.decode(&self.pack, frame, &mut self.indices)?;
+        let info = &self.pack.frames()[frame];
+        let palette = &self.pack.motions()[info.motion as usize].palette;
+        let (w, h) = (info.w as usize, info.h as usize);
+        let side = w.min(h);
+        let left = (w - side) / 2;
+        let mut out = vec![0u32; size * size];
+        for (i, pixel) in out.iter_mut().enumerate() {
+            // 작은 그림의 픽셀 하나가 덮는 원본 범위를 평균한다.
+            let (ox, oy) = (i % size, i / size);
+            let (x0, x1) = (left + ox * side / size, left + ((ox + 1) * side).div_ceil(size));
+            let (y0, y1) = (oy * side / size, ((oy + 1) * side).div_ceil(size));
+            let mut sum = [0u32; 4];
+            for y in y0..y1 {
+                for &index in &self.indices[y * w + x0..y * w + x1] {
+                    let color = palette[index as usize];
+                    for (channel, total) in sum.iter_mut().enumerate() {
+                        *total += (color >> (channel * 8)) & 255;
+                    }
+                }
+            }
+            let count = ((x1 - x0) * (y1 - y0)) as u32;
+            let mean = sum.map(|total| (total + count / 2) / count);
+            *pixel = mean[3] << 24 | mean[2] << 16 | mean[1] << 8 | mean[0];
+        }
+        Ok(out)
+    }
+
     /// 장이 칸 안에서 차지하는 범위.
     fn rect(&self, frame: usize) -> Rect {
         let f = &self.pack.frames()[frame];
