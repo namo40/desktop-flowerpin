@@ -1,8 +1,8 @@
 //! 저장소에 그림, 그림 팩, 키가 들어가지 않게 지키는 검사.
 //!
 //! 한 번이라도 커밋되면 지워도 git 기록에서 되살릴 수 있다. 그래서 지금 git이 따라가는 파일뿐 아니라
-//! 지난 커밋에 있던 파일 이름까지 본다. 예외는 둘뿐이다: 대체 그림 팩을 두는 `placeholder/` 폴더와,
-//! 바로 가기 단추에 쓰는 아이콘 셋([`LINK_ICONS`]).
+//! 지난 커밋에 있던 파일 이름까지 본다. 예외는 셋뿐이다: 대체 그림 팩을 두는 `placeholder/` 폴더,
+//! 바로 가기 단추에 쓰는 아이콘 셋([`LINK_ICONS`]), README에 쓰는 화면 그림 셋([`README_IMAGES`]).
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -37,8 +37,37 @@ const LINK_ICONS: [&str; 3] =
     ["crates/app/res/icons/chzzk.png", "crates/app/res/icons/naver_cafe.png", "crates/app/res/icons/youtube.png"];
 const LINK_ICON_SIDE: u32 = 96;
 
+/// README에 쓰는 화면 그림과 그 너비, 높이. 실행 중인 프로그램의 화면을 찍은 것이다. 꽃핀이 찍혀 있지만
+/// 그림 팩의 원본은 아니어서 저장소에 둔다. 이 이름의 파일만, 이 크기일 때만 받는다.
+const README_IMAGES: [(&str, u32, u32); 3] = [
+    ("docs/images/buttons.png", 660, 390),
+    ("docs/images/desktop.png", 1020, 780),
+    ("docs/images/hello.png", 960, 500),
+];
+const README_IMAGE_LIMIT: usize = 1024 * 1024;
+
 fn is_allowed(path: &str) -> bool {
-    path.starts_with("placeholder/") || LINK_ICONS.contains(&path)
+    path.starts_with("placeholder/")
+        || LINK_ICONS.contains(&path)
+        || README_IMAGES.iter().any(|(name, ..)| *name == path)
+}
+
+/// 폴더에 있는 파일을 저장소 뿌리에서 본 경로로, 이름 차례대로 돌려준다.
+fn files_in(folder: &str) -> Vec<String> {
+    let mut found: Vec<String> = std::fs::read_dir(repo_root().join(folder))
+        .expect(folder)
+        .map(|entry| format!("{folder}/{}", entry.expect("파일").file_name().to_string_lossy()))
+        .collect();
+    found.sort();
+    found
+}
+
+/// PNG 파일의 바이트 수와 너비, 높이. 너비와 높이는 첫 덩어리(IHDR)에 있다.
+fn read_png(path: &str) -> (usize, u32, u32) {
+    let bytes = std::fs::read(repo_root().join(path)).expect(path);
+    assert!(bytes.starts_with(b"\x89PNG\r\n\x1a\n"), "{path}: PNG가 아님");
+    let number = |at: usize| u32::from_be_bytes(bytes[at..at + 4].try_into().expect("4바이트"));
+    (bytes.len(), number(16), number(20))
 }
 
 fn has_forbidden_extension(path: &str) -> bool {
@@ -84,20 +113,26 @@ fn history_holds_no_art() {
 /// 비켜 가지 못하게 한다.
 #[test]
 fn icon_folder_holds_only_the_link_icons() {
-    let folder = repo_root().join("crates/app/res/icons");
-    let mut found: Vec<String> = std::fs::read_dir(&folder)
-        .expect("아이콘 폴더")
-        .map(|entry| format!("crates/app/res/icons/{}", entry.expect("파일").file_name().to_string_lossy()))
-        .collect();
-    found.sort();
-    assert_eq!(found, LINK_ICONS);
+    assert_eq!(files_in("crates/app/res/icons"), LINK_ICONS);
     for path in LINK_ICONS {
-        let bytes = std::fs::read(repo_root().join(path)).expect(path);
-        assert!(bytes.starts_with(b"\x89PNG\r\n\x1a\n"), "{path}: PNG가 아님");
-        // PNG의 첫 덩어리(IHDR)에 너비와 높이가 있다.
-        let number = |at: usize| u32::from_be_bytes(bytes[at..at + 4].try_into().expect("4바이트"));
-        assert_eq!((number(16), number(20)), (LINK_ICON_SIDE, LINK_ICON_SIDE), "{path}");
-        assert!(bytes.len() < 16 * 1024, "{path}: 아이콘치고 너무 큼");
+        let (bytes, width, height) = read_png(path);
+        assert_eq!((width, height), (LINK_ICON_SIDE, LINK_ICON_SIDE), "{path}");
+        assert!(bytes < 16 * 1024, "{path}: 아이콘치고 너무 큼");
+    }
+}
+
+/// 화면 그림 폴더에는 정해 둔 그림 셋만 있고, README가 그 셋을 모두 쓴다. 다른 그림을 이 폴더에 넣어 검사를
+/// 비켜 가지 못하게 한다.
+#[test]
+fn image_folder_holds_only_the_readme_images() {
+    let names: Vec<&str> = README_IMAGES.iter().map(|(name, ..)| *name).collect();
+    assert_eq!(files_in("docs/images"), names);
+    let readme = std::fs::read_to_string(repo_root().join("README.md")).expect("README.md");
+    for (path, width, height) in README_IMAGES {
+        let (bytes, found_width, found_height) = read_png(path);
+        assert_eq!((found_width, found_height), (width, height), "{path}");
+        assert!(bytes < README_IMAGE_LIMIT, "{path}: 화면 그림치고 너무 큼");
+        assert!(readme.contains(&format!("]({path})")), "{path}: README에서 쓰지 않는 그림");
     }
 }
 
@@ -131,4 +166,7 @@ fn guard_catches_what_it_should() {
     assert!(!has_forbidden_extension("crates/app/src/main.rs"));
     assert!(is_allowed("placeholder/pack.dfpk"));
     assert!(!is_allowed("crates/placeholder/pack.dfpk"));
+    assert!(is_allowed("docs/images/hello.png"));
+    assert!(!is_allowed("docs/images/other.png"));
+    assert!(!is_allowed("docs/hello.png"));
 }
