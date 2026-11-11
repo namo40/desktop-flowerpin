@@ -130,7 +130,7 @@ impl Status {
 pub fn status_line(status: Status, enabled: bool) -> String {
     match status {
         Status::Unknown if enabled => "새 버전이 있는지 아직 확인하지 않았습니다.".to_string(),
-        Status::Unknown => "새 버전 확인을 꺼 두었습니다. 아래 단추로 확인할 수 있습니다.".to_string(),
+        Status::Unknown => "새 버전 확인을 껐습니다. 아래 단추로 확인할 수 있습니다.".to_string(),
         Status::Asking => "새 버전이 있는지 확인하는 중입니다.".to_string(),
         Status::Current => "가장 새 버전을 쓰고 있습니다.".to_string(),
         Status::Newer(version) => format!("새 버전이 나왔습니다: {version}"),
