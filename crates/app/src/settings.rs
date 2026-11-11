@@ -23,6 +23,7 @@ pub enum Key {
     IdleActions,
     Stay,
     MaxCharacters,
+    Visits,
     LiveCheck,
     LiveCheckInterval,
     LiveStartNotice,
@@ -32,7 +33,7 @@ pub enum Key {
 }
 
 /// 항목 수.
-pub const COUNT: usize = 12;
+pub const COUNT: usize = 13;
 
 /// 파일에 적는 값.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -120,6 +121,8 @@ pub const SPECS: [Spec; COUNT] = [
         ],
         8,
     ),
+    // 꽃핀이 저절로 놀러 오는 사이(분). 그 절반에서 한 배 반 사이에 한 번씩 온다. 0이면 오지 않는다.
+    choice(Key::Visits, "visit_minutes", 1, &[number("안 옴", 0), number("가끔", 8), number("자주", 3)], 1),
     // 방송
     flag(Key::LiveCheck, "live_check", 2, true),
     choice(Key::LiveCheckInterval, "live_check_min", 2, &[number("1분", 1), number("3분", 3), number("5분", 5)], 0),
@@ -288,6 +291,10 @@ mod tests {
         assert_eq!(settings.habits(), Habits::default());
         assert_eq!(settings.number(Key::MaxCharacters), 9);
         assert_eq!(settings.number(Key::Stay), 30);
+        assert_eq!(
+            (settings.number(Key::Visits), spec(Key::Visits).picks[settings.get(Key::Visits)].label),
+            (8, "가끔")
+        );
         assert_eq!(spec(Key::LiveStartNotice).picks[settings.get(Key::LiveStartNotice)].label, "말풍선 + Windows 알림");
         assert_eq!(spec(Key::LiveEndNotice).picks[settings.get(Key::LiveEndNotice)].label, "말풍선만");
         assert_eq!(

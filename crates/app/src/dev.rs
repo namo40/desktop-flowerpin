@@ -178,6 +178,8 @@ pub enum Command {
     /// `crowd`: 꽃핀이 몇 명인지와, 화면에서 앞에 있는 차례를 보고서에 적는다. `--settings-shot`을 줬으면
     /// 꽃핀들을 그 차례대로 겹쳐 그린 그림도 쓴다.
     Crowd,
+    /// `visit`: 꽃핀이 저절로 놀러 올 때가 지금 됐다고 친다.
+    Visit,
     /// `fan ...`: 꽃핀 머리 위에 부채꼴로 뜨는 단추들을 다룬다.
     Fan(FanStep),
     /// `settings ...`: 설정 창을 다룬다.
@@ -377,6 +379,7 @@ pub fn parse_script(text: &str) -> Result<Vec<Step>, String> {
             (Some("fullscreen"), 3) if words[2] == "on" || words[2] == "off" => Command::Fullscreen(words[2] == "on"),
             (Some("lock"), 3) if words[2] == "on" || words[2] == "off" => Command::Lock(words[2] == "on"),
             (Some("hello"), 2) => Command::Hello,
+            (Some("visit"), 2) => Command::Visit,
             (Some("hide"), 3) => Command::Hide(number(2)?),
             (Some("menu"), 3) => Command::Menu(number(2)? as u32),
             (Some("target"), 3) => Command::Target(number(2)? as usize),
@@ -871,6 +874,7 @@ mod tests {
             .map(Command::Memo)
         );
         assert_eq!(parse_script("1 bubble dismiss").unwrap()[0].command, Command::BubbleDismiss);
+        assert_eq!(parse_script("1 visit").unwrap()[0].command, Command::Visit);
         // 꽃핀 머리 위의 단추들.
         let fan = parse_script(
             "1 fan open; 2 fan open 2; 3 fan hover chzzk; 4 fan press send; 5 fan leave; 6 fan settle; 7 fan close",
