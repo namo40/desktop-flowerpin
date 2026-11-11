@@ -331,17 +331,17 @@ pub fn move_to(hwnd: HWND, at: (i32, i32)) {
     unsafe { SetWindowPos(hwnd, null_mut(), at.0, at.1, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE) };
 }
 
-/// 창이 놓이는 층을 정한다. `top`이면 다른 창들보다 늘 위에, 아니면 다른 창들 뒤(바탕화면 바로 위)에 둔다.
+/// 창이 놓이는 층을 정한다. `top`이면 다른 창들보다 늘 위에 둔다. 아니면 보통 창처럼 창들의 앞뒤 차례 안에
+/// 둔다. 늘 위에 있던 창은 보통 창들의 맨 앞에 놓이므로, 보이던 것이 갑자기 다른 창 뒤로 숨지 않는다.
+/// 그 뒤로는 다른 창을 누르면 그 창에 가려진다.
 pub fn set_layer(hwnd: HWND, top: bool) {
     let flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE;
-    unsafe {
-        if top {
-            SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, flags);
-        } else {
-            SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0, flags);
-            SetWindowPos(hwnd, HWND_BOTTOM, 0, 0, 0, 0, flags);
-        }
-    }
+    unsafe { SetWindowPos(hwnd, if top { HWND_TOPMOST } else { HWND_NOTOPMOST }, 0, 0, 0, 0, flags) };
+}
+
+/// 다른 창들 뒤(바탕화면 바로 위)로 보낸다.
+pub fn lower(hwnd: HWND) {
+    unsafe { SetWindowPos(hwnd, HWND_BOTTOM, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE) };
 }
 
 /// 다른 창들 앞으로 한 번 가져온다. 늘 위에 두는 것은 아니어서, 다른 창을 누르면 그 창에 다시 가려진다.

@@ -510,8 +510,14 @@ impl Postits {
         let note = &self.notes[last];
         window::show(note.hwnd);
         window::set_layer(note.hwnd, note.top);
-        if born && !note.top && !self.quiet {
-            window::raise(note.hwnd);
+        if !note.top {
+            // 새로 붙인 포스트잇은 쓰던 창들 앞에 붙는다. 앱을 켤 때 다시 붙이는 포스트잇은 쓰던 창들을 가리지
+            // 않게 맨 뒤(바탕화면 바로 위)에 붙는다. 확인용으로 도는 중에도 쓰던 창들을 가리지 않는다.
+            if born && !self.quiet {
+                window::raise(note.hwnd);
+            } else {
+                window::lower(note.hwnd);
+            }
         }
         if born {
             self.wake();
@@ -910,6 +916,10 @@ impl Postits {
                 let Some(index) = self.find(hwnd) else { return };
                 let (u, v) = local(x, y, self.notes[index].scale);
                 let hit = draw::hit(&self.look(&self.notes[index]), u, v);
+                // 늘 위에 두지 않는 포스트잇은 보통 창처럼, 누르면 다른 창들 앞으로 나온다.
+                if hit.is_some() && !self.notes[index].top && !self.quiet {
+                    window::raise(self.notes[index].hwnd);
+                }
                 let phase = self.notes[index].phase;
                 let cursor = win::cursor_position();
                 match hit {
