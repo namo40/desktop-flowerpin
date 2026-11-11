@@ -1,4 +1,8 @@
-//! 치지직에 꽃핀 방송 상태를 묻는다. 이 앱이 인터넷을 쓰는 곳은 여기 하나뿐이다.
+//! 치지직에 꽃핀 방송 상태를 묻는다. 이 앱이 인터넷을 쓰는 코드는 여기 하나뿐이다.
+//!
+//! 묻는 곳은 둘이다. 치지직(방송 상태, 정해 둔 간격마다)과 GitHub(새 버전이 나왔는지, 하루에 한 번).
+//! 새 버전은 [`ask_once`]로 묻고, 무엇을 묻고 답을 어떻게 읽는지는 [`crate::update`]에 있다. 아래는 방송 상태를
+//! 묻는 쪽의 이야기다.
 //!
 //! 묻는 일은 따로 둔 스레드가 한다. 연결이 느리거나 끊겨도 꽃핀이 멈추지 않게 하려는 것이다.
 //! 이 스레드는 시킬 때만 한 번 묻고 다시 잔다. 언제 물을지는 메인 루프가 정한다.
@@ -34,7 +38,7 @@ use crate::win::wide;
 /// 기다리는 한계(ms). 주소 찾기와 연결은 5초, 보내기와 받기는 10초다.
 const CONNECT_TIMEOUT: i32 = 5_000;
 const TRANSFER_TIMEOUT: i32 = 10_000;
-/// 응답 본문은 1.5KB쯤이다. 이보다 훨씬 크면 다른 것이 온 것이므로 읽다가 그만둔다.
+/// 응답 본문은 방송 상태가 1.5KB쯤, 릴리스 정보가 몇 KB다. 이보다 훨씬 크면 다른 것이 온 것이므로 읽다가 그만둔다.
 const BODY_LIMIT: usize = 64 * 1024;
 
 /// 방송 상태를 묻는 스레드와 이어진 끈. 버리면 스레드도 끝난다.
@@ -54,7 +58,8 @@ impl Checker {
             // 꽃핀을 그리는 일보다 뒤로 미룬다.
             unsafe { SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_LOWEST) };
             while ordered.recv().is_ok() {
-                let reply = fetch().map_or(Reply::Failed, |(status, body)| live::judge(status, &body));
+                let answer = fetch(live::HOST, &live::path());
+                let reply = answer.map_or(Reply::Failed, |(status, body)| live::judge(status, &body));
                 if answers.send(reply).is_err() {
                     break;
                 }
@@ -76,6 +81,23 @@ impl Checker {
     }
 }
 
+/// 주소 하나를 한 번만 묻고 끝나는 스레드를 만든다. 새 버전 확인처럼 드물게 묻는 데 쓴다.
+///
+/// 답은 돌려준 끈으로 온다. HTTP 상태 번호와 응답 본문이고, 연결하지 못했으면 `None`이다. 답이 오면 `wake` 창에
+/// 빈 메시지를 보내 메인 루프를 깨운다. 방송 상태를 물을 때와 같이 쿠키와 로그인 정보를 보내지 않고, 다른
+/// 주소로 넘겨도 따라가지 않는다.
+pub fn ask_once(host: &'static str, path: &'static str, wake: HWND) -> Option<Receiver<Option<(u32, String)>>> {
+    let (answers, replies) = mpsc::channel();
+    let wake = wake as isize;
+    let run = move || {
+        unsafe { SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_LOWEST) };
+        let _ = answers.send(fetch(host, path));
+        unsafe { PostMessageW(wake as HWND, WM_NULL, 0, 0) };
+    };
+    thread::Builder::new().name("update-check".to_string()).spawn(run).ok()?;
+    Some(replies)
+}
+
 /// WinHTTP에서 받은 것. 버릴 때 닫는다.
 struct Handle(*mut c_void);
 
@@ -87,13 +109,13 @@ impl Drop for Handle {
     }
 }
 
-/// 방송 상태 주소를 한 번 불러 HTTP 상태 번호와 응답 본문을 돌려준다. 연결하지 못했거나 읽지 못했으면
+/// 주소 하나(`https://host/path`)를 한 번 불러 HTTP 상태 번호와 응답 본문을 돌려준다. 연결하지 못했거나 읽지 못했으면
 /// `None`이다. 상태 번호가 200이 아니면 본문은 읽지 않고 비워 둔다.
 ///
 /// 시스템의 프록시 설정과 TLS를 그대로 쓴다.
-fn fetch() -> Option<(u32, String)> {
+fn fetch(host: &str, path: &str) -> Option<(u32, String)> {
     let agent = wide(&format!("DesktopFlowerpin/{}", env!("CARGO_PKG_VERSION")));
-    let (host, verb, path) = (wide(live::HOST), wide("GET"), wide(&live::path()));
+    let (host, verb, path) = (wide(host), wide("GET"), wide(path));
     unsafe {
         let session = Handle(WinHttpOpen(agent.as_ptr(), WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, null(), null(), 0));
         if session.0.is_null() {

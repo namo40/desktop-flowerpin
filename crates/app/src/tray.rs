@@ -69,6 +69,8 @@ pub enum MenuItem {
     Settings,
     /// 방송 보러 가기. 방송 중일 때만 메뉴에 있다.
     Watch,
+    /// 새 버전을 받는 곳을 연다. 더 새 버전이 나와 있을 때만 메뉴에 있다.
+    Update,
     /// 새 메모를 포스트잇으로 붙인다.
     MemoNew,
     /// 포스트잇을 모두 다른 창들 앞으로 가져온다.
@@ -113,6 +115,7 @@ impl MenuItem {
             MenuItem::Hide(index) => 10 + index as u32,
             MenuItem::Unhide => 13,
             MenuItem::MemoList => 14,
+            MenuItem::Update => 15,
             MenuItem::CallMany(index) => 20 + index as u32,
             MenuItem::CallFill => 23,
             MenuItem::Link(index) => 100 + index as u32,
@@ -134,6 +137,7 @@ impl MenuItem {
             10..=12 => Some(MenuItem::Hide((id - 10) as usize)),
             13 => Some(MenuItem::Unhide),
             14 => Some(MenuItem::MemoList),
+            15 => Some(MenuItem::Update),
             20..=22 => Some(MenuItem::CallMany((id - 20) as usize)),
             23 => Some(MenuItem::CallFill),
             100.. if ((id - 100) as usize) < LINKS.len() => Some(MenuItem::Link((id - 100) as usize)),
@@ -206,6 +210,8 @@ pub struct MenuState<'a> {
     pub can_send: bool,
     /// 꽃핀을 잠깐 숨겨 둔 중이다. "잠깐 숨기기" 자리에 "다시 보이기"를 넣는다.
     pub hidden: bool,
+    /// 더 새 버전이 나와 있으면 그 버전. 있으면 맨 위에 "새 버전 받기"를 넣는다.
+    pub update: Option<&'a str>,
 }
 
 /// 화면의 `(x, y)`에 메뉴를 띄우고, 고른 것을 돌려준다. 메뉴가 닫힐 때까지 돌아오지 않는다.
@@ -229,6 +235,13 @@ pub fn pick(owner: HWND, x: i32, y: i32, state: &MenuState) -> Option<MenuItem> 
 fn build(state: &MenuState) -> Option<HMENU> {
     unsafe {
         let menu = CreatePopupMenu();
+        if let Some(version) = state.update
+            && !menu.is_null()
+        {
+            let label = wide(&format!("새 버전 받기 ({version})"));
+            AppendMenuW(menu, MF_STRING, MenuItem::Update.id() as usize, label.as_ptr());
+            AppendMenuW(menu, MF_SEPARATOR, 0, null());
+        }
         if let Some((title, details)) = state.live {
             let info = CreatePopupMenu();
             if !menu.is_null() && !info.is_null() {
@@ -733,7 +746,8 @@ mod tests {
 
     #[test]
     fn the_menu_lists_what_can_be_done_now() {
-        let state = |can_call, can_send| MenuState { live: None, can_call, can_send, hidden: false, room: 3 };
+        let state =
+            |can_call, can_send| MenuState { live: None, can_call, can_send, hidden: false, room: 3, update: None };
         let names = |state: &MenuState| {
             let menu = build(state).expect("메뉴");
             let read = marked(lines(menu));
@@ -766,13 +780,16 @@ mod tests {
         let live = ("제목 & 제목".to_string(), "게임 · 시청자 10명".to_string());
         let on_air = MenuState { live: Some(&live), ..state(true, true) };
         assert_eq!(names(&on_air)[..3], ["● 방송 중", "-", "꽃핀 초대하기"]);
+        // 더 새 버전이 나와 있으면 받는 길이 그보다도 위에 들어간다.
+        let newer = MenuState { update: Some("0.2.0"), ..state(true, true) };
+        assert_eq!(names(&newer)[..3], ["새 버전 받기 (0.2.0)", "-", "꽃핀 초대하기"]);
     }
 
     #[test]
     fn several_can_be_invited_at_once() {
         use windows_sys::Win32::UI::WindowsAndMessaging::GetSubMenu;
         let read = |room: usize| {
-            let state = MenuState { live: None, can_call: true, can_send: false, hidden: false, room };
+            let state = MenuState { live: None, can_call: true, can_send: false, hidden: false, room, update: None };
             let menu = build(&state).expect("메뉴");
             // "꽃핀 초대하기" 바로 아래 줄에 딸린 메뉴다.
             let names = marked(lines(unsafe { GetSubMenu(menu, 1) }));
@@ -788,7 +805,7 @@ mod tests {
     #[test]
     fn menu_numbers_are_unique_and_read_back() {
         let memos = [MenuItem::MemoNew, MenuItem::MemoShow, MenuItem::MemoTidy, MenuItem::MemoList];
-        let mut items = vec![MenuItem::Quit, MenuItem::Settings, MenuItem::Watch];
+        let mut items = vec![MenuItem::Quit, MenuItem::Settings, MenuItem::Watch, MenuItem::Update];
         items.extend(memos);
         items.extend([MenuItem::CallOne, MenuItem::SendAll, MenuItem::SendThis, MenuItem::Unhide]);
         items.extend((0..CALLS.len()).map(MenuItem::CallMany));
@@ -802,7 +819,7 @@ mod tests {
             assert_eq!(MenuItem::from_id(item.id()), Some(*item));
             assert!(items[..n].iter().all(|other| other.id() != item.id()), "{item:?}");
         }
-        for id in [0, 15, 19, 24, 99, 100 + LINKS.len() as u32, 199, 200 + Show::ALL.len() as u32] {
+        for id in [0, 16, 19, 24, 99, 100 + LINKS.len() as u32, 199, 200 + Show::ALL.len() as u32] {
             assert_eq!(MenuItem::from_id(id), None, "{id}");
         }
     }

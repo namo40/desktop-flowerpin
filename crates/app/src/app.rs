@@ -9,6 +9,7 @@
 use std::cell::Cell;
 use std::collections::VecDeque;
 use std::ptr::null_mut;
+use std::sync::mpsc::{Receiver, TryRecvError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use dfp_pack::PackError;
@@ -22,7 +23,7 @@ use crate::autostart;
 use crate::bubble::{Bubble, Speech};
 use crate::character::{self, Character, Look, Stay};
 use crate::character_window::{self, WindowEvent};
-use crate::checker::Checker;
+use crate::checker::{self, Checker};
 use crate::clock::WakeTimer;
 use crate::desktop::Desktop;
 use crate::dev;
@@ -38,6 +39,7 @@ use crate::settings_window::{self, DialogEvent, SettingsWindow, TAB_NAMES};
 use crate::stage::Stage;
 use crate::store::{self, State, Store};
 use crate::tray::{self, MenuItem, Tray, TrayEvent};
+use crate::update;
 use crate::usage::{self, Meter};
 use crate::watch::{self, Watch, WatchEvent};
 use crate::when::When;
@@ -75,6 +77,8 @@ const HELD_TAG: &str = "held";
 const HELD_LASTS: Duration = Duration::from_secs(10);
 /// 방송 안내 말풍선의 이름. 방송이 끝나거나 새 방송이 시작되면 이 이름으로 버린다.
 const LIVE_TAG: &str = "live";
+/// 새 버전이 나왔다는 안내의 이름.
+const UPDATE_TAG: &str = "update";
 /// 방송이 끝났다는 말풍선이 떠 있는 시간.
 const LIVE_END_LASTS: Duration = Duration::from_secs(10);
 /// 메뉴에 적는 방송 제목의 가장 긴 길이(글자 수).
@@ -132,6 +136,21 @@ pub enum Flow {
     ConfirmDelete(u64),
     /// 이 메모의 포스트잇을 오른쪽 클릭했다. 화면의 이 자리에 메뉴를 띄운다.
     MemoMenu(u64, i32, i32),
+}
+
+/// 새 버전 확인에 딸린 것들.
+struct UpdateWatch {
+    /// 물어 놓고 답을 기다리는 끈. 묻는 중이 아니면 없다.
+    waiting: Option<Receiver<Option<(u32, String)>>>,
+    /// 저절로 다음에 물을 때.
+    due: Instant,
+    /// 지금 아는 것.
+    status: update::Status,
+}
+
+/// 지금 시각(유닉스 초).
+fn unix_now() -> i64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |since| since.as_secs() as i64)
 }
 
 /// 방송 상태 확인에 딸린 것들.
@@ -197,6 +216,7 @@ pub struct App {
     face: Vec<u32>,
     icon_size: i32,
     live: LiveWatch,
+    update: UpdateWatch,
     /// 처음 켰을 때의 안내를 하는 중인가.
     greeting: bool,
     window: Option<SettingsWindow>,
@@ -366,6 +386,14 @@ impl App {
             tip: String::new(),
             toast_opens: false,
         };
+        // 지난번에 알아낸 것이 지금 쓰는 것보다 새 버전이면 알고 시작한다. 켜고 조금 뒤에, 그리고 마지막으로
+        // 물은 지 하루가 지났을 때 묻는다.
+        let first = update::wait(state.update_checked, unix_now()).max(update::FIRST);
+        let update = UpdateWatch {
+            waiting: None,
+            due: started + Duration::from_secs(first),
+            status: update::Status::remembered(state.update_latest.as_deref(), update::Version::current()),
+        };
 
         let seed = options
             .seed
@@ -392,6 +420,7 @@ impl App {
             face,
             icon_size,
             live,
+            update,
             greeting: false,
             window: None,
             memos,
@@ -543,6 +572,13 @@ impl App {
         } else {
             "방송 상태 확인: 켜짐. 확인용 실행이라 인터넷은 쓰지 않음".to_string()
         });
+        lines.push(if !self.update_enabled() {
+            "새 버전 확인: 꺼짐".to_string()
+        } else if self.update_online() {
+            format!("새 버전 확인: 하루에 한 번 {}에 물음", update::HOST)
+        } else {
+            "새 버전 확인: 켜짐. 확인용 실행이라 인터넷은 쓰지 않음".to_string()
+        });
         let pending = self.memos.list().iter().filter(|memo| memo.next.is_some()).count();
         lines.push(format!("메모 {}개, 알릴 것 {pending}개", self.memos.list().len()));
         lines.push(match self.tray.icon_rect() {
@@ -575,11 +611,14 @@ impl App {
                 self.live.tracker = Tracker::new(self.live.tracker.announced().map(str::to_string));
                 self.live.checked = None;
             }
-            if self.notices.cancel(LIVE_TAG) | self.notices.cancel(GREET_LIVE_TAG) {
+            // 인터넷을 쓴다는 안내는 인터넷을 쓰는 일이 하나도 남지 않았을 때 치운다.
+            let nothing_online = !self.update_enabled();
+            if self.notices.cancel(LIVE_TAG) | (nothing_online && self.notices.cancel(GREET_LIVE_TAG)) {
                 self.close_bubble(now);
             }
         }
         self.show_live();
+        self.show_update();
         self.sync_autostart(now);
         self.store.settings_changed(now);
     }
@@ -639,12 +678,20 @@ impl App {
         };
         let hello = "나를 오른쪽 클릭하면 메뉴가 나와요.".to_string();
         self.notices.push(note("안녕!", hello, Some(GREET_LASTS), GREET_TAG));
+        // 인터넷을 쓰는 일을 알린다. 방송 상태 확인과 새 버전 확인이다.
+        let mut uses = Vec::new();
         if self.live_enabled() {
-            let body = format!(
-                "방송이 켜지면 알려 주려고 {}분마다 치지직에 물어봐요. 치지직의 공식 API는 아니에요. 설정에서 끌 수 있어요.",
+            uses.push(format!(
+                "방송이 켜지면 알려 주려고 {}분마다 치지직에 물어봐요. 치지직의 공식 API는 아니에요.",
                 self.settings.number(Key::LiveCheckInterval)
-            );
-            self.notices.push(note("방송 알림", body, None, GREET_LIVE_TAG));
+            ));
+        }
+        if self.update_enabled() {
+            uses.push("새 버전이 나왔는지는 하루에 한 번 GitHub에 물어봐요.".to_string());
+        }
+        if !uses.is_empty() {
+            uses.push("설정에서 끌 수 있어요.".to_string());
+            self.notices.push(note("인터넷을 이렇게 써요", uses.join(" "), None, GREET_LIVE_TAG));
         }
         self.greeting = true;
     }
@@ -692,6 +739,111 @@ impl App {
             self.live.waiting = true;
             self.note(now, "방송 상태를 물음".to_string());
         }
+    }
+
+    /// 새 버전 확인이 켜져 있는가.
+    fn update_enabled(&self) -> bool {
+        self.settings.is_on(Key::UpdateCheck)
+    }
+
+    /// GitHub에 진짜로 물어도 되는가. 정한 시간만 도는 확인용 실행은 시켰을 때만 묻는다.
+    fn update_online(&self) -> bool {
+        self.quitting.is_none() && (self.dev.options.run_for.is_none() || self.dev.options.update_check)
+    }
+
+    /// 새 버전이 나왔는지 저절로 물을 시각. 묻지 않을 때는 `None`이다.
+    fn update_due(&self) -> Option<Instant> {
+        let asks = self.update_enabled() && self.update_online() && self.update.waiting.is_none();
+        // 처음 켰을 때는 인터넷을 쓴다는 안내를 띄운 뒤부터 묻는다.
+        (asks && !self.notices.is_waiting(GREET_LIVE_TAG)).then_some(self.update.due)
+    }
+
+    /// GitHub에서 온 답을 받고, 때가 됐으면 새 버전이 나왔는지 묻는다.
+    fn check_update(&mut self, now: Instant) {
+        if let Some(waiting) = &self.update.waiting {
+            match waiting.try_recv() {
+                Ok(answer) => {
+                    self.update.waiting = None;
+                    let reply = answer.map_or(update::Reply::Failed, |(status, body)| update::judge(status, &body));
+                    self.update_reply(reply, now);
+                }
+                Err(TryRecvError::Empty) => {}
+                // 묻는 스레드가 답 없이 끝났다.
+                Err(TryRecvError::Disconnected) => {
+                    self.update.waiting = None;
+                    self.update_reply(update::Reply::Failed, now);
+                }
+            }
+        }
+        if self.update_due().is_some_and(|due| now >= due) {
+            self.ask_update(now);
+        }
+    }
+
+    /// 새 버전이 나왔는지 GitHub에 묻는다. 답은 나중에 온다. 설정 창의 단추를 눌렀을 때도 부른다.
+    fn ask_update(&mut self, now: Instant) {
+        if self.update.waiting.is_some() {
+            return;
+        }
+        // 답이 오지 않아도 한동안은 다시 묻지 않는다. 답이 오면 그때 다음 때를 다시 잡는다.
+        self.update.due = now + Duration::from_secs(update::RETRY);
+        if !self.update_online() {
+            self.note(now, "새 버전을 묻지 않음: 확인용 실행이라 인터넷을 쓰지 않음".to_string());
+            return;
+        }
+        self.update.waiting = checker::ask_once(update::HOST, update::PATH, self.tray.hwnd());
+        if self.update.waiting.is_some() {
+            self.note(now, format!("새 버전이 나왔는지 물음: {}", update::HOST));
+        }
+        self.show_update();
+    }
+
+    /// 새 버전에 대한 답 하나를 받아, 알릴 일이 있으면 알린다.
+    fn update_reply(&mut self, reply: update::Reply, now: Instant) {
+        self.update.status = self.update.status.after(reply, update::Version::current());
+        self.note(now, format!("새 버전에 대한 답: {reply:?}"));
+        if reply != update::Reply::Failed {
+            // 답을 받았다. 하루 뒤에 다시 묻는다. 앱을 다시 켜도 하루에 한 번만 묻게 받은 때를 적어 둔다.
+            self.update.due = now + Duration::from_secs(update::EVERY as u64);
+            self.state.update_checked = Some(unix_now());
+            self.state.update_latest = match reply {
+                update::Reply::Latest(version) => Some(version.to_string()),
+                _ => None,
+            };
+            self.store.state_changed(now);
+        }
+        // 새 버전은 버전마다 한 번만 말풍선으로 알린다. 그 뒤에는 메뉴와 설정 창에서 볼 수 있다.
+        if let Some(version) = self.update.status.newer().map(|version| version.to_string())
+            && self.state.update_announced.as_deref() != Some(version.as_str())
+        {
+            self.notices.push(Notice {
+                kind: Kind::Note,
+                speech: Speech {
+                    title: "새 버전이 나왔어요".to_string(),
+                    body: format!("{version} 버전을 받을 수 있어요. 누르면 받는 곳이 열려요."),
+                },
+                lasts: None,
+                click: Click::Open(update::RELEASES_URL.to_string()),
+                tag: Some(UPDATE_TAG),
+            });
+            self.state.update_announced = Some(version);
+            self.store.state_changed(now);
+        }
+        self.show_update();
+    }
+
+    /// 설정 창의 새 버전 줄과 단추를 지금 아는 것에 맞춘다.
+    fn show_update(&self) {
+        if let Some(window) = &self.window {
+            let status = if self.update.waiting.is_some() { update::Status::Asking } else { self.update.status };
+            let line = update::status_line(status, self.update_enabled());
+            window.set_update_status(&line, self.update.status.newer().is_some());
+        }
+    }
+
+    /// 더 새 버전이 나와 있으면 그 버전. 메뉴 맨 위에 받는 길을 넣는다.
+    pub fn update_menu(&self) -> Option<String> {
+        self.update.status.newer().map(|version| version.to_string())
     }
 
     /// 방송 상태에 대한 답 하나를 받아, 알릴 일이 있으면 알린다.
@@ -1420,6 +1572,7 @@ impl App {
         // 6. 치지직에서 온 답을 받고, 때가 됐으면 방송 상태를 다시 묻는다. 화면을 쓰지 않는 동안에는 쉰다.
         if !self.is_paused() {
             self.check_live(now);
+            self.check_update(now);
         }
 
         // 7. 알릴 때가 된 메모를 알린다. 그리고 포스트잇에서 온 일을 처리하고 움직이는 포스트잇을 그린다.
@@ -1879,6 +2032,7 @@ impl App {
         sooner(self.store.due());
         sooner(self.notices.closes_at());
         sooner(self.live_due().filter(|_| !paused));
+        sooner(self.update_due().filter(|_| !paused));
         sooner((self.memos.has_pending() && self.quitting.is_none() && !paused).then_some(self.next_memo_check));
         sooner(self.postits.due());
         sooner(self.guests_due());
@@ -1924,6 +2078,7 @@ impl App {
             }
             Some(MenuItem::Settings) => self.open_settings(),
             Some(MenuItem::Watch) => self.watch(now),
+            Some(MenuItem::Update) => self.open(update::RELEASES_URL),
             Some(MenuItem::MemoNew) => self.new_memo(win::cursor_position()),
             Some(MenuItem::MemoShow) => self.postits.show_all(),
             Some(MenuItem::MemoTidy) => self.postits.tidy(),
@@ -2054,6 +2209,7 @@ impl App {
         self.next_usage = Instant::now();
         self.meter = Meter::start();
         self.show_live();
+        self.show_update();
     }
 
     fn close_settings(&mut self, now: Instant) {
@@ -2100,6 +2256,8 @@ impl App {
                 }
             }
             DialogEvent::OpenProject => self.open(links::PROJECT_URL),
+            DialogEvent::CheckUpdate => self.ask_update(now),
+            DialogEvent::GetUpdate => self.open(update::RELEASES_URL),
         }
         None
     }
@@ -2167,6 +2325,15 @@ impl App {
                     self.bubble_clicked();
                 }
             }
+            dev::Command::Update(step) => match step {
+                dev::UpdateStep::Latest(version) => {
+                    let latest = update::Version::parse(&version);
+                    self.update_reply(latest.map_or(update::Reply::Failed, update::Reply::Latest), now);
+                }
+                dev::UpdateStep::Nothing => self.update_reply(update::Reply::Nothing, now),
+                dev::UpdateStep::Fail => self.update_reply(update::Reply::Failed, now),
+                dev::UpdateStep::Ask => self.ask_update(now),
+            },
             dev::Command::Live(reply) => {
                 let reply = match reply {
                     dev::LiveReply::Open { opened, title } => {

@@ -32,6 +32,7 @@ pub enum Key {
     StartWithWindows,
     Size,
     AlwaysOnTop,
+    UpdateCheck,
     IdleActions,
     Stay,
     MaxCharacters,
@@ -44,7 +45,7 @@ pub enum Key {
 }
 
 /// 항목 수.
-pub const COUNT: usize = 12;
+pub const COUNT: usize = 13;
 
 /// 파일에 적는 값.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -111,6 +112,8 @@ pub const SPECS: [Spec; COUNT] = [
     flag(Key::StartWithWindows, "start_with_windows", 0, false),
     choice(Key::Size, "size", 0, &[number("작게", 75), number("보통", 100), number("크게", 125)], 1),
     flag(Key::AlwaysOnTop, "always_on_top", 0, true),
+    // 새 버전이 나왔는지 하루에 한 번 GitHub에 묻는다.
+    flag(Key::UpdateCheck, "update_check", 0, true),
     // 꽃핀
     choice(Key::IdleActions, "idle_actions", 1, &[number("적게", 50), number("보통", 100), number("자주", 200)], 1),
     // 더 부른 꽃핀이 머무는 시간(초). 0이면 보낼 때까지 머문다.
@@ -293,6 +296,7 @@ mod tests {
         let settings = Settings::default();
         assert!(!settings.is_on(Key::StartWithWindows));
         assert!(settings.is_on(Key::AlwaysOnTop));
+        assert!(settings.is_on(Key::UpdateCheck));
         assert_eq!(settings.size_percent(), 100);
         assert_eq!(settings.habits(), Habits::default());
         assert_eq!(settings.number(Key::MaxCharacters), CROWD_MAX);

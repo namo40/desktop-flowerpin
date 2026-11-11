@@ -32,6 +32,7 @@ mod stage;
 mod store;
 mod text;
 mod tray;
+mod update;
 mod usage;
 mod watch;
 mod when;
@@ -80,10 +81,12 @@ fn run(options: dev::Options) -> Result<Vec<String>, PackError> {
                 // 트레이 아이콘을 오른쪽 클릭했을 때의 메뉴.
                 let owner = app.menu_owner();
                 let live = app.live_menu();
+                let update = app.update_menu();
                 let state = tray::MenuState {
                     live: live.as_ref(),
                     can_call: app.can_call(),
                     room: app.room(),
+                    update: update.as_deref(),
                     can_send: app.can_send(),
                     hidden: app.is_tucked(),
                 };

@@ -52,6 +52,9 @@ const ID_MEMORY: i32 = 1511;
 const ID_CPU: i32 = 1512;
 const ID_OPEN_FOLDER: i32 = 1521;
 const ID_OPEN_PROJECT: i32 = 1522;
+const ID_CHECK_UPDATE: i32 = 1523;
+const ID_GET_UPDATE: i32 = 1524;
+const ID_UPDATE_STATUS: i32 = 1541;
 
 pub const TAB_NAMES: [&str; 5] = ["일반", "꽃핀", "방송", "방해하지 않기", "정보"];
 /// 정보 탭. 되돌릴 설정이 없다.
@@ -109,6 +112,7 @@ const CONTROLS: [Control; settings::COUNT] = [
     check(Key::StartWithWindows, 1101),
     combo(Key::Size, 1103, 1112, None),
     check(Key::AlwaysOnTop, 1104),
+    check(Key::UpdateCheck, 1106),
     combo(Key::IdleActions, 1203, 1212, None),
     field(Key::Stay, 1205, 1214),
     field(Key::MaxCharacters, 1206, 1215),
@@ -138,6 +142,10 @@ pub enum DialogEvent {
     OpenFolder,
     /// 이 앱의 GitHub 페이지를 연다.
     OpenProject,
+    /// "새 버전 확인"을 눌렀다. 지금 한 번 묻는다.
+    CheckUpdate,
+    /// "새 버전 받으러 가기"를 눌렀다. 릴리스 페이지를 연다.
+    GetUpdate,
 }
 
 thread_local! {
@@ -247,6 +255,8 @@ impl SettingsWindow {
             SendMessageW(hwnd, WM_SETICON, 1, icon as LPARAM);
             SendMessageW(hwnd, WM_SETICON, 0, small as LPARAM);
             SendDlgItemMessageW(window.pages[INFO_TAB], ID_ICON, STM_SETICON, icon as WPARAM, 0);
+            // 받으러 가는 단추는 새 버전이 나와 있을 때만 누를 수 있다. 앱이 아는 것에 맞춰 켠다.
+            EnableWindow(window.item(ID_GET_UPDATE), 0);
         }
 
         dialog::center_on(hwnd, center);
@@ -384,6 +394,14 @@ impl SettingsWindow {
         }
     }
 
+    /// 정보 탭의 새 버전 줄을 고치고, 받으러 가는 단추를 새 버전이 나와 있을 때만 누를 수 있게 한다.
+    pub fn set_update_status(&self, text: &str, newer: bool) {
+        if self.text(ID_UPDATE_STATUS) != text {
+            self.set_text(ID_UPDATE_STATUS, text);
+        }
+        unsafe { EnableWindow(self.item(ID_GET_UPDATE), newer as i32) };
+    }
+
     /// 정보 탭의 "지금 쓰는 자원"을 고친다. 메모리는 MiB, CPU는 한 코어를 100으로 본 값이다.
     pub fn set_usage(&self, memory: f64, cpu: f64) {
         self.set_text(ID_MEMORY, &format!("{memory:.1} MB"));
@@ -511,6 +529,8 @@ unsafe extern "system" fn page_proc(_page: HWND, message: u32, wparam: WPARAM, _
             (BN_CLICKED, id) if links.contains(&id) => push(DialogEvent::Link((id - ID_FIRST_LINK) as usize)),
             (BN_CLICKED, ID_OPEN_FOLDER) => push(DialogEvent::OpenFolder),
             (BN_CLICKED, ID_OPEN_PROJECT) => push(DialogEvent::OpenProject),
+            (BN_CLICKED, ID_CHECK_UPDATE) => push(DialogEvent::CheckUpdate),
+            (BN_CLICKED, ID_GET_UPDATE) => push(DialogEvent::GetUpdate),
             // 체크 상자를 눌렀거나, 콤보 상자에서 골랐거나, 칸에 적은 글이 바뀌었다.
             (BN_CLICKED, _) | (CBN_SELCHANGE, _) | (EN_CHANGE, _) => push(DialogEvent::Changed),
             (EN_KILLFOCUS, _) => push(DialogEvent::Tidy),

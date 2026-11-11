@@ -74,6 +74,8 @@ pub struct Options {
     pub settings_shot: Option<PathBuf>,
     /// 정한 시간만 도는 확인용 실행에서도 치지직에 진짜로 묻는다. 주지 않으면 확인용 실행은 인터넷을 쓰지 않는다.
     pub live_check: bool,
+    /// 정한 시간만 도는 확인용 실행에서도 새 버전이 나왔는지 GitHub에 진짜로 묻는다.
+    pub update_check: bool,
     /// 확인용 실행에서도 처음 켰을 때의 안내를 한다.
     pub greet: bool,
     /// 확인용 실행에서도 Windows 알림을 진짜로 띄운다. 주지 않으면 보고서에 적기만 한다.
@@ -117,6 +119,7 @@ impl Options {
             settings_dump: value("--settings-dump").map(PathBuf::from),
             settings_shot: value("--settings-shot").map(PathBuf::from),
             live_check: args.iter().any(|a| a == "--live-check"),
+            update_check: args.iter().any(|a| a == "--update-check"),
             greet: args.iter().any(|a| a == "--greet"),
             toast: args.iter().any(|a| a == "--toast"),
             screen_check: args.iter().any(|a| a == "--screen-check"),
@@ -192,6 +195,9 @@ pub enum Command {
     /// `live open 2026-11-10 13:00:00 제목`, `live close`, `live fail`, `live moved`, `live refused`: 치지직에서
     /// 그런 답을 받은 것으로 친다. 인터넷을 쓰지 않고 방송 안내를 확인하는 데 쓴다. 시작 시각이 같으면 같은 방송이다.
     Live(LiveReply),
+    /// `update latest 0.2.0`, `update none`, `update fail`: GitHub에서 그런 답을 받은 것으로 친다. 인터넷을 쓰지 않고
+    /// 새 버전 안내를 확인하는 데 쓴다. `update ask`: 설정 창의 "새 버전 확인"을 누른 것으로 친다.
+    Update(UpdateStep),
     /// `toast click`: Windows 알림을 클릭한 것으로 친다.
     ToastClick,
     /// `bubble dismiss`: 떠 있는 말풍선을 오른쪽 클릭한 것으로 친다.
@@ -240,6 +246,19 @@ pub enum MemoStep {
     List(ListStep),
     /// `memo snap`: 지금 모습을 `--settings-shot`에 그림으로 쓰고, 보고서에 포스트잇마다 한 줄씩 적는다.
     Snap,
+}
+
+/// `--script`의 `update` 명령.
+#[derive(Clone, Debug, PartialEq)]
+pub enum UpdateStep {
+    /// 가장 새 릴리스가 이 버전이라는 답.
+    Latest(String),
+    /// 공개된 릴리스가 없다는 답.
+    Nothing,
+    /// 묻지 못했다.
+    Fail,
+    /// 지금 한 번 묻는다.
+    Ask,
 }
 
 /// `--script`의 `fan` 명령. 꽃핀을 오른쪽 클릭했을 때 머리 위에 뜨는 단추들을 다룬다.
@@ -470,6 +489,13 @@ pub fn parse_script(text: &str) -> Result<Vec<Step>, String> {
                 "fail" => LiveReply::Fail,
                 "moved" => LiveReply::Moved,
                 "refused" => LiveReply::Refused,
+                _ => return Err(bad()),
+            }),
+            (Some("update"), 4) if words[2] == "latest" => Command::Update(UpdateStep::Latest(words[3].to_string())),
+            (Some("update"), 3) => Command::Update(match words[2] {
+                "none" => UpdateStep::Nothing,
+                "fail" => UpdateStep::Fail,
+                "ask" => UpdateStep::Ask,
                 _ => return Err(bad()),
             }),
             (Some("settings"), _) => Command::Settings(match (words.get(2).copied(), words.len()) {
@@ -876,6 +902,10 @@ mod tests {
             .map(Command::Memo)
         );
         assert_eq!(parse_script("1 bubble dismiss").unwrap()[0].command, Command::BubbleDismiss);
+        let update = parse_script("1 update latest 0.2.0; 2 update none; 3 update fail; 4 update ask").unwrap();
+        let steps = [UpdateStep::Latest("0.2.0".to_string()), UpdateStep::Nothing, UpdateStep::Fail, UpdateStep::Ask];
+        assert_eq!(update.into_iter().map(|step| step.command).collect::<Vec<_>>(), steps.map(Command::Update));
+        assert!(parse_script("1 update").is_err() && parse_script("1 update later").is_err());
         // 꽃핀 머리 위의 단추들.
         let fan = parse_script(
             "1 fan open; 2 fan open 2; 3 fan hover chzzk; 4 fan press send; 5 fan leave; 6 fan settle; 7 fan close",

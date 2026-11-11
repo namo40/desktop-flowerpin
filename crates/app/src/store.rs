@@ -40,6 +40,12 @@ pub struct State {
     pub announced_live: Option<String>,
     /// 처음 켰을 때의 안내를 했는가.
     pub greeted: bool,
+    /// 새 버전이 나왔는지 마지막으로 알아낸 때(유닉스 초). 하루에 한 번만 묻는 데 쓴다.
+    pub update_checked: Option<i64>,
+    /// 그때 알아낸 가장 새 버전. 공개된 릴리스가 없었으면 없다.
+    pub update_latest: Option<String>,
+    /// 말풍선으로 알린 새 버전. 같은 버전을 또 알리지 않는 데 쓴다.
+    pub update_announced: Option<String>,
 }
 
 impl State {
@@ -53,7 +59,16 @@ impl State {
             // 응답에 적혀 있던 글이다. 따옴표 같은 것이 섞여 있어도 파일이 깨지지 않게 적는다.
             text.push_str(&format!(",\n  \"announced_live\": {}", Value::String(opened.clone())));
         }
-        text.push_str(&format!(",\n  \"greeted\": {}\n}}\n", self.greeted));
+        text.push_str(&format!(",\n  \"greeted\": {}", self.greeted));
+        if let Some(at) = self.update_checked {
+            text.push_str(&format!(",\n  \"update_checked\": {at}"));
+        }
+        for (name, version) in [("update_latest", &self.update_latest), ("update_announced", &self.update_announced)] {
+            if let Some(version) = version {
+                text.push_str(&format!(",\n  \"{name}\": {}", Value::String(version.clone())));
+            }
+        }
+        text.push_str("\n}\n");
         text
     }
 
@@ -67,6 +82,9 @@ impl State {
             settings_tab: object.get("settings_tab").and_then(Value::as_u64).map_or(0, |tab| tab as usize),
             announced_live: object.get("announced_live").and_then(Value::as_str).map(str::to_string),
             greeted: object.get("greeted").and_then(Value::as_bool).unwrap_or(false),
+            update_checked: object.get("update_checked").and_then(Value::as_i64),
+            update_latest: object.get("update_latest").and_then(Value::as_str).map(str::to_string),
+            update_announced: object.get("update_announced").and_then(Value::as_str).map(str::to_string),
         })
     }
 }
@@ -238,8 +256,15 @@ mod tests {
             // 따옴표와 역빗금이 섞여 있어도 그대로 돌아온다.
             announced_live: Some(r#"2026-11-09 "16:11:06" \"#.to_string()),
             greeted: true,
+            update_checked: Some(1_794_000_000),
+            update_latest: Some("0.2.0".to_string()),
+            update_announced: Some("0.2.0".to_string()),
         };
-        assert_eq!(State::from_json(&state.to_json()), Some(state));
+        assert_eq!(State::from_json(&state.to_json()), Some(state.clone()));
+        // 새 버전을 아직 알리지 않았으면 그 줄만 빠진다.
+        let unannounced = State { update_announced: None, ..state };
+        assert!(!unannounced.to_json().contains("update_announced"));
+        assert_eq!(State::from_json(&unannounced.to_json()), Some(unannounced));
         let empty = State::default();
         assert_eq!(State::from_json(&empty.to_json()), Some(empty));
     }
@@ -250,6 +275,9 @@ mod tests {
         let state = State::from_json(r#"{"character": {"x": 10}, "settings_tab": "two", "later": true}"#).unwrap();
         assert_eq!(state, State::default());
         let state = State::from_json(r#"{"announced_live": 20261109, "greeted": "yes"}"#).unwrap();
+        assert_eq!(state, State::default());
+        let state =
+            State::from_json(r#"{"update_checked": "어제", "update_latest": 2, "update_announced": []}"#).unwrap();
         assert_eq!(state, State::default());
         assert_eq!(State::from_json("not json"), None);
     }
