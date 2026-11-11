@@ -58,9 +58,12 @@ const RUB_JUMP: f64 = 120.0;
 const QUIT_LIMIT: Duration = Duration::from_secs(8);
 /// 보이는 다른 창들을 다시 읽는 간격. 꽃핀이 떠 있을 때(어디에 내려앉을지 알아야 한다), 창 위에 서 있을 때
 /// (그 자리가 가려졌는지 알아야 한다), 바닥에 있을 때(뛰어오를 곳만 알면 된다)의 차례다.
+///
+/// 바닥에서는 드물게 읽는다. 맨 앞 창이 바뀌거나, 창을 옮기거나 줄이면 Windows가 알려 주고, 그때 바로
+/// 다시 읽기 때문이다. 알림이 오지 않는 변화(창을 가득 채우기 같은 것)는 이 간격 안에 알게 된다.
 const SCAN_IN_AIR: Duration = Duration::from_millis(100);
 const SCAN_ON_PERCH: Duration = Duration::from_millis(250);
-const SCAN_ON_FLOOR: Duration = Duration::from_millis(1000);
+const SCAN_ON_FLOOR: Duration = Duration::from_millis(5000);
 /// 설정 창의 "지금 쓰는 자원"을 고치는 간격.
 const USAGE_EVERY: Duration = Duration::from_secs(1);
 /// 설정 창 정보 탭에 보여 줄 그림의 한 변(px).
@@ -1292,6 +1295,8 @@ impl App {
                     // 전체 화면 프로그램으로 넘어갔거나 거기서 나왔을 수 있다. 바로 다시 본다.
                     self.next_screen_check = now;
                 }
+                // 창의 자리가 달라졌다. 다음 걸음에서 바로 다시 읽는다.
+                WatchEvent::Moved => self.scanned = None,
             }
         }
         for event in settings_window::take_events() {
