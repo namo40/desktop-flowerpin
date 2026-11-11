@@ -944,6 +944,8 @@ impl App {
                 };
                 self.note(now, format!("꽃핀을 숨김: {why}"));
                 self.close_fan(now);
+                // 한동안 그릴 일이 없다. 풀어서 들고 있던 장들을 버려 메모리를 돌려준다.
+                self.frames.forget();
                 // 잡고 있던 꽃핀은 놓는다.
                 if let Pointer::Dragging { hwnd } = self.pointer
                     && let Some(index) = self.find(hwnd)
@@ -2280,6 +2282,7 @@ impl App {
             lines.push(format!("실행 중에 앱을 한 번 더 켠 횟수 {}", self.dev.hellos));
         }
         lines.push(format!("맨 앞 창이 바뀌었다는 알림 {}번", self.dev.foregrounds));
+        lines.push(format!("풀어서 들고 있는 장 {:.2}MiB", self.frames.kept_bytes() as f64 / 1_048_576.0));
         if !self.dev.scans.is_empty() {
             let total: Duration = self.dev.scans.iter().sum();
             let longest = self.dev.scans.iter().max().copied().unwrap_or_default();
