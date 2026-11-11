@@ -95,16 +95,34 @@ foreach ($guide in Get-ChildItem 'packaging' -Filter '*.txt') {
     [System.IO.File]::WriteAllText((Join-Path $stage $guide.Name), $text, $withBom)
 }
 
+# 파일을 하나씩 넣는다. 폴더를 통째로 묶는 함수는 Windows PowerShell에서 경로를 역슬래시로 적어서,
+# Windows 밖에서는 풀리지 않는 압축 파일이 된다.
+Add-Type -AssemblyName System.IO.Compression
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 $zip = Join-Path $out "$name.zip"
 $level = [System.IO.Compression.CompressionLevel]::Optimal
-[System.IO.Compression.ZipFile]::CreateFromDirectory($stage, $zip, $level, $true, [System.Text.Encoding]::UTF8)
+$stream = [System.IO.File]::Open($zip, [System.IO.FileMode]::Create)
+try {
+    $mode = [System.IO.Compression.ZipArchiveMode]::Create
+    $archive = New-Object System.IO.Compression.ZipArchive($stream, $mode, $false, [System.Text.Encoding]::UTF8)
+    try {
+        foreach ($file in Get-ChildItem $stage -File | Sort-Object Name) {
+            $inside = "DesktopFlowerpin/$($file.Name)"
+            [void][System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($archive, $file.FullName, $inside, $level)
+        }
+    } finally {
+        $archive.Dispose()
+    }
+} finally {
+    $stream.Dispose()
+}
 
 $values.ZIP_SHA256 = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
 $values.EXE_SHA256 = (Get-FileHash (Join-Path $stage 'DesktopFlowerpin.exe') -Algorithm SHA256).Hash.ToLower()
+# 올리는 파일의 값만 적는다. 그래야 받은 자리에서 `sha256sum -c`로 바로 견줄 수 있다.
+# 압축 파일 안에 든 실행 파일의 값은 릴리스 글에 적는다.
 $sums = Join-Path $out 'SHA256SUMS.txt'
-$lines = "$($values.ZIP_SHA256)  $name.zip`n$($values.EXE_SHA256)  DesktopFlowerpin.exe`n"
-[System.IO.File]::WriteAllText($sums, $lines, $withoutBom)
+[System.IO.File]::WriteAllText($sums, "$($values.ZIP_SHA256)  $name.zip`n", $withoutBom)
 $notes = Join-Path $out 'release-notes.md'
 $notesFrame = Join-Path (Get-Location) 'packaging\release-notes.md'
 [System.IO.File]::WriteAllText($notes, (Expand-Template $notesFrame $values), $withoutBom)
@@ -112,7 +130,8 @@ $notesFrame = Join-Path (Get-Location) 'packaging\release-notes.md'
 Write-Host ''
 Get-ChildItem $stage | ForEach-Object { '{0,12:N0}  {1}' -f $_.Length, $_.Name } | Write-Host
 '{0,12:N0}  -> {1}' -f (Get-Item $zip).Length, $zip | Write-Host
-Write-Host $lines
+Write-Host "$($values.ZIP_SHA256)  $name.zip"
+Write-Host "$($values.EXE_SHA256)  DesktopFlowerpin.exe"
 
 # ---------- 4. 릴리스 초안 ----------
 if ($Draft) {
