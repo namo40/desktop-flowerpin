@@ -37,7 +37,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     WNDCLASSEXW, WS_CHILD, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
 };
 
-use crate::win::wide;
+use crate::win::{fatal, wide};
 
 /// 확인하려고 스크립트로 돌리는 중이다. 적는 칸을 띄워도, 쓰고 있던 창에서 키보드 입력을 가져오지 않는다.
 pub static QUIET: AtomicBool = AtomicBool::new(false);
@@ -208,6 +208,10 @@ impl Canvas {
         let mut bits: *mut c_void = null_mut();
         unsafe {
             let bitmap = CreateDIBSection(self.dc, &info, DIB_RGB_COLORS, &mut bits, null_mut(), 0);
+            // 메모리나 그리기 자원이 바닥나면 만들지 못한다. 빈 버퍼에 그리려 들지 않고 알린 뒤 끝낸다.
+            if bitmap.is_null() || bits.is_null() {
+                fatal("포스트잇의 그림 버퍼를 만들지 못했습니다.");
+            }
             let old = SelectObject(self.dc, bitmap);
             if self.bitmap.is_null() {
                 self.old = old;

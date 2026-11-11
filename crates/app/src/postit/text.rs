@@ -27,7 +27,7 @@ use windows_sys::Win32::Graphics::Gdi::{
 
 pub use windows_sys::Win32::Graphics::Gdi::{DT_EDITCONTROL, DT_WORDBREAK};
 
-use crate::win::wide;
+use crate::win::{fatal, wide};
 
 pub const FACE: &str = "NanumGothic";
 const ICON_FACE: &str = "Segoe MDL2 Assets";
@@ -137,6 +137,10 @@ impl Painter {
         let mut bits: *mut c_void = null_mut();
         unsafe {
             let bitmap = CreateDIBSection(self.dc, &info, DIB_RGB_COLORS, &mut bits, null_mut(), 0);
+            // 메모리나 그리기 자원이 바닥나면 만들지 못한다. 빈 버퍼에 그리려 들지 않고 알린 뒤 끝낸다.
+            if bitmap.is_null() || bits.is_null() {
+                fatal("메모의 글자를 그릴 버퍼를 만들지 못했습니다.");
+            }
             let old = SelectObject(self.dc, bitmap);
             if self.bitmap.is_null() {
                 self.old = old;
