@@ -23,6 +23,9 @@
 //! # 그 밖에
 //!
 //! - 설정 창의 틀(`res/app.rc`)과 manifest를 exe에 넣는다. Windows SDK의 rc.exe가 있어야 한다.
+//! - 실행 파일의 아이콘을 만들어 넣는다. 넣을 팩에서 서 있는 그림의 얼굴을 여러 크기로 뽑아 아이콘 파일로
+//!   묶는다. 트레이 아이콘과 같은 그림이다. 아이콘 파일은 빌드 폴더(`target/`)에만 생기고 저장소에는 없다.
+//!   대체 그림 팩으로 빌드하면 아이콘도 도형이다.
 //! - 어느 커밋에서 빌드했는지를 `DFP_COMMIT`으로 넘긴다. 설정 창의 정보 탭에 보여 준다.
 
 use std::env;
@@ -31,10 +34,13 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use dfp_pack::{DEV_KEY, Header, KEY_LEN, Pack, key};
+use dfp_pack::{DEV_KEY, FrameDecoder, Header, KEY_LEN, Pack, icon, key};
 
 const PACK_NAME: &str = "flowerpin.dfpk";
 const KEY_NAME: &str = "pack.key";
+/// 실행 파일의 아이콘에 넣는 크기들(px). 탐색기와 작업표시줄이 화면 배율에 맞는 것을 골라 쓴다.
+/// 원래 그림보다 큰 것은 넣지 않는다. 늘리면 거칠어진다.
+const ICON_SIZES: [usize; 9] = [16, 20, 24, 32, 40, 48, 64, 96, 128];
 
 fn main() {
     println!("cargo::rerun-if-env-changed=DFP_PACK_DIR");
@@ -65,9 +71,10 @@ fn main() {
 
     let bytes = fs::read(&pack_path).unwrap_or_else(|e| panic!("{}: {e}", pack_path.display()));
     let header = Header::parse(&bytes).unwrap_or_else(|e| panic!("{}: {e}", pack_path.display()));
-    if let Err(e) = Pack::open(&bytes, &pack_key) {
-        panic!("{}: {e}. 키가 이 팩을 만든 키와 같은지 확인해 주세요", pack_path.display());
-    }
+    let (pack, mut decoder) = match Pack::open(&bytes, &pack_key) {
+        Ok(opened) => opened,
+        Err(e) => panic!("{}: {e}. 키가 이 팩을 만든 키와 같은지 확인해 주세요", pack_path.display()),
+    };
     if env::var("DFP_RELEASE").is_ok_and(|value| value == "1")
         && let Err(problem) = key::check_release(&pack_key, &header)
     {
@@ -85,9 +92,22 @@ fn main() {
     }
     fs::write(out.join("key_parts.rs"), code).expect("키 조각 쓰기");
 
+    // 실행 파일의 아이콘을 만든다. 틀에는 그 자리를 적어 넣어야 해서, 틀을 빌드 폴더에 옮겨 적고 그것을 넣는다.
+    fs::write(out.join("app.ico"), app_icon(&pack, &mut decoder)).expect("아이콘 쓰기");
+    let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
+    let written = |path: &Path| path.display().to_string().replace('\\', "/");
+    let frame = fs::read_to_string(manifest_dir.join("res/app.rc")).expect("res/app.rc 읽기");
+    let manifest_line = "1 24 \"app.manifest\"";
+    assert_eq!(frame.matches(manifest_line).count(), 1, "res/app.rc에서 manifest를 넣는 줄을 찾지 못했습니다");
+    let with_icon = format!(
+        "1 24 \"{}\"\n\n// 실행 파일의 아이콘. 빌드할 때 그림 팩에서 만든 것이다.\n1 ICON \"{}\"",
+        written(&manifest_dir.join("res/app.manifest")),
+        written(&out.join("app.ico"))
+    );
+    fs::write(out.join("app.rc"), frame.replace(manifest_line, &with_icon)).expect("틀 옮겨 적기");
     println!("cargo::rerun-if-changed=res/app.rc");
     println!("cargo::rerun-if-changed=res/app.manifest");
-    embed_resource::compile("res/app.rc", embed_resource::NONE)
+    embed_resource::compile(out.join("app.rc"), embed_resource::NONE)
         .manifest_required()
         .expect("설정 창의 틀(res/app.rc)을 넣지 못했습니다. Windows SDK의 rc.exe가 필요합니다");
 
@@ -98,6 +118,23 @@ fn main() {
     println!("cargo::rustc-env=DFP_COMMIT={commit}");
     // 커밋할 때마다 바뀌는 파일이다.
     println!("cargo::rerun-if-changed={}", root.join(".git/logs/HEAD").display());
+}
+
+/// 실행 파일의 아이콘 파일(.ico)을 만든다. 서 있는 그림(idle2의 첫 장)의 얼굴을 여러 크기로 뽑아 묶는다.
+fn app_icon(pack: &Pack, decoder: &mut FrameDecoder) -> Vec<u8> {
+    let frame = pack.motion_id("idle2").map_or(0, |id| pack.motions()[id as usize].first_frame);
+    let cell = pack.character().cell as usize;
+    let mut indices = vec![0u8; cell * cell];
+    let largest = icon::side(pack, frame);
+    let mut sizes: Vec<usize> = ICON_SIZES.into_iter().filter(|&size| size <= largest).collect();
+    if sizes.is_empty() {
+        sizes.push(ICON_SIZES[0]);
+    }
+    let picture = |size: usize| {
+        let pixels = icon::portrait(pack, decoder, &mut indices, frame, size);
+        (size, pixels.unwrap_or_else(|e| panic!("아이콘으로 쓸 장을 꺼내지 못했습니다: {e}")))
+    };
+    icon::encode(&sizes.into_iter().map(picture).collect::<Vec<_>>())
 }
 
 /// 진짜 그림 팩의 키를 읽는다. 환경 변수가 먼저고, 없으면 팩 옆의 키 파일을 본다.

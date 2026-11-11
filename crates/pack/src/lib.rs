@@ -45,6 +45,7 @@
 //! 판 1은 캐릭터 값에 바닥 점과 잡는 점이, 동작에 발 자리 보정과 가는 거리가 없었다. 배포된 적이 없어서
 //! 읽지 않는다.
 
+pub mod icon;
 pub mod key;
 mod read;
 #[cfg(feature = "write")]
