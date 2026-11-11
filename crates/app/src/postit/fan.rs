@@ -61,26 +61,31 @@ pub enum Pick {
     Invite,
     /// 이 꽃핀을 보낸다.
     Send,
-    /// 새 메모를 붙인다.
-    Memo,
+    /// 메모 목록 창을 연다.
+    Memos,
     /// 바로 가기: 치지직 방송, 유튜브, 팬카페.
     Chzzk,
     Youtube,
     Cafe,
+    /// 설정 창을 연다.
+    Settings,
 }
 
 impl Pick {
-    pub const ALL: [Pick; 6] = [Pick::Invite, Pick::Send, Pick::Memo, Pick::Chzzk, Pick::Youtube, Pick::Cafe];
+    /// 모든 단추. 왼쪽부터 놓이는 차례다.
+    pub const ALL: [Pick; 7] =
+        [Pick::Invite, Pick::Send, Pick::Memos, Pick::Chzzk, Pick::Youtube, Pick::Cafe, Pick::Settings];
 
     /// 마우스를 올리면 뜨는 이름.
     pub fn name(self) -> &'static str {
         match self {
             Pick::Invite => "초대하기",
             Pick::Send => "보내기",
-            Pick::Memo => "새 메모",
+            Pick::Memos => "메모 목록",
             Pick::Chzzk => "치지직 방송",
             Pick::Youtube => "유튜브",
             Pick::Cafe => "카페",
+            Pick::Settings => "설정",
         }
     }
 
@@ -89,19 +94,21 @@ impl Pick {
         match self {
             Pick::Invite => "invite",
             Pick::Send => "send",
-            Pick::Memo => "memo",
+            Pick::Memos => "memos",
             Pick::Chzzk => "chzzk",
             Pick::Youtube => "youtube",
             Pick::Cafe => "cafe",
+            Pick::Settings => "settings",
         }
     }
 
-    /// 아이콘 글꼴(Segoe MDL2 Assets)의 글자: 사람과 더하기, 문 밖으로 나가는 화살표, 귀퉁이가 접힌 쪽지.
+    /// 아이콘 글꼴(Segoe MDL2 Assets)의 글자: 사람과 더하기, 문 밖으로 나가는 화살표, 줄 목록, 톱니바퀴.
     fn glyph(self) -> Option<&'static str> {
         match self {
             Pick::Invite => Some("\u{E8FA}"),
             Pick::Send => Some("\u{F3B1}"),
-            Pick::Memo => Some("\u{E70B}"),
+            Pick::Memos => Some("\u{E8FD}"),
+            Pick::Settings => Some("\u{E713}"),
             Pick::Chzzk | Pick::Youtube | Pick::Cafe => None,
         }
     }
@@ -112,7 +119,7 @@ impl Pick {
             Pick::Chzzk => Some(include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/res/icons/chzzk.png"))),
             Pick::Youtube => Some(include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/res/icons/youtube.png"))),
             Pick::Cafe => Some(include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/res/icons/naver_cafe.png"))),
-            Pick::Invite | Pick::Send | Pick::Memo => None,
+            Pick::Invite | Pick::Send | Pick::Memos | Pick::Settings => None,
         }
     }
 }
@@ -551,9 +558,11 @@ mod tests {
 
     #[test]
     fn buttons_fan_out_with_the_middle_highest() {
-        for count in 1..=6 {
+        for count in 1..=Pick::ALL.len() {
             let spots = spread(count);
             assert_eq!(spots.len(), count);
+            // 단추를 모두 띄워도 반원을 넘지 않는다. 양 끝의 단추가 머리 옆으로 내려오지 않는다.
+            assert!(spots.iter().all(|spot| spot.1 < -BUTTON / 2.0), "{count}개: {spots:?}");
             // 이웃한 단추는 틈만큼 떨어져 있고, 모두 활의 중심에서 같은 거리에 있다.
             for pair in spots.windows(2) {
                 let apart = (pair[1].0 - pair[0].0).hypot(pair[1].1 - pair[0].1);
@@ -632,8 +641,11 @@ mod tests {
         let [blue, green, red, alpha] = at(cafe, 40, 60);
         assert!(green > 150 && red < 60 && blue < 140 && alpha == 255, "{:?}", at(cafe, 40, 60));
         assert_eq!(at(cafe, 95, 95)[3], 0);
-        // 글자로 그리는 단추에는 그림이 없다.
+        // 글자로 그리는 단추에는 그림이 없다. 단추마다 글자나 그림 가운데 하나가 있다.
         assert!(source(Pick::Invite).is_none() && Pick::Invite.glyph().is_some());
+        assert!(Pick::ALL.iter().all(|pick| pick.glyph().is_some() != pick.picture().is_some()));
+        // 맨 오른쪽은 설정이다.
+        assert_eq!(Pick::ALL.last(), Some(&Pick::Settings));
     }
 
     #[test]
@@ -655,7 +667,7 @@ mod tests {
     #[test]
     fn drawn_buttons_can_be_pressed() {
         text::load_fonts();
-        let buttons = [(Pick::Invite, false), (Pick::Send, true), (Pick::Memo, true), (Pick::Chzzk, true)];
+        let buttons = [(Pick::Invite, false), (Pick::Send, true), (Pick::Memos, true), (Pick::Settings, true)];
         let made = plan((1000, 600), SCREEN, 1.0, buttons.len());
         let mut fan = Fan::new(null_mut(), made.clone(), 1.0, &buttons);
         let (wide, tall) = fan.size_px();

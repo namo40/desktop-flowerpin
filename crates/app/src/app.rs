@@ -1707,7 +1707,8 @@ impl App {
         if self.staying() > 1 {
             buttons.push((FanPick::Send, true));
         }
-        buttons.extend([FanPick::Memo, FanPick::Chzzk, FanPick::Youtube, FanPick::Cafe].map(|pick| (pick, true)));
+        let rest = [FanPick::Memos, FanPick::Chzzk, FanPick::Youtube, FanPick::Cafe, FanPick::Settings];
+        buttons.extend(rest.map(|pick| (pick, true)));
         self.postits.open_fan(head, bounds, dpi, &buttons);
         (self.menu_target, self.held) = (Some(hwnd), Some(hwnd));
     }
@@ -1727,16 +1728,17 @@ impl App {
         match pick {
             FanPick::Invite => self.call_guest(now)?,
             FanPick::Send => self.send_one(index, now),
-            FanPick::Memo => {
-                // 새 포스트잇은 그 꽃핀의 오른쪽 옆에 붙는다.
+            FanPick::Memos => {
+                // 메모 목록은 그 꽃핀의 오른쪽 옆에 뜬다. 전에 띄웠던 자리가 있으면 그 자리에 뜬다.
                 if let Some(character) = self.characters.get(index) {
                     let (head, half_body, _, dpi) = character.head(&self.stage);
-                    self.new_memo((head.0 + half_body + 110 * dpi.max(96) as i32 / 96, head.1));
+                    self.postits.open_list((head.0 + half_body + 220 * dpi.max(96) as i32 / 96, head.1));
                 }
             }
             FanPick::Chzzk => self.open(LINKS[links::LIVE].url),
             FanPick::Youtube => self.open(LINKS[links::YOUTUBE].url),
             FanPick::Cafe => self.open(LINKS[links::CAFE].url),
+            FanPick::Settings => self.open_settings(),
         }
         Ok(())
     }

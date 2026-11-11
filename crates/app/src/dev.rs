@@ -245,7 +245,7 @@ pub enum MemoStep {
 }
 
 /// `--script`의 `fan` 명령. 꽃핀을 오른쪽 클릭했을 때 머리 위에 뜨는 단추들을 다룬다.
-/// 단추의 이름은 invite, send, memo, chzzk, youtube, cafe다.
+/// 단추의 이름은 invite, send, memos, chzzk, youtube, cafe, settings다.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum FanStep {
     /// `fan open [번호]`: 그 꽃핀(0부터)을 오른쪽 클릭한다. 떠 있던 꽃핀이면 거둔다.
