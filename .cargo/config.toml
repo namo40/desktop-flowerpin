@@ -1,0 +1,5 @@
+# C 런타임을 실행 파일 안에 넣는다.
+# 넣지 않으면 Visual C++ 재배포 패키지(VCRUNTIME140.dll)가 깔려 있지 않은 PC에서 실행되지 않는다.
+# 설치 없이 exe 하나로 실행하는 프로그램이라, 받는 사람이 따로 깔 것이 없어야 한다.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
