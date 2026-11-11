@@ -9,7 +9,7 @@
     4. -Draft를 주면 GitHub에 릴리스 초안을 만든다. 초안은 살펴본 뒤 GitHub에서 직접 공개한다.
        공개할 때 그 커밋에 태그가 붙는다.
 
-    결과는 target/dist 에 생긴다. 그림 팩을 어디서 찾는지는 README의 "그림"에 있다.
+    결과는 target/dist 에 생긴다. 그림 팩을 어디서 찾는지는 docs/BUILD.md의 "그림"에 있다.
 
 .EXAMPLE
     scripts/release.ps1
