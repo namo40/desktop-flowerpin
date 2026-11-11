@@ -1817,8 +1817,10 @@ impl App {
 
     /// 다음에 할 일이 있을 때까지 잔다. 창 메시지가 오면 그 전에 깬다.
     pub fn sleep(&self) {
-        // 숨겨 둔 동안에는 꽃핀 때문에 깨어날 일이 없다.
-        let mut wake = if self.out_of_sight { None } else { self.characters.iter().map(Character::due).min() };
+        // 숨겨 둔 동안에는 꽃핀 때문에 깨어날 일이 없다. 머리 위에 단추들을 띄우고 멈춰 선 꽃핀도 그렇다.
+        // 그 꽃핀은 시간이 흐르지 않아 깰 때가 지난 채로 있으므로, 세어 넣으면 쉬지 못하고 계속 돈다.
+        let moving = self.characters.iter().filter(|character| Some(character.window().hwnd()) != self.held);
+        let mut wake = if self.out_of_sight { None } else { moving.map(Character::due).min() };
         let mut sooner = |limit: Option<Instant>| {
             if let Some(limit) = limit {
                 wake = Some(wake.map_or(limit, |wake| wake.min(limit)));
