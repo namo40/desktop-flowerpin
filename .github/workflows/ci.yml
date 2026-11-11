@@ -1,4 +1,9 @@
-# 올릴 때마다 형식, clippy, 테스트를 보고 대체 그림으로 빌드한다.
+# 올릴 때마다 이 저장소만으로 Windows용 실행 파일이 빌드되는지 본다. 대체 그림이 들어간다.
+#
+# 리눅스에서 Windows용으로 빌드한다(MinGW). Windows에서 돌리는 것보다 Actions 시간을 덜 쓴다.
+# 형식, clippy, 테스트는 여기서 돌리지 않는다. Windows의 창과 글꼴을 쓰는 테스트가 많아 리눅스에서는
+# 돌릴 수 없다. 고친 사람이 제 PC에서 돌리고, 공식 배포 파일을 만들 때 scripts/release.ps1이 다시 돌린다.
+#
 # 진짜 그림과 그 키는 여기에 없다. 비밀값을 쓰지 않는다.
 name: CI
 
@@ -17,39 +22,27 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  TARGET: x86_64-pc-windows-gnu
 
 jobs:
-  check:
-    name: 확인과 빌드
-    runs-on: windows-latest
-    timeout-minutes: 30
+  build:
+    name: 대체 그림으로 빌드
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          # 지난 커밋에 그림이 들어간 적이 없는지도 테스트가 본다.
-          fetch-depth: 0
 
-      - name: Rust 준비
+      - name: 빌드 도구 준비
         run: |
-          rustup toolchain install stable --profile minimal --component rustfmt --component clippy
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends gcc-mingw-w64-x86-64
+          rustup toolchain install stable --profile minimal --target "$TARGET"
           rustup default stable
 
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
-      - name: 형식
-        run: cargo fmt --check
-
-      - name: clippy
-        run: cargo clippy --all-targets --locked -- -D warnings
-
-      - name: 테스트
-        run: cargo test --locked
-
-      - name: 대체 그림으로 빌드
-        run: cargo build --release --locked
+      - name: Windows용으로 빌드
+        run: cargo build --locked --target "$TARGET"
 
       - name: 실행 파일 확인
-        shell: pwsh
-        run: |
-          $exe = Get-Item target/release/DesktopFlowerpin.exe
-          "{0}: {1:N0}바이트" -f $exe.Name, $exe.Length
+        run: ls -l "target/$TARGET/debug/DesktopFlowerpin.exe"
