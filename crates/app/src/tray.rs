@@ -17,12 +17,9 @@ use windows_sys::Win32::Foundation::{
 use windows_sys::Win32::Graphics::Gdi::{
     BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CreateBitmap, CreateDIBSection, DIB_RGB_COLORS, DeleteObject,
 };
-use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
 use windows_sys::Win32::System::Power::{
     HPOWERNOTIFY, POWERBROADCAST_SETTING, RegisterPowerSettingNotification, UnregisterPowerSettingNotification,
-};
-use windows_sys::Win32::System::RemoteDesktop::{
-    NOTIFY_FOR_THIS_SESSION, WTSRegisterSessionNotification, WTSUnRegisterSessionNotification,
 };
 use windows_sys::Win32::System::Threading::CreateMutexW;
 use windows_sys::Win32::UI::Shell::{
@@ -43,7 +40,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 use crate::actor::Show;
 use crate::geom::Rect;
 use crate::links::LINKS;
-use crate::win::{cursor_position, fatal, wide};
+use crate::win::{cursor_position, fatal, system_library, wide};
 
 const CLASS_NAME: &str = "DesktopFlowerpinMain";
 /// 앱이 이미 실행 중인지 알아보는 데 쓰는 이름. 로그인한 사용자마다 따로다.
@@ -352,6 +349,39 @@ impl Drop for Instance {
     }
 }
 
+/// `WTSRegisterSessionNotification`에 넘기는 값. 이 로그인 세션의 일만 알려 달라는 뜻이다.
+const NOTIFY_FOR_THIS_SESSION: u32 = 0;
+
+/// 화면을 잠그고 푸는 것을 알려 달라고 등록하는 함수와, 그 등록을 푸는 함수. `wtsapi32.dll`에 있다.
+struct SessionNotices {
+    register: unsafe extern "system" fn(HWND, u32) -> i32,
+    unregister: unsafe extern "system" fn(HWND) -> i32,
+}
+
+/// 잠금 알림을 다루는 함수들을 찾아 온다. 찾지 못했으면 `None`이고, 그때는 잠금을 알지 못할 뿐 앱은 그대로 돈다.
+///
+/// 이 DLL은 실행 파일이 켜질 때 바로 불러오게 하지 않고, 켜진 뒤에 시스템 폴더에서 따로 불러온다. 바로 불러오게
+/// 두면 이 DLL이 끌어오는 다른 DLL(`sspicli.dll`)을 Windows가 실행 파일이 있는 폴더에서 먼저 찾는다.
+fn session_notices() -> Option<&'static SessionNotices> {
+    type Raw = unsafe extern "system" fn() -> isize;
+    static FOUND: OnceLock<Option<SessionNotices>> = OnceLock::new();
+    FOUND
+        .get_or_init(|| unsafe {
+            let library = system_library("wtsapi32.dll");
+            if library.is_null() {
+                return None;
+            }
+            let register = GetProcAddress(library, c"WTSRegisterSessionNotification".as_ptr().cast())?;
+            let unregister = GetProcAddress(library, c"WTSUnRegisterSessionNotification".as_ptr().cast())?;
+            // 받아 온 것은 인자를 알 수 없는 함수 주소다. Windows 문서에 적힌 모양으로 바꿔 쓴다.
+            Some(SessionNotices {
+                register: std::mem::transmute::<Raw, unsafe extern "system" fn(HWND, u32) -> i32>(register),
+                unregister: std::mem::transmute::<Raw, unsafe extern "system" fn(HWND) -> i32>(unregister),
+            })
+        })
+        .as_ref()
+}
+
 /// 앱이 하나만 실행되게 한다. 이미 실행 중이면 그쪽에 알리고 `None`을 돌려준다.
 pub fn claim() -> Option<Instance> {
     let handle = unsafe { CreateMutexW(null(), 0, wide(INSTANCE_NAME).as_ptr()) };
@@ -439,7 +469,9 @@ impl Tray {
         // 등록해 두어야 탐색기가 다시 시작됐을 때 알 수 있다.
         taskbar_created();
         // 화면을 잠그고 푸는 것을 알려 달라고 한다. 받아 주지 않아도 앱은 그대로 돈다.
-        unsafe { WTSRegisterSessionNotification(hwnd, NOTIFY_FOR_THIS_SESSION) };
+        if let Some(notices) = session_notices() {
+            unsafe { (notices.register)(hwnd, NOTIFY_FOR_THIS_SESSION) };
+        }
         // 화면이 꺼지고 켜지는 것도 알려 달라고 한다. 등록하면 지금의 상태를 바로 한 번 알려 준다.
         let power = unsafe { RegisterPowerSettingNotification(hwnd, &DISPLAY_STATUS, 0) };
         let icon = make_icon(pixels, size);
@@ -520,7 +552,9 @@ impl Drop for Tray {
     fn drop(&mut self) {
         unsafe {
             Shell_NotifyIconW(NIM_DELETE, &self.data());
-            WTSUnRegisterSessionNotification(self.hwnd);
+            if let Some(notices) = session_notices() {
+                (notices.unregister)(self.hwnd);
+            }
             if self.power != 0 {
                 UnregisterPowerSettingNotification(self.power);
             }

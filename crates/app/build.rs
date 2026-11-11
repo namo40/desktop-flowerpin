@@ -47,6 +47,13 @@ fn main() {
     println!("cargo::rerun-if-env-changed=DFP_PACK_KEY");
     println!("cargo::rerun-if-env-changed=DFP_RELEASE");
 
+    // 실행 파일이 켜질 때 바로 불러오는 DLL을 Windows의 시스템 폴더에서만 찾게 한다. 이 설정이 없으면 Windows는
+    // 실행 파일이 있는 폴더를 먼저 보므로, 그 폴더에 같은 이름의 파일을 둔 사람이 제 코드를 이 프로그램 안에서
+    // 돌릴 수 있다. MSVC의 링커에만 있는 설정이다. 켜진 뒤에 불러오는 DLL은 `win::search_system_folder_only`가 맡는다.
+    if env::var("CARGO_CFG_TARGET_ENV").is_ok_and(|value| value == "msvc") {
+        println!("cargo::rustc-link-arg-bins=/DEPENDENTLOADFLAG:0x800");
+    }
+
     let out = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR"));
     let root = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR")).join("../..");
 

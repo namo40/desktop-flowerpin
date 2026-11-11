@@ -4,7 +4,10 @@ use std::ptr::{null, null_mut};
 
 use crate::when::days_from_civil;
 
-use windows_sys::Win32::Foundation::{HWND, POINT};
+use windows_sys::Win32::Foundation::{HMODULE, HWND, POINT};
+use windows_sys::Win32::System::LibraryLoader::{
+    LOAD_LIBRARY_SEARCH_SYSTEM32, LoadLibraryExW, SetDefaultDllDirectories,
+};
 use windows_sys::Win32::System::SystemInformation::{GetLocalTime, GetTickCount};
 use windows_sys::Win32::UI::HiDpi::{DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO};
@@ -25,6 +28,25 @@ pub fn wide(s: &str) -> Vec<u16> {
 pub fn enable_per_monitor_dpi() {
     // 실패해도(오래된 Windows 10) 앱은 돌아가므로 결과는 보지 않는다.
     unsafe { SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
+}
+
+/// 이 프로그램이 켜진 뒤에 불러오는 DLL을 Windows의 시스템 폴더에서만 찾게 한다. 가장 먼저 부른다.
+///
+/// Windows는 이름만으로 DLL을 찾을 때 실행 파일이 있는 폴더를 먼저 본다. 그 폴더에 같은 이름의 파일을 둔 사람이
+/// 제 코드를 이 프로그램 안에서 돌릴 수 있게 되므로 막는다. 이 프로그램이 직접 부르는 것뿐 아니라, Windows의
+/// 부품들이 일하다가 이름만으로 불러오는 DLL에도 적용된다.
+///
+/// 실행 파일이 켜질 때 바로 불러오는 DLL은 이 함수가 불리기 전에 이미 올라와 있다. 그쪽은 링크할 때 넣는
+/// 설정이 맡는다(`build.rs`).
+pub fn search_system_folder_only() {
+    // 실패해도(아주 오래된 Windows) 앱은 돌아가므로 결과는 보지 않는다.
+    unsafe { SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_SYSTEM32) };
+}
+
+/// Windows의 시스템 폴더에 있는 DLL을 불러온다. 그 DLL이 끌어오는 다른 DLL도 시스템 폴더에서만 찾는다.
+/// 불러오지 못했으면 빈 값이다. 프로그램이 끝날 때까지 쓰므로 내려놓지 않는다.
+pub fn system_library(name: &str) -> HMODULE {
+    unsafe { LoadLibraryExW(wide(name).as_ptr(), null_mut(), LOAD_LIBRARY_SEARCH_SYSTEM32) }
 }
 
 /// 지금 화면을 누가 쓰고 있는지.

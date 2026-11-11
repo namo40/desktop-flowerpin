@@ -70,6 +70,47 @@ try {
     Remove-Item Env:DFP_RELEASE
 }
 
+# 만든 실행 파일이 DLL을 Windows의 시스템 폴더에서만 찾게 되어 있는지 본다. 이 설정이 빠지면 실행 파일 옆에
+# 놓인 같은 이름의 DLL을 먼저 불러오게 된다.
+function Test-DllSearch([string]$path) {
+    $bytes = [System.IO.File]::ReadAllBytes($path)
+    $pe = [BitConverter]::ToInt32($bytes, 0x3C)
+    $optional = $pe + 24
+    $sections = [BitConverter]::ToUInt16($bytes, $pe + 6)
+    $table = $optional + [BitConverter]::ToUInt16($bytes, $pe + 20)
+    # 메모리에 올라갔을 때의 자리(RVA)를 파일 안의 자리로 바꾼다.
+    $locate = {
+        param([long]$rva)
+        for ($i = 0; $i -lt $sections; $i++) {
+            $section = $table + 40 * $i
+            [long]$start = [BitConverter]::ToUInt32($bytes, $section + 12)
+            [long]$size = [Math]::Max([BitConverter]::ToUInt32($bytes, $section + 8), [BitConverter]::ToUInt32($bytes, $section + 16))
+            if ($rva -ge $start -and $rva -lt $start + $size) {
+                return $rva - $start + [BitConverter]::ToUInt32($bytes, $section + 20)
+            }
+        }
+        throw "실행 파일을 읽지 못했습니다 (자리 $rva)"
+    }
+    $loadConfig = & $locate ([BitConverter]::ToUInt32($bytes, $optional + 112 + 8 * 10))
+    $flags = [BitConverter]::ToUInt16($bytes, $loadConfig + 0x4E)
+    if ($flags -ne 0x800) {
+        throw ("실행 파일이 DLL을 시스템 폴더에서만 찾게 되어 있지 않습니다 (DependentLoadFlags 0x{0:X4})" -f $flags)
+    }
+    $import = & $locate ([BitConverter]::ToUInt32($bytes, $optional + 112 + 8))
+    while ($true) {
+        $nameAt = [BitConverter]::ToUInt32($bytes, $import + 12)
+        if ($nameAt -eq 0) { break }
+        $start = & $locate $nameAt
+        $end = [Array]::IndexOf($bytes, [byte]0, [int]$start)
+        $name = [System.Text.Encoding]::ASCII.GetString($bytes, $start, $end - $start).ToLower()
+        # 이 DLL은 끌어오는 다른 DLL을 실행 파일 옆에서 먼저 찾으므로, 켜진 뒤에 따로 불러와야 한다.
+        if ($name -eq 'wtsapi32.dll') { throw '실행 파일이 켜질 때 wtsapi32.dll을 바로 불러옵니다' }
+        $import += 20
+    }
+}
+Write-Host '== DLL을 찾는 곳'
+Test-DllSearch (Join-Path (Get-Location) 'target\release\DesktopFlowerpin.exe')
+
 # ---------- 3. 묶기 ----------
 $out = Join-Path (Get-Location) 'target\dist'
 $stage = Join-Path $out 'DesktopFlowerpin'

@@ -45,6 +45,8 @@ use dfp_pack::PackError;
 use settings_window::TAB_NAMES;
 
 fn main() {
+    // 다른 일을 하기 전에, DLL을 시스템 폴더에서만 찾게 한다.
+    win::search_system_folder_only();
     let options = dev::Options::from_args();
     let report = options.report.clone();
     win::enable_per_monitor_dpi();
