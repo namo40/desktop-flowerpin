@@ -95,14 +95,16 @@ cargo clippy --all-targets
 cargo test
 ```
 
-`cargo test`에는 이 저장소에 그림, 그림 팩, 키가 들어가지 않았는지 보는 검사가 들어 있습니다. 올릴 때마다 GitHub Actions(`.github/workflows/ci.yml`)가 위의 셋을 돌리고 대체 그림으로 빌드합니다.
+`cargo test`에는 이 저장소에 그림, 그림 팩, 키가 들어가지 않았는지 보는 검사가 들어 있습니다.
+
+위의 셋은 올리기 전에 Windows에서 직접 돌려 주세요. Windows의 창과 글꼴을 쓰는 테스트가 많아 다른 곳에서는 돌릴 수 없습니다. 올릴 때마다 GitHub Actions(`.github/workflows/ci.yml`)는 이 저장소만으로 Windows용 실행 파일이 빌드되는지만 봅니다. 리눅스에서 MinGW로 빌드합니다.
 
 ### 공식 배포 파일
 
 Releases에 올리는 파일은 진짜 그림 팩과 그 키가 있는 PC에서 `scripts/release.ps1`로 만듭니다. GitHub Actions에서는 만들지 않습니다. 그림과 키가 거기에 없기 때문입니다.
 
 ```
-scripts/release.ps1          # 테스트, 공식 빌드, 압축 파일과 SHA-256 (target/dist)
+scripts/release.ps1          # 형식, clippy, 테스트, 공식 빌드, 압축 파일과 SHA-256 (target/dist)
 scripts/release.ps1 -Draft   # 위에 더해 GitHub에 릴리스 초안을 만듦
 ```
 

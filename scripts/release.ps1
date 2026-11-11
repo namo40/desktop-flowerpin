@@ -4,7 +4,7 @@
 
 .DESCRIPTION
     1. 커밋하지 않은 고침이 없는지 본다.
-    2. 테스트를 돌리고, 공식 빌드 검사를 켜고 빌드한다. 개발 키나 대체 그림이면 빌드가 멈춘다.
+    2. 형식, clippy, 테스트를 보고, 공식 빌드 검사를 켜고 빌드한다. 개발 키나 대체 그림이면 빌드가 멈춘다.
     3. 실행 파일, 안내 글, 라이선스를 한 압축 파일로 묶고 SHA-256을 적는다.
     4. -Draft를 주면 GitHub에 릴리스 초안을 만든다. 초안은 살펴본 뒤 GitHub에서 직접 공개한다.
        공개할 때 그 커밋에 태그가 붙는다.
@@ -58,7 +58,10 @@ if ($Draft) {
 }
 Write-Host "데스크탑 꽃핀 $version (커밋 $short)"
 
-# ---------- 2. 테스트와 빌드 ----------
+# ---------- 2. 확인과 빌드 ----------
+# GitHub Actions는 빌드가 되는지만 본다. 형식, clippy, 테스트는 여기서 본다.
+Invoke-Step '형식' { cargo fmt --check }
+Invoke-Step 'clippy' { cargo clippy --all-targets --locked -- -D warnings }
 Invoke-Step '테스트' { cargo test --locked }
 $env:DFP_RELEASE = '1'
 try {
