@@ -46,6 +46,11 @@ fn main() {
     println!("cargo::rerun-if-env-changed=DFP_PACK_DIR");
     println!("cargo::rerun-if-env-changed=DFP_PACK_KEY");
     println!("cargo::rerun-if-env-changed=DFP_RELEASE");
+    // 공식 빌드에서는 확인용 명령줄 인자를 받지 않는다(`dev.rs`). 코드에서 `cfg!(official)`로 가른다.
+    println!("cargo::rustc-check-cfg=cfg(official)");
+    if env::var("DFP_RELEASE").is_ok_and(|value| value == "1") {
+        println!("cargo::rustc-cfg=official");
+    }
 
     // 실행 파일이 켜질 때 바로 불러오는 DLL을 Windows의 시스템 폴더에서만 찾게 한다. 이 설정이 없으면 Windows는
     // 실행 파일이 있는 폴더를 먼저 보므로, 그 폴더에 같은 이름의 파일을 둔 사람이 제 코드를 이 프로그램 안에서

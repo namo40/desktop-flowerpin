@@ -1,5 +1,8 @@
 //! 만드는 동안 확인하고 재는 데 쓰는 실행 인자. 배포판의 기능이 아니다.
 //!
+//! 공식 빌드(`DFP_RELEASE=1`)는 이 인자들을 받지 않는다. 파일을 쓰는 인자와 레지스트리를 쓰는 인자가 있어서,
+//! 받는 사람의 PC에서는 쓸 수 없게 한다. 확인은 공식 빌드가 아닌 빌드로 한다.
+//!
 //! ```text
 //! DesktopFlowerpin.exe [--for 초] [--report 파일] [--check-screen] [--size 퍼센트] [--dpi 값] [--characters 수]
 //!                      [--play 동작,동작] [--script "초 명령; 초 명령"] [--seed 수] [--still]
@@ -95,8 +98,13 @@ pub struct Options {
 }
 
 impl Options {
+    /// 실행할 때 받은 인자를 읽는다. 공식 빌드에서는 아무것도 받지 않은 것으로 친다.
     pub fn from_args() -> Options {
-        let args: Vec<String> = std::env::args().collect();
+        let args: Vec<String> = if cfg!(official) { Vec::new() } else { std::env::args().collect() };
+        Options::parse(&args)
+    }
+
+    fn parse(args: &[String]) -> Options {
         let value = |key: &str| args.iter().position(|a| a == key).and_then(|i| args.get(i + 1)).cloned();
         Options {
             run_for: value("--for").and_then(|s| s.parse::<f64>().ok()).map(Duration::from_secs_f64),
@@ -819,6 +827,20 @@ impl Usage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn no_arguments_mean_a_plain_run() {
+        // 공식 빌드는 인자를 받지 않은 것으로 친다. 그때는 파일도 레지스트리도 건드리지 않는 보통 실행이어야 한다.
+        let plain = Options::parse(&[]);
+        assert!(plain.run_for.is_none() && plain.script.is_empty() && plain.data_dir.is_none());
+        assert!(plain.report.is_none() && plain.settings_dump.is_none() && plain.settings_shot.is_none());
+        assert!(plain.run_key.is_none() && plain.clock.is_none() && !plain.no_open && !plain.check_screen);
+
+        let args: Vec<String> = ["app", "--for", "3", "--report", "r.txt"].iter().map(|s| s.to_string()).collect();
+        let checked = Options::parse(&args);
+        assert_eq!(checked.run_for, Some(Duration::from_secs(3)));
+        assert_eq!(checked.report, Some(PathBuf::from("r.txt")));
+    }
 
     #[test]
     fn script_is_read_and_sorted_by_time() {
