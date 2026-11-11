@@ -90,8 +90,6 @@ const WINDOW_LIMIT: usize = 18;
 /// 아무 데나의 위쪽 공중이다.
 const GUEST_ACROSS: (f64, f64) = (0.1, 0.9);
 const GUEST_DOWN: (f64, f64) = (0.2, 0.35);
-/// 저절로 놀러 오는 사이를, 정해 둔 값의 몇 배로 잡는지. 올 때마다 이 사이에서 아무렇게나 고른다.
-const VISIT_SPREAD: (f64, f64) = (0.5, 1.5);
 /// 화면을 전체 화면 프로그램이 쓰고 있는지 확인하는 간격.
 const SCREEN_CHECK: Duration = Duration::from_secs(5);
 
@@ -185,10 +183,6 @@ pub struct App {
     pointer: Pointer,
     /// 누르지 않은 채 꽃핀 위에서 마지막으로 움직인 곳. 문지른 거리를 재는 데 쓴다.
     hover: Option<(HWND, (i32, i32), Instant)>,
-    /// 꽃핀이 저절로 놀러 올 다음 때. 오지 않게 해 두었으면 없다.
-    next_visit: Option<Instant>,
-    /// 다음 때를 잡을 때 쓴 설정값(놀러 오는 사이, 분). 설정이 바뀌면 다시 잡는다.
-    visit_every: i64,
     away: bool,
     /// 스크립트가 자리 비움을 정했다. 그 뒤로는 진짜 입력 시각을 보지 않는다.
     away_forced: bool,
@@ -243,12 +237,6 @@ pub struct App {
     /// 방해하면 안 되는 동안 알릴 때가 된 메모들. 그때가 지나면 포스트잇을 울린다.
     rings_waiting: Vec<u64>,
     dev: Dev,
-}
-
-/// 다음에 놀러 올 때까지의 시간. `minutes`는 설정에서 고른 사이(분)이고, `roll`은 [`VISIT_SPREAD`]에서 고른
-/// 배수다. 오지 않게 해 두었으면(0) `None`이다.
-fn visit_gap(minutes: i64, roll: f64) -> Option<Duration> {
-    (minutes > 0).then(|| Duration::from_secs_f64(minutes as f64 * 60.0 * roll))
 }
 
 /// 꽃핀들을 뒤에 설 것부터 앞에 설 것까지 차례로 늘어놓는다. `guests`는 꽃핀마다 더 부른 꽃핀인지다.
@@ -355,8 +343,6 @@ impl App {
             characters: Vec::new(),
             pointer: Pointer::Idle,
             hover: None,
-            next_visit: None,
-            visit_every: 0,
             away: false,
             away_forced: false,
             next_away_check: started,
@@ -428,7 +414,6 @@ impl App {
         app.tell_postits_monitors();
         app.describe();
         app.sync_autostart(started);
-        app.plan_visits(started);
         app.greet();
         // 적어 둔 메모를 포스트잇으로 붙인다. 붙인 적이 없는 메모에 자리를 잡아 줬으면 저장한다.
         app.postits.attach(&mut app.memos);
@@ -555,53 +540,7 @@ impl App {
         }
         self.show_live();
         self.sync_autostart(now);
-        self.plan_visits(now);
         self.store.settings_changed(now);
-    }
-
-    /// 꽃핀이 저절로 놀러 올 다음 때를 잡는다. 얼마나 자주 올지를 바꿨을 때만 다시 잡는다.
-    fn plan_visits(&mut self, now: Instant) {
-        let every = self.settings.number(Key::Visits);
-        if every != self.visit_every {
-            self.visit_every = every;
-            self.next_visit = self.visit_gap().map(|gap| now + gap);
-        }
-    }
-
-    /// 다음에 놀러 올 때까지의 시간. 올 때마다 새로 고른다.
-    fn visit_gap(&mut self) -> Option<Duration> {
-        let roll = Rng::new(self.next_seed()).range(VISIT_SPREAD);
-        visit_gap(self.settings.number(Key::Visits), roll)
-    }
-
-    /// 놀러 올 때가 됐으면 꽃핀 하나가 저절로 나타난다. 초대한 꽃핀처럼 머무르다가 돌아간다.
-    ///
-    /// 자리가 다 찼으면 오지 않는다(먼저 온 꽃핀을 밀어내지 않는다). 꽃핀을 숨겨 둔 동안과 사용자가 자리를
-    /// 비운 동안에도 오지 않는다. 오지 않았어도 다음 때는 새로 잡는다.
-    fn tend_visits(&mut self, now: Instant) -> Result<(), PackError> {
-        if self.next_visit.is_none_or(|at| now < at) {
-            return Ok(());
-        }
-        self.next_visit = self.visit_gap().map(|gap| now + gap);
-        let why_not = if self.out_of_sight {
-            Some("숨겨 둠")
-        } else if self.away {
-            Some("자리를 비움")
-        } else if self.quitting.is_some() || self.home().is_none() {
-            Some("끝내는 중")
-        } else if self.staying() >= self.crowd_limit() || self.characters.len() >= WINDOW_LIMIT {
-            Some("자리가 없음")
-        } else {
-            None
-        };
-        match why_not {
-            Some(why) => self.note(now, format!("꽃핀이 놀러 오지 않음: {why}")),
-            None => {
-                self.note(now, "꽃핀이 저절로 놀러 옴".to_string());
-                self.invite(0, now)?;
-            }
-        }
-        Ok(())
     }
 
     /// "Windows 시작할 때 실행" 설정대로 레지스트리를 맞춘다. 켜 두었으면 이 실행 파일의 자리를 적고,
@@ -1009,17 +948,13 @@ impl App {
         self.guests().next().is_some()
     }
 
-    /// 꽃핀을 하나 더 부른다. 메뉴를 띄운 꽃핀이 있는 모니터의 위쪽 공중에 나타나 떨어진다.
+    /// 꽃핀을 하나 더 부른다. 단추를 띄운 꽃핀이 있는 모니터의 위쪽 공중에 나타나 떨어진다.
     /// 트레이에서 불렀으면 기본 꽃핀이 있는 모니터다.
     fn call_guest(&mut self, now: Instant) -> Result<(), PackError> {
-        self.invite(self.menu_character(), now)
-    }
-
-    /// 꽃핀을 하나 더 나타나게 한다. `near`번째 꽃핀이 있는 모니터의 위쪽 공중에 나타나 떨어진다.
-    fn invite(&mut self, near: usize, now: Instant) -> Result<(), PackError> {
         if !self.can_call() {
             return Ok(());
         }
+        let near = self.menu_character();
         // 자리가 없으면 가장 먼저 부른 꽃핀부터 손을 흔들며 돌아간다.
         while self.staying() >= self.crowd_limit() {
             let Some(oldest) = self.guests().next() else { break };
@@ -1374,7 +1309,6 @@ impl App {
         // 더 부른 꽃핀 가운데 머무를 시간이 다 된 것을 돌려보낸다.
         if self.quitting.is_none() {
             self.tend_guests(now);
-            self.tend_visits(now)?;
         }
 
         // 5. 만드는 동안 확인용: 정한 시각에 시킨 일과 차례로 보여 줄 동작.
@@ -1862,7 +1796,6 @@ impl App {
         sooner((self.memos.has_pending() && self.quitting.is_none() && !paused).then_some(self.next_memo_check));
         sooner(self.postits.due());
         sooner(self.guests_due());
-        sooner(self.next_visit);
         sooner(self.dev.deadline);
         // 자원을 재기 시작할 때를 놓치지 않는다. 숨겨 둔 동안에는 달리 깨어날 일이 없다.
         sooner((self.dev.usage.is_none() && self.dev.options.report.is_some()).then_some(self.started + dev::WARM_UP));
@@ -2181,7 +2114,6 @@ impl App {
             dev::Command::Target(index) => {
                 self.menu_target = self.characters.get(index).map(|character| character.window().hwnd());
             }
-            dev::Command::Visit => self.next_visit = Some(now),
             dev::Command::Fan(dev::FanStep::Open(index)) => {
                 if let Some(hwnd) = self.characters.get(index).map(|character| character.window().hwnd()) {
                     let again = self.postits.has_fan() && self.menu_target == Some(hwnd);
@@ -2304,17 +2236,6 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn visits_come_around_the_chosen_gap() {
-        // 오지 않게 해 두면 다음 때가 없다.
-        assert_eq!(visit_gap(0, 1.0), None);
-        // "가끔"(8분)은 4분에서 12분 사이, "자주"(3분)는 1분 30초에서 4분 30초 사이다.
-        assert_eq!(visit_gap(8, VISIT_SPREAD.0), Some(Duration::from_secs(240)));
-        assert_eq!(visit_gap(8, VISIT_SPREAD.1), Some(Duration::from_secs(720)));
-        assert_eq!(visit_gap(3, VISIT_SPREAD.0), Some(Duration::from_secs(90)));
-        assert_eq!(visit_gap(3, VISIT_SPREAD.1), Some(Duration::from_secs(270)));
-    }
 
     #[test]
     fn the_home_character_stands_in_front_of_guests() {

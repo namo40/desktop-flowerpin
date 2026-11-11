@@ -112,7 +112,6 @@ const CONTROLS: [Control; settings::COUNT] = [
     combo(Key::IdleActions, 1203, 1212, None),
     field(Key::Stay, 1205, 1214),
     combo(Key::MaxCharacters, 1206, 1215, None),
-    combo(Key::Visits, 1208, 1217, None),
     check(Key::LiveCheck, 1301),
     combo(Key::LiveCheckInterval, 1302, 1311, Some(Key::LiveCheck)),
     combo(Key::LiveStartNotice, 1303, 1312, Some(Key::LiveCheck)),
