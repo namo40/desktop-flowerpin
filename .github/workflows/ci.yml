@@ -1,0 +1,55 @@
+# 올릴 때마다 형식, clippy, 테스트를 보고 대체 그림으로 빌드한다.
+# 진짜 그림과 그 키는 여기에 없다. 비밀값을 쓰지 않는다.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: 확인과 빌드
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # 지난 커밋에 그림이 들어간 적이 없는지도 테스트가 본다.
+          fetch-depth: 0
+
+      - name: Rust 준비
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt --component clippy
+          rustup default stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: 형식
+        run: cargo fmt --check
+
+      - name: clippy
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+      - name: 테스트
+        run: cargo test --locked
+
+      - name: 대체 그림으로 빌드
+        run: cargo build --release --locked
+
+      - name: 실행 파일 확인
+        shell: pwsh
+        run: |
+          $exe = Get-Item target/release/DesktopFlowerpin.exe
+          "{0}: {1:N0}바이트" -f $exe.Name, $exe.Length
