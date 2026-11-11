@@ -236,6 +236,8 @@ pub struct App {
     /// 화면이 잠겨 있는가, PC가 절전에 들어갔는가.
     locked: bool,
     asleep: bool,
+    /// 화면이 꺼져 있다. 잠그지 않은 채 모니터만 꺼졌을 때도 그렇다.
+    dark: bool,
     /// 지금 꽃핀을 숨겨 두었는가.
     out_of_sight: bool,
     /// 방해하면 안 되는 동안 알릴 때가 된 메모들. 그때가 지나면 포스트잇을 울린다.
@@ -388,6 +390,7 @@ impl App {
             next_screen_check: started,
             locked: false,
             asleep: false,
+            dark: false,
             out_of_sight: false,
             rings_waiting: Vec::new(),
             dev: Dev {
@@ -904,10 +907,10 @@ impl App {
         self.guests().filter_map(leaves).min()
     }
 
-    /// 화면을 쓰지 않는 때인가. 잠겨 있거나, 절전 중이거나, 화면 보호기가 떠 있으면 그렇다.
+    /// 화면을 쓰지 않는 때인가. 잠겨 있거나, 절전 중이거나, 화면이 꺼졌거나, 화면 보호기가 떠 있으면 그렇다.
     /// 이때는 방송 상태도 묻지 않고 알림 시각도 보지 않는다. 돌아오면 그때 한꺼번에 본다.
     fn is_paused(&self) -> bool {
-        self.locked || self.asleep || self.screen == Screen::Absent
+        self.locked || self.asleep || self.dark || self.screen == Screen::Absent
     }
 
     /// 방해하면 안 되는 때인가. 전체 화면 프로그램(게임, 발표, 영상)이 떠 있거나 화면을 쓰지 않는 때다.
@@ -1274,6 +1277,10 @@ impl App {
                 TrayEvent::Asleep(asleep) => {
                     self.asleep = asleep;
                     self.note(now, format!("절전: {asleep}"));
+                }
+                TrayEvent::Dark(dark) => {
+                    self.dark = dark;
+                    self.note(now, format!("화면 꺼짐: {dark}"));
                 }
             }
         }
@@ -2118,6 +2125,7 @@ impl App {
                 self.screen = if on { Screen::Busy } else { Screen::Free };
             }
             dev::Command::Lock(on) => self.locked = on,
+            dev::Command::Dark(dark) => self.dark = dark,
             dev::Command::Hello => self.blink_all(now),
             dev::Command::Hide(seconds) => {
                 self.hide = Hide::Until(now + Duration::from_secs_f64(seconds));

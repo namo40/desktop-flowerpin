@@ -166,6 +166,8 @@ pub enum Command {
     Fullscreen(bool),
     /// `lock on|off`: 화면을 잠근 것으로, 또는 푼 것으로 친다.
     Lock(bool),
+    /// `display off|on`: 화면이 꺼진 것으로, 또는 다시 켜진 것으로 친다.
+    Dark(bool),
     /// `hello`: 앱을 한 번 더 켰거나 트레이 아이콘을 클릭한 것으로 친다. 꽃핀이 반짝인다.
     Hello,
     /// `hide 초`: 메뉴에서 "잠깐 숨기기"를 고른 것과 같다. 그 시간이 지나면 다시 보인다.
@@ -378,6 +380,7 @@ pub fn parse_script(text: &str) -> Result<Vec<Step>, String> {
             (Some("away"), 3) if words[2] == "on" || words[2] == "off" => Command::Away(words[2] == "on"),
             (Some("fullscreen"), 3) if words[2] == "on" || words[2] == "off" => Command::Fullscreen(words[2] == "on"),
             (Some("lock"), 3) if words[2] == "on" || words[2] == "off" => Command::Lock(words[2] == "on"),
+            (Some("display"), 3) if words[2] == "on" || words[2] == "off" => Command::Dark(words[2] == "off"),
             (Some("hello"), 2) => Command::Hello,
             (Some("visit"), 2) => Command::Visit,
             (Some("hide"), 3) => Command::Hide(number(2)?),
@@ -799,6 +802,8 @@ mod tests {
         let crowd = parse_script("1 menu 7; 2 target 2; 3 crowd").unwrap();
         let commands: Vec<Command> = crowd.iter().map(|step| step.command.clone()).collect();
         assert_eq!(commands, [Command::Menu(7), Command::Target(2), Command::Crowd]);
+        let dark = parse_script("1 display off; 2 display on").unwrap();
+        assert_eq!((&dark[0].command, &dark[1].command), (&Command::Dark(true), &Command::Dark(false)));
         let quiet = parse_script("1 fullscreen on; 2 fullscreen off; 3 lock on; 4 lock off; 5 hide 2.5").unwrap();
         let commands: Vec<Command> = quiet.iter().map(|step| step.command.clone()).collect();
         let wanted = [

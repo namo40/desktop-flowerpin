@@ -18,6 +18,9 @@ use windows_sys::Win32::Graphics::Gdi::{
     BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CreateBitmap, CreateDIBSection, DIB_RGB_COLORS, DeleteObject,
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows_sys::Win32::System::Power::{
+    HPOWERNOTIFY, POWERBROADCAST_SETTING, RegisterPowerSettingNotification, UnregisterPowerSettingNotification,
+};
 use windows_sys::Win32::System::RemoteDesktop::{
     NOTIFY_FOR_THIS_SESSION, WTSRegisterSessionNotification, WTSUnRegisterSessionNotification,
 };
@@ -30,11 +33,11 @@ use windows_sys::Win32::UI::Shell::{
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreateIconIndirect, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyIcon, DestroyMenu,
     DestroyWindow, FindWindowW, GetSystemMetrics, HICON, HMENU, ICONINFO, KillTimer, MF_DISABLED, MF_GRAYED, MF_POPUP,
-    MF_SEPARATOR, MF_STRING, PBT_APMRESUMEAUTOMATIC, PBT_APMRESUMESUSPEND, PBT_APMSUSPEND, PostMessageW,
-    RegisterClassExW, RegisterWindowMessageW, SM_CXICON, SM_CXSMICON, SetForegroundWindow, SetTimer, TPM_NONOTIFY,
-    TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenuEx, WM_APP, WM_CONTEXTMENU, WM_LBUTTONDBLCLK, WM_LBUTTONUP, WM_NULL,
-    WM_POWERBROADCAST, WM_RBUTTONUP, WM_TIMER, WM_WTSSESSION_CHANGE, WNDCLASSEXW, WS_POPUP, WTS_SESSION_LOCK,
-    WTS_SESSION_UNLOCK,
+    MF_SEPARATOR, MF_STRING, PBT_APMRESUMEAUTOMATIC, PBT_APMRESUMESUSPEND, PBT_APMSUSPEND, PBT_POWERSETTINGCHANGE,
+    PostMessageW, RegisterClassExW, RegisterWindowMessageW, SM_CXICON, SM_CXSMICON, SetForegroundWindow, SetTimer,
+    TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenuEx, WM_APP, WM_CONTEXTMENU, WM_LBUTTONDBLCLK,
+    WM_LBUTTONUP, WM_NULL, WM_POWERBROADCAST, WM_RBUTTONUP, WM_TIMER, WM_WTSSESSION_CHANGE, WNDCLASSEXW, WS_POPUP,
+    WTS_SESSION_LOCK, WTS_SESSION_UNLOCK,
 };
 
 use crate::actor::Show;
@@ -148,7 +151,18 @@ pub enum TrayEvent {
     Locked(bool),
     /// PC가 절전에 들어가거나(`true`) 절전에서 돌아왔다.
     Asleep(bool),
+    /// 화면이 꺼졌거나(`true`) 다시 켜졌다. 잠그지 않은 채 모니터만 꺼졌을 때도 온다.
+    Dark(bool),
 }
+
+/// 이 사용자의 화면이 켜졌는지 꺼졌는지를 알려 주는 전원 설정의 이름(GUID_SESSION_DISPLAY_STATUS).
+/// 값은 0이 꺼짐, 1이 켜짐, 2가 어두워짐이다.
+const DISPLAY_STATUS: windows_sys::core::GUID = windows_sys::core::GUID {
+    data1: 0x2B84_C20E,
+    data2: 0xAD23,
+    data3: 0x4DDF,
+    data4: [0x93, 0xDB, 0x05, 0xFF, 0xBD, 0x7E, 0xFC, 0xA5],
+};
 
 thread_local! {
     static EVENTS: RefCell<Vec<TrayEvent>> = const { RefCell::new(Vec::new()) };
@@ -259,6 +273,19 @@ fn build(state: &MenuState) -> Option<HMENU> {
     }
 }
 
+/// 전원 설정이 바뀌었다는 알림이 화면의 상태에 대한 것이면, 화면이 꺼졌는지를 돌려준다.
+fn display_went_dark(setting: &POWERBROADCAST_SETTING) -> Option<bool> {
+    let (name, wanted) = (&setting.PowerSetting, &DISPLAY_STATUS);
+    let same =
+        (name.data1, name.data2, name.data3, name.data4) == (wanted.data1, wanted.data2, wanted.data3, wanted.data4);
+    if !same || setting.DataLength < 4 {
+        return None;
+    }
+    // 값은 구조체의 끝에 이어 붙어 있다. 어두워진 것(2)은 켜져 있는 것으로 친다.
+    let state = unsafe { std::ptr::read_unaligned(setting.Data.as_ptr() as *const u32) };
+    Some(state == 0)
+}
+
 /// 지난번에 꺼낸 뒤로 쌓인 일을 모두 꺼낸다.
 pub fn take_events() -> Vec<TrayEvent> {
     EVENTS.with(|events| std::mem::take(&mut *events.borrow_mut()))
@@ -323,6 +350,8 @@ pub struct Tray {
     toast_icon: HICON,
     /// 아이콘에 마우스를 올리면 보이는 글.
     tip: String,
+    /// 화면이 꺼지고 켜지는 것을 알려 달라고 해 둔 것.
+    power: HPOWERNOTIFY,
 }
 
 impl Tray {
@@ -371,7 +400,10 @@ impl Tray {
         taskbar_created();
         // 화면을 잠그고 푸는 것을 알려 달라고 한다. 받아 주지 않아도 앱은 그대로 돈다.
         unsafe { WTSRegisterSessionNotification(hwnd, NOTIFY_FOR_THIS_SESSION) };
-        let tray = Tray { hwnd, icon: make_icon(pixels, size), toast_icon: null_mut(), tip: TIP.to_string() };
+        // 화면이 꺼지고 켜지는 것도 알려 달라고 한다. 등록하면 지금의 상태를 바로 한 번 알려 준다.
+        let power = unsafe { RegisterPowerSettingNotification(hwnd, &DISPLAY_STATUS, 0) };
+        let icon = make_icon(pixels, size);
+        let tray = Tray { hwnd, icon, toast_icon: null_mut(), tip: TIP.to_string(), power };
         tray.add();
         tray
     }
@@ -449,6 +481,9 @@ impl Drop for Tray {
         unsafe {
             Shell_NotifyIconW(NIM_DELETE, &self.data());
             WTSUnRegisterSessionNotification(self.hwnd);
+            if self.power != 0 {
+                UnregisterPowerSettingNotification(self.power);
+            }
             DestroyIcon(self.icon);
             if !self.toast_icon.is_null() {
                 DestroyIcon(self.toast_icon);
@@ -558,6 +593,12 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
             match wparam as u32 {
                 PBT_APMSUSPEND => push(TrayEvent::Asleep(true)),
                 PBT_APMRESUMEAUTOMATIC | PBT_APMRESUMESUSPEND => push(TrayEvent::Asleep(false)),
+                PBT_POWERSETTINGCHANGE => {
+                    let setting = lparam as *const POWERBROADCAST_SETTING;
+                    if let Some(dark) = unsafe { setting.as_ref() }.and_then(display_went_dark) {
+                        push(TrayEvent::Dark(dark));
+                    }
+                }
                 _ => {}
             }
             // 절전에 들어가도 된다고 답한다.
@@ -594,6 +635,31 @@ mod tests {
         // 투명한 그림 위에서도 점은 불투명하다.
         let clear = with_dot(&vec![0u32; (size * size) as usize], size);
         assert_eq!(clear[(3 * size + 12) as usize] >> 24, 255);
+    }
+
+    #[test]
+    fn only_the_display_status_tells_whether_the_screen_is_dark() {
+        // 알림은 이름과 길이 뒤에 값이 이어 붙은 모양이다. 값은 4바이트 수다.
+        #[repr(C)]
+        struct Notice {
+            head: POWERBROADCAST_SETTING,
+            rest: [u8; 3],
+        }
+        let read = |name: windows_sys::core::GUID, state: u32, length: u32| {
+            let mut notice: Notice = unsafe { std::mem::zeroed() };
+            (notice.head.PowerSetting, notice.head.DataLength) = (name, length);
+            let bytes = state.to_le_bytes();
+            (notice.head.Data[0], notice.rest) = (bytes[0], [bytes[1], bytes[2], bytes[3]]);
+            display_went_dark(&notice.head)
+        };
+        assert_eq!(read(DISPLAY_STATUS, 0, 4), Some(true));
+        assert_eq!(read(DISPLAY_STATUS, 1, 4), Some(false));
+        // 어두워진 것은 꺼진 것이 아니다.
+        assert_eq!(read(DISPLAY_STATUS, 2, 4), Some(false));
+        // 다른 설정의 알림이거나 값이 덜 왔으면 모른다.
+        let other = windows_sys::core::GUID { data1: 1, ..DISPLAY_STATUS };
+        assert_eq!(read(other, 0, 4), None);
+        assert_eq!(read(DISPLAY_STATUS, 0, 1), None);
     }
 
     #[test]
