@@ -111,7 +111,7 @@ const CONTROLS: [Control; settings::COUNT] = [
     check(Key::AlwaysOnTop, 1104),
     combo(Key::IdleActions, 1203, 1212, None),
     field(Key::Stay, 1205, 1214),
-    combo(Key::MaxCharacters, 1206, 1215, None),
+    field(Key::MaxCharacters, 1206, 1215),
     check(Key::LiveCheck, 1301),
     combo(Key::LiveCheckInterval, 1302, 1311, Some(Key::LiveCheck)),
     combo(Key::LiveStartNotice, 1303, 1312, Some(Key::LiveCheck)),
@@ -597,6 +597,9 @@ mod tests {
                 assert!(settings::spec(needs).is_flag() && settings::spec(needs).tab == spec.tab);
             }
         }
+        // 한 번에 둘 수 있는 꽃핀의 수는 칸 옆에 적어 둔 범위와 같다.
+        let range = format!("\"명 (1~{})\"", settings::CROWD_MAX);
+        assert!(dialog_body(FIRST_PAGE + 1).contains(&range), "{range}");
     }
 
     #[test]

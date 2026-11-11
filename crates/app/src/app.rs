@@ -33,7 +33,7 @@ use crate::memos::{COUNT_LIMIT, Memo, Memos, SNOOZE_MINUTES};
 use crate::motions::{MotionId, Motions};
 use crate::notices::{Click, Kind, Notice, Notices};
 use crate::postit::{FanPick, Outcome, Postits};
-use crate::settings::{Key, Settings};
+use crate::settings::{CROWD_MAX, Key, Settings};
 use crate::settings_window::{self, DialogEvent, SettingsWindow, TAB_NAMES};
 use crate::stage::Stage;
 use crate::store::{self, State, Store};
@@ -85,7 +85,7 @@ const GREET_LIVE_TAG: &str = "greet-live";
 /// 처음 켰을 때의 인사가 떠 있는 시간. 인터넷을 쓴다는 안내는 클릭할 때까지 떠 있다.
 const GREET_LASTS: Duration = Duration::from_secs(12);
 /// 손을 흔들며 돌아가는 중인 꽃핀까지 쳐서, 꽃핀은 이만큼만 둔다. 잇달아 불러도 창이 끝없이 늘지 않는다.
-const WINDOW_LIMIT: usize = 18;
+const WINDOW_LIMIT: usize = CROWD_MAX as usize + 9;
 /// 더 부른 꽃핀이 나타나는 자리. 모니터 작업 영역의 너비와 높이를 1로 볼 때, 양 끝에서 조금 떨어진
 /// 아무 데나의 위쪽 공중이다.
 const GUEST_ACROSS: (f64, f64) = (0.1, 0.9);
@@ -827,7 +827,7 @@ impl App {
 
     /// 한 번에 나와 있을 수 있는 꽃핀의 수. 기본 꽃핀도 센다.
     fn crowd_limit(&self) -> usize {
-        self.settings.number(Key::MaxCharacters).clamp(1, 9) as usize
+        self.settings.number(Key::MaxCharacters).clamp(1, CROWD_MAX) as usize
     }
 
     /// 더 부른 꽃핀이 머무르는 시간. 보낼 때까지 머무르면 `None`이다.

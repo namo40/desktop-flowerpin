@@ -12,7 +12,19 @@ use serde_json::Value;
 use crate::actor::Habits;
 
 /// 파일 형식의 판. 형식을 바꾸면 올린다.
-pub const VERSION: i64 = 1;
+///
+/// 판 2에서 한 번에 둘 수 있는 꽃핀의 수가 9명에서 [`CROWD_MAX`]명으로 늘었다.
+pub const VERSION: i64 = 2;
+
+/// 한 번에 나와 있을 수 있는 꽃핀의 가장 큰 수. 기본 꽃핀도 센다.
+///
+/// 꽃핀이 모두 돌아다닐 때 CPU 한 코어의 20%쯤을 쓰는 수다. 만든 PC(Ryzen 9 3950X, 화면 배율 100%)에서
+/// 꽃핀 크기를 "크게", 가끔 하는 행동을 "자주"로 두고 수를 늘려 가며 쟀다(40명 19.9%, 45명 22.6%).
+/// 크기와 행동을 기본값으로 두면 같은 40명이 13%쯤이다. 느린 PC나 배율이 큰 화면에서는 더 든다.
+pub const CROWD_MAX: i64 = 40;
+
+/// 판 1에서 가장 많이 둘 수 있던 꽃핀의 수.
+const OLD_CROWD_MAX: i64 = 9;
 
 /// 설정 항목. 순서는 [`SPECS`]와 같다.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -103,23 +115,15 @@ pub const SPECS: [Spec; COUNT] = [
     choice(Key::IdleActions, "idle_actions", 1, &[number("적게", 50), number("보통", 100), number("자주", 200)], 1),
     // 더 부른 꽃핀이 머무는 시간(초). 0이면 보낼 때까지 머문다.
     Spec { key: Key::Stay, name: "stay_seconds", tab: 1, picks: &[], range: Some((0, 3600)), default: 30 },
-    choice(
-        Key::MaxCharacters,
-        "max_characters",
-        1,
-        &[
-            number("1명", 1),
-            number("2명", 2),
-            number("3명", 3),
-            number("4명", 4),
-            number("5명", 5),
-            number("6명", 6),
-            number("7명", 7),
-            number("8명", 8),
-            number("9명", 9),
-        ],
-        8,
-    ),
+    // 한 번에 나와 있을 수 있는 꽃핀의 수. 기본 꽃핀도 센다.
+    Spec {
+        key: Key::MaxCharacters,
+        name: "max_characters",
+        tab: 1,
+        picks: &[],
+        range: Some((1, CROWD_MAX)),
+        default: CROWD_MAX,
+    },
     // 방송
     flag(Key::LiveCheck, "live_check", 2, true),
     choice(Key::LiveCheckInterval, "live_check_min", 2, &[number("1분", 1), number("3분", 3), number("5분", 5)], 0),
@@ -229,9 +233,14 @@ impl Settings {
     pub fn from_json(text: &str) -> Option<Settings> {
         let value: Value = serde_json::from_str(text).ok()?;
         let object = value.as_object()?;
+        let old = object.get("version").and_then(Value::as_i64).unwrap_or(1) < 2;
         let mut settings = Settings::default();
         for spec in &SPECS {
             let Some(found) = object.get(spec.name) else { continue };
+            // 판 1에서 가장 많이 두게 해 둔 것은, 늘어난 뒤에도 가장 많이 두는 것으로 읽는다.
+            if old && spec.key == Key::MaxCharacters && found.as_i64() == Some(OLD_CROWD_MAX) {
+                continue;
+            }
             if let Some((least, most)) = spec.range {
                 if let Some(value) = found.as_i64().filter(|value| (least..=most).contains(value)) {
                     settings.set_number(spec.key, value);
@@ -286,7 +295,7 @@ mod tests {
         assert!(settings.is_on(Key::AlwaysOnTop));
         assert_eq!(settings.size_percent(), 100);
         assert_eq!(settings.habits(), Habits::default());
-        assert_eq!(settings.number(Key::MaxCharacters), 9);
+        assert_eq!(settings.number(Key::MaxCharacters), CROWD_MAX);
         assert_eq!(settings.number(Key::Stay), 30);
         assert_eq!(spec(Key::LiveStartNotice).picks[settings.get(Key::LiveStartNotice)].label, "말풍선 + Windows 알림");
         assert_eq!(spec(Key::LiveEndNotice).picks[settings.get(Key::LiveEndNotice)].label, "말풍선만");
@@ -306,7 +315,7 @@ mod tests {
         settings.set(Key::LiveEndNotice, 2);
         let text = settings.to_json();
         assert!(
-            text.contains("\"version\": 1")
+            text.contains("\"version\": 2")
                 && text.contains("\"size\": 125")
                 && text.contains("\"always_on_top\": false")
         );
@@ -346,6 +355,23 @@ mod tests {
         let mut expected = Settings::default();
         expected.set(Key::Size, 0);
         assert_eq!(settings, expected);
+    }
+
+    #[test]
+    fn the_old_crowd_limit_reads_as_the_new_one() {
+        let read = |text: &str| Settings::from_json(text).unwrap().number(Key::MaxCharacters);
+        // 판 1에서 가장 많이(9명) 두게 해 둔 것은 늘어난 수로 읽는다. 줄여 둔 것은 그대로다.
+        assert_eq!(read(r#"{"version": 1, "max_characters": 9}"#), CROWD_MAX);
+        assert_eq!(read(r#"{"max_characters": 9}"#), CROWD_MAX);
+        assert_eq!(read(r#"{"version": 1, "max_characters": 4}"#), 4);
+        // 판 2에서 9명으로 정한 것은 9명이다.
+        assert_eq!(read(r#"{"version": 2, "max_characters": 9}"#), 9);
+        // 범위를 벗어난 수는 기본값으로 둔다.
+        assert_eq!(read(&format!(r#"{{"version": 2, "max_characters": {}}}"#, CROWD_MAX + 1)), CROWD_MAX);
+        assert_eq!(read(r#"{"version": 2, "max_characters": 0}"#), CROWD_MAX);
+        let mut settings = Settings::default();
+        settings.set_number(Key::MaxCharacters, 9);
+        assert_eq!(Settings::from_json(&settings.to_json()), Some(settings));
     }
 
     #[test]
