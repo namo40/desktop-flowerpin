@@ -136,6 +136,7 @@ pub enum DialogEvent {
     /// 바로 가기 버튼. [`LINKS`]의 몇 번째인지다.
     Link(usize),
     OpenFolder,
+    /// 이 앱의 GitHub 페이지를 연다.
     OpenProject,
 }
 
@@ -246,8 +247,6 @@ impl SettingsWindow {
             SendMessageW(hwnd, WM_SETICON, 1, icon as LPARAM);
             SendMessageW(hwnd, WM_SETICON, 0, small as LPARAM);
             SendDlgItemMessageW(window.pages[INFO_TAB], ID_ICON, STM_SETICON, icon as WPARAM, 0);
-            // 저장소 주소가 아직 정해지지 않았다. 정해지면 연다.
-            EnableWindow(window.item(ID_OPEN_PROJECT), 0);
         }
 
         dialog::center_on(hwnd, center);

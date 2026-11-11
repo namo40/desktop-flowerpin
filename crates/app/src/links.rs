@@ -24,6 +24,9 @@ pub const LINKS: [Link; 4] = [
     },
 ];
 
+/// 이 앱의 GitHub 페이지. 설정 창의 정보 탭에서 연다.
+pub const PROJECT_URL: &str = "https://github.com/namo40/desktop-flowerpin";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -42,5 +45,6 @@ mod tests {
         assert!(LINKS[LIVE].url.starts_with("https://chzzk.naver.com/"));
         assert!(LINKS[YOUTUBE].url.starts_with("https://www.youtube.com/"));
         assert!(LINKS[CAFE].url.starts_with("https://cafe.naver.com/"));
+        assert!(PROJECT_URL.starts_with("https://github.com/"));
     }
 }

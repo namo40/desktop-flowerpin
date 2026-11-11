@@ -2099,8 +2099,7 @@ impl App {
                     self.open(&folder.to_string_lossy());
                 }
             }
-            // 저장소 주소가 정해지면 연다.
-            DialogEvent::OpenProject => {}
+            DialogEvent::OpenProject => self.open(links::PROJECT_URL),
         }
         None
     }
