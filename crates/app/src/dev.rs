@@ -49,6 +49,7 @@ use crate::character_window::CharacterWindow;
 use crate::geom::Rect;
 use crate::memos::Remind;
 use crate::motions::{MotionId, Motions};
+use crate::postit::FanPick;
 use crate::usage::{self, Meter};
 use crate::when::When;
 
@@ -177,6 +178,8 @@ pub enum Command {
     /// `crowd`: 꽃핀이 몇 명인지와, 화면에서 앞에 있는 차례를 보고서에 적는다. `--settings-shot`을 줬으면
     /// 꽃핀들을 그 차례대로 겹쳐 그린 그림도 쓴다.
     Crowd,
+    /// `fan ...`: 꽃핀 머리 위에 부채꼴로 뜨는 단추들을 다룬다.
+    Fan(FanStep),
     /// `settings ...`: 설정 창을 다룬다.
     Settings(Dialog),
     /// `say 초 제목 | 내용`: 말풍선으로 알릴 것을 줄에 세운다. 초가 0이면 클릭할 때까지 떠 있다.
@@ -235,6 +238,23 @@ pub enum MemoStep {
     List(ListStep),
     /// `memo snap`: 지금 모습을 `--settings-shot`에 그림으로 쓰고, 보고서에 포스트잇마다 한 줄씩 적는다.
     Snap,
+}
+
+/// `--script`의 `fan` 명령. 꽃핀을 오른쪽 클릭했을 때 머리 위에 뜨는 단추들을 다룬다.
+/// 단추의 이름은 invite, send, memo, chzzk, youtube, cafe다.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum FanStep {
+    /// `fan open [번호]`: 그 꽃핀(0부터)을 오른쪽 클릭한다. 떠 있던 꽃핀이면 거둔다.
+    Open(usize),
+    /// `fan close`: 단추를 오른쪽 클릭해 거둔다.
+    Close,
+    /// `fan press 이름`, `fan hover 이름`: 그 단추를 누르거나, 그 단추에 마우스를 올린다.
+    Press(FanPick),
+    Hover(FanPick),
+    /// `fan leave`: 마우스가 단추들을 벗어난다.
+    Leave,
+    /// `fan settle`: 펼쳐지는 움직임을 건너뛴다. 그림을 뽑을 때 쓴다.
+    Settle,
 }
 
 /// `--script`의 `memo list` 명령. 사람이 메모 목록 창에서 하는 일을 흉내 낸다.
@@ -361,6 +381,19 @@ pub fn parse_script(text: &str) -> Result<Vec<Step>, String> {
             (Some("menu"), 3) => Command::Menu(number(2)? as u32),
             (Some("target"), 3) => Command::Target(number(2)? as usize),
             (Some("crowd"), 2) => Command::Crowd,
+            (Some("fan"), 3..) => {
+                let pick = || FanPick::ALL.into_iter().find(|pick| words.get(3) == Some(&pick.word())).ok_or_else(bad);
+                Command::Fan(match (words[2], words.len()) {
+                    ("open", 3) => FanStep::Open(0),
+                    ("open", 4) => FanStep::Open(number(3)? as usize),
+                    ("close", 3) => FanStep::Close,
+                    ("press", 4) => FanStep::Press(pick()?),
+                    ("hover", 4) => FanStep::Hover(pick()?),
+                    ("leave", 3) => FanStep::Leave,
+                    ("settle", 3) => FanStep::Settle,
+                    _ => return Err(bad()),
+                })
+            }
             (Some("say"), 4..) => {
                 let text = words[3..].join(" ");
                 let (title, body) = text.split_once(" | ").unwrap_or((&text, ""));
@@ -513,14 +546,25 @@ pub fn stacking(windows: &[HWND]) -> Vec<usize> {
 }
 
 /// 꽃핀들의 창을 화면에 놓인 자리대로 겹쳐, 한 장의 그림(BMP)으로 저장한다. `windows`는 뒤에 있는 것부터다.
-pub fn crowd_shot(windows: &[&CharacterWindow], path: &Path) {
+///
+/// `over`는 그 위에 얹을 그림(자리와, 미리 곱한 알파의 픽셀)이다. 꽃핀 머리 위의 단추들을 함께 볼 때 쓴다.
+pub fn crowd_shot(windows: &[&CharacterWindow], over: Option<&(Rect, Vec<u32>)>, path: &Path) {
     let rects: Vec<Rect> = windows.iter().map(|window| window.screen_rect()).collect();
-    let Some(all) = rects.iter().copied().reduce(|all, rect| all.union(rect)) else { return };
+    let with_over = rects.iter().copied().chain(over.map(|(rect, _)| *rect));
+    let Some(all) = with_over.reduce(|all, rect| all.union(rect)) else { return };
     let (width, height) = (all.w as usize, all.h as usize);
     // 바탕화면을 흉내 낸 파란 바탕.
     let mut desk = vec![[0x3Bu8, 0x78, 0xDC]; width * height];
     for (window, rect) in windows.iter().zip(&rects) {
         for (row, line) in window.shown().chunks(rect.w as usize).enumerate() {
+            let start = (rect.y - all.y) as usize * width + row * width + (rect.x - all.x) as usize;
+            for (under, &pixel) in desk[start..start + line.len()].iter_mut().zip(line) {
+                blend(under, pixel);
+            }
+        }
+    }
+    if let Some((rect, pixels)) = over {
+        for (row, line) in pixels.chunks(rect.w as usize).enumerate() {
             let start = (rect.y - all.y) as usize * width + row * width + (rect.x - all.x) as usize;
             for (under, &pixel) in desk[start..start + line.len()].iter_mut().zip(line) {
                 blend(under, pixel);
@@ -827,6 +871,28 @@ mod tests {
             .map(Command::Memo)
         );
         assert_eq!(parse_script("1 bubble dismiss").unwrap()[0].command, Command::BubbleDismiss);
+        // 꽃핀 머리 위의 단추들.
+        let fan = parse_script(
+            "1 fan open; 2 fan open 2; 3 fan hover chzzk; 4 fan press send; 5 fan leave; 6 fan settle; 7 fan close",
+        )
+        .unwrap();
+        let commands: Vec<Command> = fan.iter().map(|step| step.command.clone()).collect();
+        assert_eq!(
+            commands,
+            [
+                FanStep::Open(0),
+                FanStep::Open(2),
+                FanStep::Hover(FanPick::Chzzk),
+                FanStep::Press(FanPick::Send),
+                FanStep::Leave,
+                FanStep::Settle,
+                FanStep::Close
+            ]
+            .map(Command::Fan)
+        );
+        for wrong in ["1 fan", "1 fan press", "1 fan press jump", "1 fan open 1 2"] {
+            assert!(parse_script(wrong).is_err(), "{wrong}");
+        }
         // 메모 목록 창.
         let list = parse_script(
             "1 memo list open; 2 memo list open 300 200; 3 memo list filter alarm; 4 memo list sort; \

@@ -17,6 +17,7 @@
 
 mod alarm;
 mod draw;
+mod fan;
 mod list;
 mod panel;
 mod text;
@@ -40,11 +41,13 @@ use crate::when::When;
 use crate::win;
 use alarm::Alarm;
 use draw::{COLORS, Hit, Ink, Look, Rgb, TOOLS};
+use fan::Fan;
 use list::{FOUND_SIZE, FOUND_TIME, List};
 use panel::{Action, Draft, Kind, Model, Panel, Surface};
 use text::{DT_EDITCONTROL, DT_WORDBREAK, Font, Painter};
 use window::{Canvas, Cursor, Editor, Event};
 
+pub use fan::Pick as FanPick;
 pub use window::{NOTE_CLASS, menu};
 
 /// 움직이는 동안 시간을 흘리는 간격. 창을 옮기는 일은 이 간격으로 한다.
@@ -76,6 +79,10 @@ pub enum Outcome {
     Answered { id: u64, snooze: bool },
     /// 메모 목록에서 "새 메모"를 눌렀다. 새 포스트잇을 붙일 화면 좌표다.
     Create { x: i32, y: i32 },
+    /// 꽃핀 머리 위의 단추 가운데 하나를 눌렀다. 단추들은 이미 닫혔다.
+    Fan(FanPick),
+    /// 꽃핀 머리 위의 단추들이 아무것도 누르지 않은 채 닫혔다.
+    FanClosed,
 }
 
 /// 목표로 다가가는 값. 용수철처럼 조금 지나쳤다가 돌아온다.
@@ -295,6 +302,8 @@ pub struct Postits {
     search: Option<Editor>,
     /// 메모 목록을 닫을 때 있던 자리. 다시 열면 그 자리에 띄운다.
     list_spot: Option<(i32, i32)>,
+    /// 꽃핀 머리 위에 부채꼴로 뜬 단추들. 떠 있을 때만 있다.
+    fan: Option<Fan>,
     /// 움직이는 것이 있다. 있는 동안에는 짧은 간격으로 시간을 흘린다.
     awake: bool,
     last: Instant,
@@ -335,6 +344,7 @@ impl Postits {
             list: None,
             search: None,
             list_spot: None,
+            fan: None,
             awake: false,
             last: Instant::now(),
             wall,
@@ -850,6 +860,8 @@ impl Postits {
         {
             self.open_editor(index);
         }
+        // 꽃핀 머리 위의 단추들이 떠 있는 동안에도 시간을 흘린다. 펼쳐지고, 때가 되면 닫혀야 한다.
+        moving |= self.tick_fan(dt);
         // 위에서 깨운 것이 있으면 계속 흘린다.
         self.awake = moving || self.notes.iter().any(|note| note.stale || note.then.is_some());
         self.rest();
@@ -888,7 +900,7 @@ impl Postits {
     }
 
     fn handle(&mut self, event: Event, memos: &mut Memos) {
-        if self.list_event(event, memos) || self.panel_event(event, memos) {
+        if self.fan_event(event) || self.list_event(event, memos) || self.panel_event(event, memos) {
             self.wake();
             return;
         }

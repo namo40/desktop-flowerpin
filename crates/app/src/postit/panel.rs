@@ -162,6 +162,28 @@ impl<'a> Surface<'a> {
         });
     }
 
+    /// 그림을 찍는다. `pixels`는 한 변이 `side`px인 정사각형이고, 알파를 곱하지 않은 BGRA다.
+    /// `center`가 그림의 한가운데다.
+    pub fn picture(&mut self, pixels: &[[u8; 4]], side: i32, center: (f32, f32), alpha: f32) {
+        let left = (center.0 * self.scale - side as f32 / 2.0).round() as i32;
+        let top = (center.1 * self.scale - side as f32 / 2.0).round() as i32;
+        let clip = self.clip;
+        for y in 0..side {
+            for x in 0..side {
+                let (px, py) = (left + x, top + y);
+                let [blue, green, red, cover] = pixels[(y * side + x) as usize];
+                if cover == 0 || px < clip.0 || py < clip.1 || px >= clip.2 || py >= clip.3 {
+                    continue;
+                }
+                let at = py as usize * self.stride + px as usize;
+                let mut pixel = Pixel::unpack(self.pixels[at]);
+                let color = (red as f32 / 255.0, green as f32 / 255.0, blue as f32 / 255.0);
+                pixel.over(color, cover as f32 / 255.0 * alpha);
+                self.pixels[at] = pixel.pack(1.0);
+            }
+        }
+    }
+
     /// 미리 그려 둔 글자를 그 색으로 찍는다. `center`가 글자의 한가운데다.
     pub fn stamp(&mut self, block: &Block, center: (f32, f32), color: Rgb, alpha: f32) {
         let left = (center.0 * self.scale - block.w as f32 / 2.0).round() as i32;

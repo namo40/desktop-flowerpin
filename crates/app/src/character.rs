@@ -294,6 +294,11 @@ impl Character {
         self.stay = Stay::Guest(since);
     }
 
+    /// 기본 꽃핀으로 삼는다. 기본 꽃핀을 보냈을 때 남은 꽃핀이 그 자리를 잇는다.
+    pub fn set_home(&mut self) {
+        self.stay = Stay::Home;
+    }
+
     /// 창이 다른 꽃핀들보다 앞으로 나온 적이 있는지 묻고, 물은 것으로 적는다.
     pub fn take_raised(&mut self) -> bool {
         std::mem::take(&mut self.raised)
@@ -370,13 +375,7 @@ impl Character {
         (head, self.layout.size.0 / 3, monitor.work, self.look.dpi_override.unwrap_or(monitor.dpi))
     }
 
-    /// 메뉴에서 고를 수 있는 행동마다, 지금 보여 줄 수 있는지.
-    pub fn showable(&self, stage: &Stage) -> Vec<(Show, bool)> {
-        let around = Surroundings { perches: &self.perches, ..self.surroundings(self.monitor(stage)) };
-        Show::ALL.into_iter().map(|show| (show, self.actor.can_show(show, &around))).collect()
-    }
-
-    /// 메뉴에서 고른 행동을 바로 보여 준다. 그사이에 할 수 없게 됐으면 아무 일도 하지 않는다.
+    /// 시킨 행동을 바로 보여 준다. 지금 할 수 없으면 아무 일도 하지 않는다.
     pub fn show(&mut self, show: Show, motions: &Motions, stage: &Stage, now: Instant) {
         let around = Surroundings { perches: &self.perches, ..self.surroundings(self.monitor(stage)) };
         if self.actor.show(show, motions, &around) {

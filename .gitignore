@@ -13,5 +13,10 @@
 *.key
 /out/
 
-# 대체 그림 팩(코드로 그린 도형)만 예외로 둔다.
+# 대체 그림 팩(코드로 그린 도형)은 예외로 둔다.
 !/placeholder/**
+
+# 바로 가기 단추의 아이콘 셋도 예외로 둔다. 꽃핀 그림이 아니라 치지직, 유튜브, 네이버 카페의 아이콘이다.
+!/crates/app/res/icons/chzzk.png
+!/crates/app/res/icons/naver_cafe.png
+!/crates/app/res/icons/youtube.png

@@ -77,22 +77,17 @@ fn run(options: dev::Options) -> Result<Vec<String>, PackError> {
             Flow::Continue => {}
             Flow::Quit => break,
             Flow::Menu(x, y) => {
+                // 트레이 아이콘을 오른쪽 클릭했을 때의 메뉴.
                 let owner = app.menu_owner();
-                let shows = app.menu_shows();
-                // 메뉴가 떠 있는 동안에는 메뉴를 띄운 꽃핀이 멈춰서 기다린다.
-                app.hold_for_menu(&shows);
                 let live = app.live_menu();
                 let state = tray::MenuState {
                     live: live.as_ref(),
-                    guest: app.menu_on_guest(),
                     can_call: app.can_call(),
                     can_send: app.can_send(),
                     hidden: app.is_tucked(),
                 };
                 let item = app::run_modal(&mut app, || tray::pick(owner, x, y, &state));
-                let now = Instant::now();
-                app.release_held(now);
-                if app.picked(item, now)? {
+                if app.picked(item, Instant::now())? {
                     break;
                 }
             }

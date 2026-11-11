@@ -1,7 +1,8 @@
 //! 저장소에 그림, 그림 팩, 키가 들어가지 않게 지키는 검사.
 //!
 //! 한 번이라도 커밋되면 지워도 git 기록에서 되살릴 수 있다. 그래서 지금 git이 따라가는 파일뿐 아니라
-//! 지난 커밋에 있던 파일 이름까지 본다. 대체 그림 팩을 두는 `placeholder/` 폴더만 예외다.
+//! 지난 커밋에 있던 파일 이름까지 본다. 예외는 둘뿐이다: 대체 그림 팩을 두는 `placeholder/` 폴더와,
+//! 바로 가기 단추에 쓰는 아이콘 셋([`LINK_ICONS`]).
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -30,8 +31,14 @@ fn git_lines(args: &[&str]) -> Option<Vec<String>> {
     Some(String::from_utf8_lossy(&output.stdout).lines().map(str::to_owned).filter(|l| !l.is_empty()).collect())
 }
 
+/// 바로 가기 단추에 쓰는 아이콘. 치지직, 유튜브, 네이버 카페의 공식 아이콘을 크기만 맞춘 것이다.
+/// 꽃핀 그림이 아니어서 저장소에 둔다. 이 이름의 파일만, 이 크기일 때만 받는다.
+const LINK_ICONS: [&str; 3] =
+    ["crates/app/res/icons/chzzk.png", "crates/app/res/icons/naver_cafe.png", "crates/app/res/icons/youtube.png"];
+const LINK_ICON_SIDE: u32 = 96;
+
 fn is_allowed(path: &str) -> bool {
-    path.starts_with("placeholder/")
+    path.starts_with("placeholder/") || LINK_ICONS.contains(&path)
 }
 
 fn has_forbidden_extension(path: &str) -> bool {
@@ -71,6 +78,27 @@ fn history_holds_no_art() {
     problems.sort();
     problems.dedup();
     assert!(problems.is_empty(), "지난 커밋에 그림이나 팩이 들어간 적이 있습니다:\n{problems:#?}");
+}
+
+/// 아이콘 폴더에는 정해 둔 아이콘 셋만 있고, 모두 작은 정사각형 PNG다. 다른 그림을 이 폴더에 넣어 검사를
+/// 비켜 가지 못하게 한다.
+#[test]
+fn icon_folder_holds_only_the_link_icons() {
+    let folder = repo_root().join("crates/app/res/icons");
+    let mut found: Vec<String> = std::fs::read_dir(&folder)
+        .expect("아이콘 폴더")
+        .map(|entry| format!("crates/app/res/icons/{}", entry.expect("파일").file_name().to_string_lossy()))
+        .collect();
+    found.sort();
+    assert_eq!(found, LINK_ICONS);
+    for path in LINK_ICONS {
+        let bytes = std::fs::read(repo_root().join(path)).expect(path);
+        assert!(bytes.starts_with(b"\x89PNG\r\n\x1a\n"), "{path}: PNG가 아님");
+        // PNG의 첫 덩어리(IHDR)에 너비와 높이가 있다.
+        let number = |at: usize| u32::from_be_bytes(bytes[at..at + 4].try_into().expect("4바이트"));
+        assert_eq!((number(16), number(20)), (LINK_ICON_SIDE, LINK_ICON_SIDE), "{path}");
+        assert!(bytes.len() < 16 * 1024, "{path}: 아이콘치고 너무 큼");
+    }
 }
 
 /// `placeholder/`에는 대체 그림 팩만 둘 수 있다. 진짜 그림 팩을 여기에 잘못 넣으면 그대로 공개된다.

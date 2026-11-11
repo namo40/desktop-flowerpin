@@ -9,6 +9,11 @@ pub struct Link {
     pub url: &'static str,
 }
 
+/// 꽃핀 머리 위의 단추가 여는 것이 [`LINKS`]의 몇 번째인지: 치지직 방송, 유튜브, 팬카페.
+pub const LIVE: usize = 0;
+pub const YOUTUBE: usize = 1;
+pub const CAFE: usize = 2;
+
 pub const LINKS: [Link; 4] = [
     Link { name: "방송 (치지직)", url: "https://chzzk.naver.com/a86031fdfeb1b223ad1172cf6ba4b94e" },
     Link { name: "유튜브", url: "https://www.youtube.com/@KoKopinya" },
@@ -30,5 +35,12 @@ mod tests {
             assert!(!link.name.is_empty());
             assert!(LINKS[..i].iter().all(|other| other.url != link.url && other.name != link.name));
         }
+    }
+
+    #[test]
+    fn the_buttons_open_the_right_links() {
+        assert!(LINKS[LIVE].url.starts_with("https://chzzk.naver.com/"));
+        assert!(LINKS[YOUTUBE].url.starts_with("https://www.youtube.com/"));
+        assert!(LINKS[CAFE].url.starts_with("https://cafe.naver.com/"));
     }
 }

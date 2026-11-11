@@ -27,12 +27,12 @@ use crate::clock::WakeTimer;
 use crate::desktop::Desktop;
 use crate::dev;
 use crate::frames::Frames;
-use crate::links::LINKS;
+use crate::links::{self, LINKS};
 use crate::live::{self, Event, Live, Reply, Tracker, View};
 use crate::memos::{COUNT_LIMIT, Memo, Memos, SNOOZE_MINUTES};
 use crate::motions::{MotionId, Motions};
 use crate::notices::{Click, Kind, Notice, Notices};
-use crate::postit::{Outcome, Postits};
+use crate::postit::{FanPick, Outcome, Postits};
 use crate::settings::{Key, Settings};
 use crate::settings_window::{self, DialogEvent, SettingsWindow, TAB_NAMES};
 use crate::stage::Stage;
@@ -876,6 +876,7 @@ impl App {
                     "잠깐 숨기기"
                 };
                 self.note(now, format!("꽃핀을 숨김: {why}"));
+                self.close_fan(now);
                 // 잡고 있던 꽃핀은 놓는다.
                 if let Pointer::Dragging { hwnd } = self.pointer
                     && let Some(index) = self.find(hwnd)
@@ -939,17 +940,6 @@ impl App {
         self.guests().next().is_some()
     }
 
-    /// 메뉴를 띄운 꽃핀이 더 부른 꽃핀인가.
-    pub fn menu_on_guest(&self) -> bool {
-        self.menu_guest().is_some()
-    }
-
-    /// 메뉴를 띄운 꽃핀이 머무르고 있는, 더 부른 꽃핀이면 그 꽃핀이 몇 번째인지.
-    fn menu_guest(&self) -> Option<usize> {
-        let index = self.menu_target.and_then(|hwnd| self.find(hwnd))?;
-        self.guests().find(|&guest| guest == index)
-    }
-
     /// 꽃핀을 하나 더 부른다. 메뉴를 띄운 꽃핀이 있는 모니터의 위쪽 공중에 나타나 떨어진다.
     /// 트레이에서 불렀으면 기본 꽃핀이 있는 모니터다.
     fn call_guest(&mut self, now: Instant) -> Result<(), PackError> {
@@ -986,9 +976,33 @@ impl App {
 
     /// 꽃핀 하나를 돌려보낸다. 손을 흔들고 사라진다. 공중에 있으면 내려와 선 뒤에 사라진다.
     fn send(&mut self, index: usize, now: Instant) {
+        // 머리 위에 단추들을 띄워 둔 꽃핀이면 단추들을 거둔다. 멈춰 세워 둔 채로는 돌아가지 못한다.
+        if self.held == Some(self.characters[index].window().hwnd()) {
+            self.close_fan(now);
+        }
         self.characters[index].actor_mut().leave(&self.motions);
         self.characters[index].wake(now);
         self.note(now, format!("꽃핀을 돌려보냄: {index}번"));
+    }
+
+    /// 꽃핀 하나를 골라 돌려보낸다. 기본 꽃핀도 보낼 수 있다. 그러면 가장 먼저 초대한 꽃핀이 기본 꽃핀이 된다.
+    /// 꽃핀이 혼자면 보내지 않는다.
+    fn send_one(&mut self, index: usize, now: Instant) {
+        let Some(character) = self.characters.get(index) else { return };
+        if self.staying() <= 1 || character.actor().is_leaving() {
+            return;
+        }
+        if character.stay() != Stay::Home {
+            return self.send(index, now);
+        }
+        let Some(heir) = self.guests().next() else { return };
+        // 자리를 맞바꾼다. 기본 꽃핀은 늘 맨 앞에 있다.
+        self.characters[heir].set_home();
+        self.characters[index].set_guest(now);
+        self.characters.swap(index, heir);
+        self.send(heir, now);
+        self.note(now, "기본 꽃핀이 바뀜".to_string());
+        self.restack();
     }
 
     /// 더 부른 꽃핀을 모두 돌려보낸다.
@@ -1086,6 +1100,8 @@ impl App {
                     self.bubble_clicked();
                 }
                 WindowEvent::Press { hwnd, x, y } => {
+                    // 머리 위에 단추들이 떠 있었으면 거둔다.
+                    self.close_fan(now);
                     let grabbable = self.find(hwnd).is_some_and(|i| self.characters[i].actor().can_grab());
                     if grabbable && matches!(self.pointer, Pointer::Idle) {
                         self.pointer = Pointer::Pressing { hwnd, at: (x, y), since: now };
@@ -1146,10 +1162,13 @@ impl App {
                 }
                 // 말풍선을 오른쪽 클릭하면 딸린 일(방송 열기 같은 것)은 하지 않고 닫는다.
                 WindowEvent::Menu { hwnd, .. } if self.is_bubble(hwnd) => self.bubble_dismissed(now),
-                // 꽃핀을 오른쪽 클릭해도 트레이 아이콘과 같은 메뉴가 뜬다. 행동은 오른쪽 클릭한 꽃핀이 한다.
-                WindowEvent::Menu { hwnd, x, y } => {
-                    self.menu_target = Some(hwnd);
-                    flow = Flow::Menu(x, y);
+                // 꽃핀을 오른쪽 클릭하면 머리 위에 단추들이 부채꼴로 뜬다. 떠 있는 꽃핀을 다시 누르면 거둔다.
+                WindowEvent::Menu { hwnd, .. } => {
+                    let again = self.postits.has_fan() && self.menu_target == Some(hwnd);
+                    self.close_fan(now);
+                    if let (false, Some(index)) = (again, self.find(hwnd)) {
+                        self.open_fan(index);
+                    }
                 }
                 WindowEvent::StageChanged => stage_changed = true,
             }
@@ -1165,6 +1184,7 @@ impl App {
         for event in tray::take_events() {
             match event {
                 TrayEvent::Menu { x, y } => {
+                    self.close_fan(now);
                     self.menu_target = None;
                     flow = Flow::Menu(x, y);
                 }
@@ -1307,7 +1327,7 @@ impl App {
         }
         let wall = self.wall(now);
         for outcome in self.postits.frame(&mut self.memos, wall, now) {
-            if let Some(next) = self.memo_outcome(outcome, now) {
+            if let Some(next) = self.memo_outcome(outcome, now)? {
                 flow = next;
             }
         }
@@ -1388,6 +1408,9 @@ impl App {
         }
         let before = self.characters.len();
         self.characters.retain(|character| !character.actor().is_gone());
+        if self.postits.has_fan() && self.menu_target.is_none_or(|hwnd| self.find(hwnd).is_none()) {
+            self.close_fan(now);
+        }
         if self.characters.len() != before {
             self.note(
                 now,
@@ -1567,11 +1590,11 @@ impl App {
     }
 
     /// 포스트잇이 알려 온 일을 한다. 메뉴나 물음 창을 띄워야 하면 그것을 돌려준다.
-    fn memo_outcome(&mut self, outcome: Outcome, now: Instant) -> Option<Flow> {
+    fn memo_outcome(&mut self, outcome: Outcome, now: Instant) -> Result<Option<Flow>, PackError> {
         match outcome {
             Outcome::Changed => self.store.memos_changed(now),
-            Outcome::Menu { id, x, y } => return Some(Flow::MemoMenu(id, x, y)),
-            Outcome::AskDelete(id) => return Some(Flow::ConfirmDelete(id)),
+            Outcome::Menu { id, x, y } => return Ok(Some(Flow::MemoMenu(id, x, y))),
+            Outcome::AskDelete(id) => return Ok(Some(Flow::ConfirmDelete(id))),
             Outcome::Answered { id, snooze: true } => {
                 if self.memos.snooze(id, self.wall(now)) {
                     self.store.memos_changed(now);
@@ -1581,8 +1604,60 @@ impl App {
             }
             Outcome::Answered { id, snooze: false } => self.note(now, format!("알림을 확인함: 메모 {id}")),
             Outcome::Create { x, y } => self.new_memo((x, y)),
+            Outcome::Fan(pick) => self.fan_picked(pick, now)?,
+            Outcome::FanClosed => self.release_held(now),
         }
-        None
+        Ok(None)
+    }
+
+    /// 꽃핀의 머리 위에 단추들을 부채꼴로 띄운다. 그동안 그 꽃핀은 멈춰서 기다린다.
+    ///
+    /// 무엇인가를 딛고 서 있을 때만 띄운다. 떠 있거나 잡혀 있거나 돌아가는 중이면 띄우지 않는다.
+    /// 꽃핀이 혼자면 "보내기"는 넣지 않는다.
+    fn open_fan(&mut self, index: usize) {
+        let character = &self.characters[index];
+        let standing = character.actor().can_speak() && !character.actor().is_leaving();
+        if !standing || self.quitting.is_some() || self.out_of_sight {
+            return;
+        }
+        let (head, _, bounds, dpi) = character.head(&self.stage);
+        let hwnd = character.window().hwnd();
+        let mut buttons = vec![(FanPick::Invite, self.can_call())];
+        if self.staying() > 1 {
+            buttons.push((FanPick::Send, true));
+        }
+        buttons.extend([FanPick::Memo, FanPick::Chzzk, FanPick::Youtube, FanPick::Cafe].map(|pick| (pick, true)));
+        self.postits.open_fan(head, bounds, dpi, &buttons);
+        (self.menu_target, self.held) = (Some(hwnd), Some(hwnd));
+    }
+
+    /// 머리 위의 단추들을 거두고, 멈춰 세워 둔 꽃핀을 다시 움직이게 한다.
+    fn close_fan(&mut self, now: Instant) {
+        if self.postits.has_fan() {
+            self.postits.close_fan();
+            self.release_held(now);
+        }
+    }
+
+    /// 머리 위의 단추 가운데 하나를 눌렀다. 단추들은 이미 닫혔다.
+    fn fan_picked(&mut self, pick: FanPick, now: Instant) -> Result<(), PackError> {
+        let index = self.menu_character();
+        self.release_held(now);
+        match pick {
+            FanPick::Invite => self.call_guest(now)?,
+            FanPick::Send => self.send_one(index, now),
+            FanPick::Memo => {
+                // 새 포스트잇은 그 꽃핀의 오른쪽 옆에 붙는다.
+                if let Some(character) = self.characters.get(index) {
+                    let (head, half_body, _, dpi) = character.head(&self.stage);
+                    self.new_memo((head.0 + half_body + 110 * dpi.max(96) as i32 / 96, head.1));
+                }
+            }
+            FanPick::Chzzk => self.open(LINKS[links::LIVE].url),
+            FanPick::Youtube => self.open(LINKS[links::YOUTUBE].url),
+            FanPick::Cafe => self.open(LINKS[links::CAFE].url),
+        }
+        Ok(())
     }
 
     /// 그 메모의 포스트잇 창. 물음 창을 그 위에 띄우는 데 쓴다.
@@ -1727,11 +1802,7 @@ impl App {
             Some(MenuItem::CallOne) => self.call_guest(now)?,
             Some(MenuItem::SendAll) => self.send_all(now),
             // 고르는 사이에 그 꽃핀이 돌아갔으면 아무 일도 하지 않는다.
-            Some(MenuItem::SendThis) => {
-                if let Some(index) = self.menu_guest() {
-                    self.send(index, now);
-                }
-            }
+            Some(MenuItem::SendThis) => self.send_one(self.menu_character(), now),
             Some(MenuItem::Hide(index)) => {
                 self.hide = match tray::HIDES[index].1 {
                     Some(seconds) => Hide::Until(now + Duration::from_secs(seconds)),
@@ -1762,41 +1833,19 @@ impl App {
         Ok(false)
     }
 
-    /// 메뉴에서 고른 행동을 할 꽃핀. 메뉴를 띄운 꽃핀이고, 트레이에서 띄웠거나 그 꽃핀이 없어졌으면 첫 꽃핀이다.
+    /// 단추를 누르거나 행동을 시킬 꽃핀. 머리 위에 단추들을 띄운 꽃핀이고, 트레이에서 골랐거나 그 꽃핀이
+    /// 없어졌으면 첫 꽃핀이다.
     fn menu_character(&self) -> usize {
         self.menu_target.and_then(|hwnd| self.find(hwnd)).unwrap_or(0)
     }
 
-    /// 메뉴가 떠 있는 동안, 메뉴에서 고른 행동을 할 꽃핀을 멈춰 세운다. `shows`는 [`App::menu_shows`]가 준 것이다.
-    ///
-    /// 계속 움직이게 두면 고르는 사이에 걷거나 다른 행동을 시작해서, 메뉴에 보이는 것과 실제로 할 수 있는
-    /// 것이 달라진다. 고를 수 있는 행동이 하나도 없으면(떠 있거나 잡혀 있으면) 멈추지 않는다.
-    pub fn hold_for_menu(&mut self, shows: &[(Show, bool)]) {
-        if shows.iter().any(|&(_, possible)| possible) {
-            self.held = self.characters.get(self.menu_character()).map(|character| character.window().hwnd());
-        }
-    }
-
     /// 멈춰 세워 둔 꽃핀을 다시 움직이게 한다.
-    pub fn release_held(&mut self, now: Instant) {
+    fn release_held(&mut self, now: Instant) {
         if let Some(hwnd) = self.held.take()
             && let Some(index) = self.find(hwnd)
         {
             self.characters[index].resume(now);
         }
-    }
-
-    /// 메뉴의 "행동" 아래에 넣을 행동과, 지금 고를 수 있는지. 숨겨 둔 동안에는 아무것도 고를 수 없다.
-    pub fn menu_shows(&self) -> Vec<(Show, bool)> {
-        let mut shows = self
-            .characters
-            .get(self.menu_character())
-            .map(|character| character.showable(&self.stage))
-            .unwrap_or_default();
-        if self.out_of_sight {
-            shows.iter_mut().for_each(|(_, possible)| *possible = false);
-        }
-        shows
     }
 
     /// 사용자가 꽃핀을 잠깐 숨겨 둔 중인가. 메뉴에 "다시 보이기"를 넣는다.
@@ -1826,6 +1875,7 @@ impl App {
         if self.quitting.is_some() || self.out_of_sight {
             return true;
         }
+        self.close_fan(now);
         self.quitting = Some(now + QUIT_LIMIT);
         for character in &mut self.characters {
             character.actor_mut().leave(&self.motions);
@@ -1844,6 +1894,7 @@ impl App {
 
     /// 눌린 꽃핀을 잡는다. 잡을 수 없게 됐으면 누르고 있던 것을 그만둔다.
     fn start_drag(&mut self, hwnd: HWND, cursor: (i32, i32), now: Instant) {
+        self.close_fan(now);
         self.pointer = Pointer::Idle;
         if let Some(i) = self.find(hwnd) {
             let target = self.characters[i].drag_target(cursor, &self.stage);
@@ -2043,6 +2094,16 @@ impl App {
             dev::Command::Target(index) => {
                 self.menu_target = self.characters.get(index).map(|character| character.window().hwnd());
             }
+            dev::Command::Fan(dev::FanStep::Open(index)) => {
+                if let Some(hwnd) = self.characters.get(index).map(|character| character.window().hwnd()) {
+                    let again = self.postits.has_fan() && self.menu_target == Some(hwnd);
+                    self.close_fan(now);
+                    if !again {
+                        self.open_fan(index);
+                    }
+                }
+            }
+            dev::Command::Fan(step) => self.postits.fan_script(&step),
             dev::Command::Crowd => {
                 // 화면에서 앞에 있는 꽃핀부터 차례로 적는다. 창의 순서를 직접 읽은 것이다.
                 let windows: Vec<HWND> = self.characters.iter().map(|character| character.window().hwnd()).collect();
@@ -2060,11 +2121,15 @@ impl App {
                     now,
                     format!("꽃핀 {}명(보이는 창 {seen}개), 앞에서부터 {}", self.characters.len(), names.join(" ")),
                 );
+                if let Some(line) = self.postits.describe_fan() {
+                    self.note(now, line);
+                }
                 self.dev.snaps += 1;
                 if let Some(path) = &self.dev.options.settings_shot {
                     let back_first: Vec<_> =
                         front_first.iter().rev().map(|&index| self.characters[index].window()).collect();
-                    dev::crowd_shot(&back_first, &dev::numbered(path, self.dev.snaps));
+                    let fan = self.postits.fan_shot();
+                    dev::crowd_shot(&back_first, fan.as_ref(), &dev::numbered(path, self.dev.snaps));
                 }
             }
             dev::Command::Settings(dialog) => {
