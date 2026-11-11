@@ -231,7 +231,7 @@ pub fn running_for(opened: &str, now: i64) -> Option<String> {
 /// `enabled`는 방송 상태 확인이 켜져 있는지, `checked`는 마지막으로 확인한 이 PC의 시각이다.
 pub fn status_line(view: &View, enabled: bool, checked: Option<When>) -> String {
     if !enabled {
-        return "방송 상태 확인이 꺼져 있습니다. 인터넷을 쓰지 않습니다.".to_string();
+        return "방송 상태 확인이 꺼져 있습니다. 치지직에 묻지 않습니다.".to_string();
     }
     let when = checked.map_or(String::new(), |checked| format!(" · 마지막 확인 {}", checked.clock()));
     match view {
