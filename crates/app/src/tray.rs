@@ -59,6 +59,9 @@ const TICK_EVERY_MS: u32 = 15;
 /// "잠깐 숨기기"에서 고를 수 있는 것. 이름과, 숨겨 둘 시간(초)이다. 시간이 없으면 다시 보이라고 할 때까지다.
 pub const HIDES: [(&str, Option<u64>); 3] = [("10분", Some(600)), ("1시간", Some(3600)), ("다시 켤 때까지", None)];
 
+/// "여러 명 초대하기"에서 고를 수 있는 수.
+pub const CALLS: [usize; 3] = [3, 5, 10];
+
 /// 메뉴에서 고를 수 있는 것.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MenuItem {
@@ -76,6 +79,10 @@ pub enum MenuItem {
     MemoList,
     /// 꽃핀을 하나 더 초대한다.
     CallOne,
+    /// 꽃핀을 여러 명 초대한다. [`CALLS`]의 몇 번째인지다.
+    CallMany(usize),
+    /// 남은 자리만큼 꽃핀을 초대한다.
+    CallFill,
     /// 더 부른 꽃핀을 모두 돌려보낸다.
     SendAll,
     /// 꽃핀 하나를 돌려보낸다. 메뉴에는 없고, 확인용 스크립트가 번호로 고른다.
@@ -106,6 +113,8 @@ impl MenuItem {
             MenuItem::Hide(index) => 10 + index as u32,
             MenuItem::Unhide => 13,
             MenuItem::MemoList => 14,
+            MenuItem::CallMany(index) => 20 + index as u32,
+            MenuItem::CallFill => 23,
             MenuItem::Link(index) => 100 + index as u32,
             MenuItem::Show(show) => 200 + Show::ALL.iter().position(|&other| other == show).unwrap_or(0) as u32,
         }
@@ -125,6 +134,8 @@ impl MenuItem {
             10..=12 => Some(MenuItem::Hide((id - 10) as usize)),
             13 => Some(MenuItem::Unhide),
             14 => Some(MenuItem::MemoList),
+            20..=22 => Some(MenuItem::CallMany((id - 20) as usize)),
+            23 => Some(MenuItem::CallFill),
             100.. if ((id - 100) as usize) < LINKS.len() => Some(MenuItem::Link((id - 100) as usize)),
             200.. if ((id - 200) as usize) < Show::ALL.len() => Some(MenuItem::Show(Show::ALL[(id - 200) as usize])),
             _ => None,
@@ -189,6 +200,8 @@ pub struct MenuState<'a> {
     pub live: Option<&'a (String, String)>,
     /// 꽃핀을 더 부를 수 있는가.
     pub can_call: bool,
+    /// 먼저 온 꽃핀을 돌려보내지 않고 더 부를 수 있는 꽃핀의 수. "가득 채우기"가 이만큼 부른다.
+    pub room: usize,
     /// 돌려보낼 꽃핀이 있는가.
     pub can_send: bool,
     /// 꽃핀을 잠깐 숨겨 둔 중이다. "잠깐 숨기기" 자리에 "다시 보이기"를 넣는다.
@@ -232,7 +245,8 @@ fn build(state: &MenuState) -> Option<HMENU> {
         }
         let links = CreatePopupMenu();
         let memos = CreatePopupMenu();
-        if menu.is_null() || links.is_null() || memos.is_null() {
+        let calls = CreatePopupMenu();
+        if menu.is_null() || links.is_null() || memos.is_null() || calls.is_null() {
             return None;
         }
         let add = |menu, item: MenuItem, label: &str| {
@@ -251,6 +265,19 @@ fn build(state: &MenuState) -> Option<HMENU> {
         add(memos, MenuItem::MemoShow, "모두 앞으로 가져오기");
         add(memos, MenuItem::MemoTidy, "다시 줄 세우기");
         add_if(menu, state.can_call, MenuItem::CallOne, "꽃핀 초대하기");
+        // 여러 명을 한꺼번에 초대한다. 남은 자리가 없으면 "가득 채우기"만 흐리다. 수를 고르면 먼저 온 꽃핀이
+        // 자리를 내준다. 더 초대할 수 없으면 줄이 통째로 흐리다.
+        for (index, count) in CALLS.iter().enumerate() {
+            add(calls, MenuItem::CallMany(index), &format!("{count}명"));
+        }
+        let fill = if state.room > 0 {
+            format!("가득 채우기 ({}명)", state.room)
+        } else {
+            "가득 채우기".to_string()
+        };
+        add_if(calls, state.room > 0, MenuItem::CallFill, &fill);
+        let flags = if state.can_call { MF_POPUP } else { MF_POPUP | MF_GRAYED };
+        AppendMenuW(menu, flags, calls as usize, wide("여러 명 초대하기").as_ptr());
         add_if(menu, state.can_send, MenuItem::SendAll, "모두 보내기");
         AppendMenuW(menu, MF_SEPARATOR, 0, null());
         AppendMenuW(menu, MF_POPUP, memos as usize, wide("메모").as_ptr());
@@ -688,35 +715,74 @@ mod tests {
                 let length = unsafe { GetMenuStringW(menu, at, text.as_mut_ptr(), text.len() as i32, MF_BYPOSITION) };
                 let state = unsafe { GetMenuState(menu, at, MF_BYPOSITION) };
                 let name = String::from_utf16_lossy(&text[..length.max(0) as usize]);
-                // 나누는 줄은 늘 흐린 것으로 읽힌다. 흐린 줄로 치지 않는다.
-                if state & MF_SEPARATOR != 0 { ("-".to_string(), false) } else { (name, state & MF_GRAYED != 0) }
+                // 나누는 줄은 늘 흐린 것으로 읽힌다. 흐린 줄로 치지 않는다. 옆으로 펼치는 줄은 윗바이트에 딸린 줄의
+                // 수가 들어 있어서, 나누는 줄인지를 거기서 읽으면 안 된다.
+                if state & MF_POPUP == 0 && state & MF_SEPARATOR != 0 {
+                    ("-".to_string(), false)
+                } else {
+                    (name, state & MF_GRAYED != 0)
+                }
             })
             .collect()
     }
 
+    /// 흐린 줄의 이름을 괄호로 싼다.
+    fn marked(lines: Vec<(String, bool)>) -> Vec<String> {
+        lines.into_iter().map(|(name, grayed)| if grayed { format!("({name})") } else { name }).collect()
+    }
+
     #[test]
     fn the_menu_lists_what_can_be_done_now() {
-        let state = |can_call, can_send| MenuState { live: None, can_call, can_send, hidden: false };
+        let state = |can_call, can_send| MenuState { live: None, can_call, can_send, hidden: false, room: 3 };
         let names = |state: &MenuState| {
             let menu = build(state).expect("메뉴");
-            let read = lines(menu);
+            let read = marked(lines(menu));
             unsafe { DestroyMenu(menu) };
-            read.into_iter().map(|(name, grayed)| if grayed { format!("({name})") } else { name }).collect::<Vec<_>>()
+            read
         };
         // 보낼 꽃핀이 없으면 "모두 보내기"가 흐리다.
         assert_eq!(
             names(&state(true, false)),
-            ["꽃핀 초대하기", "(모두 보내기)", "-", "메모", "-", "잠깐 숨기기", "-", "바로 가기", "설정...", "끝내기"]
+            [
+                "꽃핀 초대하기",
+                "여러 명 초대하기",
+                "(모두 보내기)",
+                "-",
+                "메모",
+                "-",
+                "잠깐 숨기기",
+                "-",
+                "바로 가기",
+                "설정...",
+                "끝내기"
+            ]
         );
         // 숨겨 둔 동안에는 "잠깐 숨기기" 자리에 "다시 보이기"가 온다.
         let hidden = MenuState { hidden: true, ..state(false, false) };
-        assert_eq!(names(&hidden)[4..], ["-", "다시 보이기", "-", "바로 가기", "설정...", "끝내기"]);
-        // 더 초대할 수 없으면 "꽃핀 초대하기"가 흐리다.
-        assert_eq!(names(&state(false, true))[..2], ["(꽃핀 초대하기)", "모두 보내기"]);
+        assert_eq!(names(&hidden)[5..], ["-", "다시 보이기", "-", "바로 가기", "설정...", "끝내기"]);
+        // 더 초대할 수 없으면 초대하는 두 줄이 흐리다.
+        assert_eq!(names(&state(false, true))[..3], ["(꽃핀 초대하기)", "(여러 명 초대하기)", "모두 보내기"]);
         // 방송 중이면 방송 정보가 맨 위에 들어간다.
         let live = ("제목 & 제목".to_string(), "게임 · 시청자 10명".to_string());
         let on_air = MenuState { live: Some(&live), ..state(true, true) };
         assert_eq!(names(&on_air)[..3], ["● 방송 중", "-", "꽃핀 초대하기"]);
+    }
+
+    #[test]
+    fn several_can_be_invited_at_once() {
+        use windows_sys::Win32::UI::WindowsAndMessaging::GetSubMenu;
+        let read = |room: usize| {
+            let state = MenuState { live: None, can_call: true, can_send: false, hidden: false, room };
+            let menu = build(&state).expect("메뉴");
+            // "꽃핀 초대하기" 바로 아래 줄에 딸린 메뉴다.
+            let names = marked(lines(unsafe { GetSubMenu(menu, 1) }));
+            unsafe { DestroyMenu(menu) };
+            names
+        };
+        assert_eq!(read(31), ["3명", "5명", "10명", "가득 채우기 (31명)"]);
+        // 남은 자리가 없으면 "가득 채우기"는 흐리다. 수를 고르면 먼저 온 꽃핀이 자리를 내준다.
+        assert_eq!(read(0), ["3명", "5명", "10명", "(가득 채우기)"]);
+        assert_eq!(CALLS.map(|count| format!("{count}명")), ["3명", "5명", "10명"]);
     }
 
     #[test]
@@ -725,6 +791,8 @@ mod tests {
         let mut items = vec![MenuItem::Quit, MenuItem::Settings, MenuItem::Watch];
         items.extend(memos);
         items.extend([MenuItem::CallOne, MenuItem::SendAll, MenuItem::SendThis, MenuItem::Unhide]);
+        items.extend((0..CALLS.len()).map(MenuItem::CallMany));
+        items.push(MenuItem::CallFill);
         items.extend((0..HIDES.len()).map(MenuItem::Hide));
         items.extend((0..LINKS.len()).map(MenuItem::Link));
         items.extend(Show::ALL.map(MenuItem::Show));
@@ -734,7 +802,7 @@ mod tests {
             assert_eq!(MenuItem::from_id(item.id()), Some(*item));
             assert!(items[..n].iter().all(|other| other.id() != item.id()), "{item:?}");
         }
-        for id in [0, 15, 99, 100 + LINKS.len() as u32, 199, 200 + Show::ALL.len() as u32] {
+        for id in [0, 15, 19, 24, 99, 100 + LINKS.len() as u32, 199, 200 + Show::ALL.len() as u32] {
             assert_eq!(MenuItem::from_id(id), None, "{id}");
         }
     }

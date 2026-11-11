@@ -83,6 +83,7 @@ fn run(options: dev::Options) -> Result<Vec<String>, PackError> {
                 let state = tray::MenuState {
                     live: live.as_ref(),
                     can_call: app.can_call(),
+                    room: app.room(),
                     can_send: app.can_send(),
                     hidden: app.is_tucked(),
                 };

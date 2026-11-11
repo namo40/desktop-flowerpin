@@ -90,6 +90,8 @@ const WINDOW_LIMIT: usize = CROWD_MAX as usize + 9;
 /// 아무 데나의 위쪽 공중이다.
 const GUEST_ACROSS: (f64, f64) = (0.1, 0.9);
 const GUEST_DOWN: (f64, f64) = (0.2, 0.35);
+/// 여러 명을 한꺼번에 초대했을 때, 한 명이 나타나고 다음 한 명이 나타나기까지의 사이.
+const CALL_GAP: Duration = Duration::from_millis(200);
 /// 화면을 전체 화면 프로그램이 쓰고 있는지 확인하는 간격.
 const SCREEN_CHECK: Duration = Duration::from_secs(5);
 
@@ -183,6 +185,8 @@ pub struct App {
     pointer: Pointer,
     /// 누르지 않은 채 꽃핀 위에서 마지막으로 움직인 곳. 문지른 거리를 재는 데 쓴다.
     hover: Option<(HWND, (i32, i32), Instant)>,
+    /// 줄줄이 오기로 한 꽃핀들.
+    calls: Calls,
     away: bool,
     /// 스크립트가 자리 비움을 정했다. 그 뒤로는 진짜 입력 시각을 보지 않는다.
     away_forced: bool,
@@ -237,6 +241,42 @@ pub struct App {
     /// 방해하면 안 되는 동안 알릴 때가 된 메모들. 그때가 지나면 포스트잇을 울린다.
     rings_waiting: Vec<u64>,
     dev: Dev,
+}
+
+/// 줄줄이 오기로 한 꽃핀들. 여러 명을 한꺼번에 초대하면 한 명씩 [`CALL_GAP`]만큼 사이를 두고 나타난다.
+#[derive(Debug, Default, PartialEq)]
+struct Calls {
+    /// 아직 오지 않은 꽃핀의 수.
+    waiting: usize,
+    /// 다음 꽃핀이 올 때. 올 꽃핀이 없으면 없다.
+    next: Option<Instant>,
+}
+
+impl Calls {
+    /// `count`명을 더 부른다. 오고 있는 꽃핀이 없었으면 첫 꽃핀은 바로 온다. 기다리는 꽃핀은 `most`명을
+    /// 넘지 않는다.
+    fn add(&mut self, count: usize, most: usize, now: Instant) {
+        self.waiting = (self.waiting + count).min(most);
+        if self.waiting > 0 && self.next.is_none() {
+            self.next = Some(now);
+        }
+    }
+
+    /// 한 명이 왔다. 올 꽃핀이 남았으면 다음 때를 잡는다.
+    fn came(&mut self, now: Instant) {
+        self.waiting = self.waiting.saturating_sub(1);
+        self.next = (self.waiting > 0).then(|| now + CALL_GAP);
+    }
+
+    /// 지금은 올 수 없다. `until`에 다시 본다.
+    fn put_off(&mut self, until: Instant) {
+        self.next = (self.waiting > 0).then_some(until);
+    }
+
+    /// 오기로 한 꽃핀들이 오지 않게 한다.
+    fn clear(&mut self) {
+        *self = Calls::default();
+    }
 }
 
 /// 꽃핀들을 뒤에 설 것부터 앞에 설 것까지 차례로 늘어놓는다. `guests`는 꽃핀마다 더 부른 꽃핀인지다.
@@ -343,6 +383,7 @@ impl App {
             characters: Vec::new(),
             pointer: Pointer::Idle,
             hover: None,
+            calls: Calls::default(),
             away: false,
             away_forced: false,
             next_away_check: started,
@@ -948,13 +989,56 @@ impl App {
         self.guests().next().is_some()
     }
 
+    /// 먼저 온 꽃핀을 돌려보내지 않고 더 부를 수 있는 꽃핀의 수. 오기로 하고 아직 오지 않은 꽃핀의 자리는 뺀다.
+    pub fn room(&self) -> usize {
+        if !self.can_call() {
+            return 0;
+        }
+        self.crowd_limit().saturating_sub(self.staying() + self.calls.waiting)
+    }
+
+    /// 꽃핀을 여러 명 초대한다. 한꺼번에 나타나지 않고 사이를 두고 줄줄이 온다. 기본 꽃핀이 있는 모니터에 온다.
+    ///
+    /// 자리보다 많이 부르면 한 명씩 올 때마다 가장 먼저 부른 꽃핀이 자리를 내준다. 더 부른 꽃핀이 앉을 수 있는
+    /// 자리보다 많이 불러 봐야 방금 온 꽃핀이 바로 돌아가게 되므로, 그 수까지만 부른다.
+    fn call_many(&mut self, count: usize, now: Instant) {
+        if count == 0 || !self.can_call() {
+            return;
+        }
+        let seats = self.crowd_limit().saturating_sub(1);
+        self.calls.add(count.min(seats), seats, now);
+        self.note(now, format!("꽃핀 {count}명을 초대함: 줄줄이 올 꽃핀 {}명", self.calls.waiting));
+    }
+
+    /// 줄줄이 오기로 한 꽃핀 가운데 올 때가 된 한 명을 나타나게 한다.
+    fn tend_calls(&mut self, now: Instant) -> Result<(), PackError> {
+        if self.calls.next.is_none_or(|at| now < at) {
+            return Ok(());
+        }
+        if self.can_call() {
+            self.calls.came(now);
+            self.call_guest_near(0, now)?;
+        } else if !self.out_of_sight && self.crowd_limit() > 1 {
+            // 돌아가는 중인 꽃핀이 많아 창을 더 만들 수 없다. 그 꽃핀들이 사라질 때까지 조금 기다린다.
+            self.calls.put_off(now + CALL_GAP);
+        } else {
+            // 꽃핀을 숨겼거나 한 명만 두기로 했다. 남은 꽃핀은 오지 않는다.
+            self.calls.clear();
+        }
+        Ok(())
+    }
+
     /// 꽃핀을 하나 더 부른다. 단추를 띄운 꽃핀이 있는 모니터의 위쪽 공중에 나타나 떨어진다.
     /// 트레이에서 불렀으면 기본 꽃핀이 있는 모니터다.
     fn call_guest(&mut self, now: Instant) -> Result<(), PackError> {
+        self.call_guest_near(self.menu_character(), now)
+    }
+
+    /// 꽃핀을 하나 더 나타나게 한다. `near`번째 꽃핀이 있는 모니터의 위쪽 공중에 나타나 떨어진다.
+    fn call_guest_near(&mut self, near: usize, now: Instant) -> Result<(), PackError> {
         if !self.can_call() {
             return Ok(());
         }
-        let near = self.menu_character();
         // 자리가 없으면 가장 먼저 부른 꽃핀부터 손을 흔들며 돌아간다.
         while self.staying() >= self.crowd_limit() {
             let Some(oldest) = self.guests().next() else { break };
@@ -1014,8 +1098,9 @@ impl App {
         self.restack();
     }
 
-    /// 더 부른 꽃핀을 모두 돌려보낸다.
+    /// 더 부른 꽃핀을 모두 돌려보낸다. 오기로 하고 아직 오지 않은 꽃핀도 오지 않는다.
     fn send_all(&mut self, now: Instant) {
+        self.calls.clear();
         for index in self.guests().collect::<Vec<_>>() {
             self.send(index, now);
         }
@@ -1309,6 +1394,7 @@ impl App {
         // 더 부른 꽃핀 가운데 머무를 시간이 다 된 것을 돌려보낸다.
         if self.quitting.is_none() {
             self.tend_guests(now);
+            self.tend_calls(now)?;
         }
 
         // 5. 만드는 동안 확인용: 정한 시각에 시킨 일과 차례로 보여 줄 동작.
@@ -1796,6 +1882,7 @@ impl App {
         sooner((self.memos.has_pending() && self.quitting.is_none() && !paused).then_some(self.next_memo_check));
         sooner(self.postits.due());
         sooner(self.guests_due());
+        sooner(self.calls.next);
         sooner(self.dev.deadline);
         // 자원을 재기 시작할 때를 놓치지 않는다. 숨겨 둔 동안에는 달리 깨어날 일이 없다.
         sooner((self.dev.usage.is_none() && self.dev.options.report.is_some()).then_some(self.started + dev::WARM_UP));
@@ -1819,6 +1906,8 @@ impl App {
         match item {
             Some(MenuItem::Quit) => return Ok(self.ask_quit(now)),
             Some(MenuItem::CallOne) => self.call_guest(now)?,
+            Some(MenuItem::CallMany(index)) => self.call_many(tray::CALLS[index], now),
+            Some(MenuItem::CallFill) => self.call_many(self.room(), now),
             Some(MenuItem::SendAll) => self.send_all(now),
             // 고르는 사이에 그 꽃핀이 돌아갔으면 아무 일도 하지 않는다.
             Some(MenuItem::SendThis) => self.send_one(self.menu_character(), now),
@@ -2236,6 +2325,36 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn several_guests_come_one_after_another() {
+        let start = Instant::now();
+        let mut calls = Calls::default();
+        // 세 명을 부르면 첫 꽃핀은 바로 오고, 나머지는 사이를 두고 온다.
+        calls.add(3, 39, start);
+        assert_eq!((calls.waiting, calls.next), (3, Some(start)));
+        calls.came(start);
+        assert_eq!((calls.waiting, calls.next), (2, Some(start + CALL_GAP)));
+        // 오는 중에 더 부르면 줄 뒤에 선다. 다음 꽃핀이 올 때는 그대로다.
+        calls.add(2, 39, start + CALL_GAP / 2);
+        assert_eq!((calls.waiting, calls.next), (4, Some(start + CALL_GAP)));
+        // 지금 올 수 없으면 조금 뒤에 다시 본다. 수는 줄지 않는다.
+        calls.put_off(start + CALL_GAP * 2);
+        assert_eq!((calls.waiting, calls.next), (4, Some(start + CALL_GAP * 2)));
+        // 마지막 꽃핀이 오면 더 깨어날 일이 없다.
+        for _ in 0..4 {
+            calls.came(start + CALL_GAP * 2);
+        }
+        assert_eq!(calls, Calls::default());
+        // 앉을 자리보다 많이는 기다리지 않는다. 아무도 부르지 않았으면 깨어나지 않는다.
+        calls.add(10, 4, start);
+        calls.add(10, 4, start);
+        assert_eq!(calls.waiting, 4);
+        calls.clear();
+        calls.add(0, 4, start);
+        calls.put_off(start);
+        assert_eq!(calls, Calls::default());
+    }
 
     #[test]
     fn the_home_character_stands_in_front_of_guests() {
