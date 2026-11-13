@@ -5,8 +5,6 @@
 
 use std::time::{Duration, Instant};
 
-/// 고를 수 있는 집중 시간과 쉬는 시간(분).
-pub const CHOICES: [(u64, u64); 2] = [(25, 5), (50, 10)];
 /// 판에서 한 번에 고르는 집중 시간과 쉬는 시간(분).
 pub const FOCUS_PICKS: [u32; 2] = [25, 50];
 pub const REST_PICKS: [u32; 2] = [5, 10];
@@ -206,12 +204,6 @@ impl Focus {
     }
 }
 
-/// 메뉴에 보여 줄 고르는 줄의 이름.
-pub fn choice_label(choice: usize) -> String {
-    let (focus, rest) = CHOICES[choice];
-    format!("{focus}분 집중 + {rest}분 쉬기")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -254,7 +246,6 @@ mod tests {
         // 절전에서 돌아와 한참 늦게 깼다. 한 번에 하나씩만 넘어간다.
         assert_eq!(focus.advance(start + MINUTE, false), Some(Turn::BreakTime));
         assert_eq!(focus.left(), Duration::from_secs(5));
-        assert_eq!(choice_label(1), "50분 집중 + 10분 쉬기");
     }
 
     #[test]

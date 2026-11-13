@@ -27,7 +27,7 @@ use crate::checker::{self, Checker};
 use crate::clock::WakeTimer;
 use crate::desktop::Desktop;
 use crate::dev;
-use crate::focus::{self, Focus, Phase, Plan, Turn};
+use crate::focus::{Focus, Phase, Plan, Turn};
 use crate::frames::Frames;
 use crate::geom::Rect;
 use crate::links::{self, LINKS};
@@ -2546,10 +2546,13 @@ impl App {
         if many {
             buttons.extend([(FanPick::Send, true), (FanPick::Together, true)]);
         }
-        buttons.extend([FanPick::Memos, FanPick::Links, FanPick::Settings].map(|pick| (pick, true)));
+        buttons.extend([FanPick::Focus, FanPick::Memos, FanPick::Links, FanPick::Settings].map(|pick| (pick, true)));
         let links = [FanPick::Chzzk, FanPick::Youtube, FanPick::Cafe].map(|pick| (pick, true)).to_vec();
         let together = TOGETHER_PICKS.map(|pick| (pick, true)).to_vec();
         self.postits.open_fan(head, bounds, dpi, &buttons, &[(FanPick::Links, links), (FanPick::Together, together)]);
+        if self.focus.is_some() {
+            self.postits.mark_fan(FanPick::Focus);
+        }
         (self.menu_target, self.held) = (Some(hwnd), Some(hwnd));
     }
 
@@ -2579,6 +2582,7 @@ impl App {
             FanPick::Youtube => self.open(LINKS[links::YOUTUBE].url),
             FanPick::Cafe => self.open(LINKS[links::CAFE].url),
             FanPick::Settings => self.open_settings(),
+            FanPick::Focus => self.open_focus_panel(index),
             FanPick::Wave | FanPick::Stretch | FanPick::Yawn => {
                 if let Some(index) = TOGETHER_PICKS.iter().position(|&together| together == pick) {
                     self.play_together(index, now);
@@ -2766,12 +2770,8 @@ impl App {
             Some(MenuItem::MemoList) => self.postits.open_list(win::cursor_position()),
             Some(MenuItem::Link(index)) => self.open(LINKS[index].url),
             Some(MenuItem::Together(index)) => self.play_together(index, now),
-            Some(MenuItem::Focus(choice)) => {
-                let (focus, rest) = focus::CHOICES[choice.min(focus::CHOICES.len() - 1)];
-                let plan = Plan { focus: focus as u32, rest: rest as u32, ..self.focus_plan() };
-                self.start_focus(Focus::start(plan, now), now);
-            }
-            Some(MenuItem::FocusStop) => self.stop_focus(now),
+            // 판은 첫 꽃핀 옆에 뜬다.
+            Some(MenuItem::FocusPanel) => self.open_focus_panel(self.menu_character()),
             Some(MenuItem::Studio) => self.open_studio(true, now)?,
             Some(MenuItem::Show(show)) => {
                 let target = self.menu_character();

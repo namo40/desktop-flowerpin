@@ -38,7 +38,6 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 };
 
 use crate::actor::Show;
-use crate::focus;
 use crate::geom::Rect;
 use crate::links::LINKS;
 use crate::win::{cursor_position, fatal, system_library, wide};
@@ -100,10 +99,8 @@ pub enum MenuItem {
     Show(Show),
     /// 나와 있는 꽃핀이 다 같이 한다. [`TOGETHER`]의 몇 번째인지다.
     Together(usize),
-    /// 쉬는 시간 알림을 시작한다. [`focus::CHOICES`]의 몇 번째인지다.
-    Focus(usize),
-    /// 쉬는 시간 알림을 그만둔다.
-    FocusStop,
+    /// 쉬는 시간 알림 판을 연다.
+    FocusPanel,
     /// 방송 촬영용 창을 연다.
     Studio,
 }
@@ -129,8 +126,7 @@ impl MenuItem {
             MenuItem::CallMany(index) => 20 + index as u32,
             MenuItem::CallFill => 23,
             MenuItem::Together(index) => 30 + index as u32,
-            MenuItem::Focus(index) => 40 + index as u32,
-            MenuItem::FocusStop => 49,
+            MenuItem::FocusPanel => 40,
             MenuItem::Link(index) => 100 + index as u32,
             MenuItem::Show(show) => 200 + Show::ALL.iter().position(|&other| other == show).unwrap_or(0) as u32,
         }
@@ -155,8 +151,7 @@ impl MenuItem {
             20..=22 => Some(MenuItem::CallMany((id - 20) as usize)),
             23 => Some(MenuItem::CallFill),
             30.. if ((id - 30) as usize) < TOGETHER.len() => Some(MenuItem::Together((id - 30) as usize)),
-            40.. if ((id - 40) as usize) < focus::CHOICES.len() => Some(MenuItem::Focus((id - 40) as usize)),
-            49 => Some(MenuItem::FocusStop),
+            40 => Some(MenuItem::FocusPanel),
             100.. if ((id - 100) as usize) < LINKS.len() => Some(MenuItem::Link((id - 100) as usize)),
             200.. if ((id - 200) as usize) < Show::ALL.len() => Some(MenuItem::Show(Show::ALL[(id - 200) as usize])),
             _ => None,
@@ -279,14 +274,7 @@ fn build(state: &MenuState) -> Option<HMENU> {
         let memos = CreatePopupMenu();
         let calls = CreatePopupMenu();
         let together = CreatePopupMenu();
-        let timer = CreatePopupMenu();
-        if menu.is_null()
-            || links.is_null()
-            || memos.is_null()
-            || calls.is_null()
-            || together.is_null()
-            || timer.is_null()
-        {
+        if menu.is_null() || links.is_null() || memos.is_null() || calls.is_null() || together.is_null() {
             return None;
         }
         let add = |menu, item: MenuItem, label: &str| {
@@ -326,20 +314,12 @@ fn build(state: &MenuState) -> Option<HMENU> {
         let flags = if state.hidden { MF_POPUP | MF_GRAYED } else { MF_POPUP };
         AppendMenuW(menu, flags, together as usize, wide("다 같이").as_ptr());
         AppendMenuW(menu, MF_SEPARATOR, 0, null());
-        // 쉬는 시간 알림. 돌고 있으면 줄의 이름이 지금의 상태가 되고, 그 안에 "그만하기"만 있다.
+        // 쉬는 시간 알림 판을 연다. 돌고 있으면 지금의 상태를 줄의 이름에 함께 적는다.
         let timer_name = match &state.focus {
-            Some(label) => {
-                add(timer, MenuItem::FocusStop, "그만하기");
-                label.clone()
-            }
-            None => {
-                for index in 0..focus::CHOICES.len() {
-                    add(timer, MenuItem::Focus(index), &focus::choice_label(index));
-                }
-                "쉬는 시간 알림".to_string()
-            }
+            Some(label) => format!("쉬는 시간 알림: {label}..."),
+            None => "쉬는 시간 알림...".to_string(),
         };
-        AppendMenuW(menu, MF_POPUP, timer as usize, wide(&timer_name).as_ptr());
+        add(menu, MenuItem::FocusPanel, &timer_name);
         AppendMenuW(menu, MF_POPUP, memos as usize, wide("메모").as_ptr());
         AppendMenuW(menu, MF_SEPARATOR, 0, null());
         if state.hidden {
@@ -855,7 +835,7 @@ mod tests {
                 "(모두 보내기)",
                 "다 같이",
                 "-",
-                "쉬는 시간 알림",
+                "쉬는 시간 알림...",
                 "메모",
                 "-",
                 "잠깐 숨기기",
@@ -875,7 +855,7 @@ mod tests {
         );
         // 쉬는 시간 알림이 돌고 있으면 줄의 이름이 지금의 상태다.
         let timing = MenuState { focus: Some("쉬는 중 (3분 남음)".to_string()), ..state(true, true) };
-        assert_eq!(names(&timing)[5], "쉬는 중 (3분 남음)");
+        assert_eq!(names(&timing)[5], "쉬는 시간 알림: 쉬는 중 (3분 남음)...");
         // 더 초대할 수 없으면 초대하는 두 줄이 흐리다.
         assert_eq!(names(&state(false, true))[..3], ["(꽃핀 초대하기)", "(여러 명 초대하기)", "모두 보내기"]);
         // 방송 중이면 방송 정보가 맨 위에 들어간다.
@@ -939,15 +919,16 @@ mod tests {
         items.extend((0..LINKS.len()).map(MenuItem::Link));
         items.extend(Show::ALL.map(MenuItem::Show));
         items.extend((0..TOGETHER.len()).map(MenuItem::Together));
-        items.extend((0..focus::CHOICES.len()).map(MenuItem::Focus));
-        items.extend([MenuItem::FocusStop, MenuItem::Studio]);
+        items.extend([MenuItem::FocusPanel, MenuItem::Studio]);
         for (n, item) in items.iter().enumerate() {
             // 0은 "아무것도 고르지 않음"이다.
             assert_ne!(item.id(), 0);
             assert_eq!(MenuItem::from_id(item.id()), Some(*item));
             assert!(items[..n].iter().all(|other| other.id() != item.id()), "{item:?}");
         }
-        for id in [0, 17, 19, 24, 29, 33, 42, 48, 50, 99, 100 + LINKS.len() as u32, 199, 200 + Show::ALL.len() as u32] {
+        for id in
+            [0, 17, 19, 24, 29, 33, 41, 42, 48, 49, 50, 99, 100 + LINKS.len() as u32, 199, 200 + Show::ALL.len() as u32]
+        {
             assert_eq!(MenuItem::from_id(id), None, "{id}");
         }
     }

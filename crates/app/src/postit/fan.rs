@@ -71,6 +71,8 @@ pub enum Pick {
     Send,
     /// 메모 목록 창을 연다.
     Memos,
+    /// 쉬는 시간 알림 판을 연다.
+    Focus,
     /// 바로 가기: 치지직 방송, 유튜브, 팬카페.
     Chzzk,
     Youtube,
@@ -90,9 +92,10 @@ pub enum Pick {
 
 impl Pick {
     /// 모든 단추.
-    pub const ALL: [Pick; 13] = [
+    pub const ALL: [Pick; 14] = [
         Pick::Invite,
         Pick::Send,
+        Pick::Focus,
         Pick::Memos,
         Pick::Links,
         Pick::Together,
@@ -117,6 +120,7 @@ impl Pick {
             Pick::Invite => "초대하기",
             Pick::Send => "보내기",
             Pick::Memos => "메모 목록",
+            Pick::Focus => "쉬는 시간",
             Pick::Chzzk => "치지직 방송",
             Pick::Youtube => "유튜브",
             Pick::Cafe => "카페",
@@ -136,6 +140,7 @@ impl Pick {
             Pick::Invite => "invite",
             Pick::Send => "send",
             Pick::Memos => "memos",
+            Pick::Focus => "focus",
             Pick::Chzzk => "chzzk",
             Pick::Youtube => "youtube",
             Pick::Cafe => "cafe",
@@ -150,7 +155,7 @@ impl Pick {
     }
 
     /// 아이콘 글꼴(Segoe MDL2 Assets)의 글자: 사람과 더하기, 문 밖으로 나가는 화살표, 줄 목록, 톱니바퀴,
-    /// 사슬 고리, 사람 여럿, 왼쪽 화살표.
+    /// 사슬 고리, 사람 여럿, 왼쪽 화살표, 초시계.
     fn glyph(self) -> Option<&'static str> {
         match self {
             Pick::Invite => Some("\u{E8FA}"),
@@ -160,6 +165,7 @@ impl Pick {
             Pick::Links => Some("\u{E71B}"),
             Pick::Together => Some("\u{E716}"),
             Pick::Back => Some("\u{E72B}"),
+            Pick::Focus => Some("\u{E916}"),
             Pick::Wave | Pick::Stretch | Pick::Yawn => None,
             Pick::Chzzk | Pick::Youtube | Pick::Cafe => None,
         }
@@ -346,6 +352,8 @@ pub struct Fan {
     level: Option<Pick>,
     /// 단추들이 머리로 들어가는 중이다. 다 들어간 뒤에 보일 묶음(처음 단추들이면 없음)과 들어가기 시작한 뒤 흐른 초.
     leaving: Option<(Option<Pick>, f32)>,
+    /// 오른쪽 위에 작은 점을 찍어 둔 단추. 쉬는 시간 알림이 도는 중임을 알린다.
+    marked: Option<Pick>,
     /// 마우스가 올라가 있는 단추.
     hot: Option<usize>,
     /// 마우스가 단추 위에 있다. 한 번이라도 올라왔으면 `seen`이다.
@@ -381,6 +389,7 @@ impl Fan {
             bounds,
             level: None,
             leaving: None,
+            marked: None,
             hot: None,
             inside: false,
             seen: false,
@@ -512,6 +521,12 @@ impl Fan {
                 let block = self.label(caption, 10.5, true, scale);
                 surface.stamp(block, center, ROSE, ink);
             }
+            // 점을 찍어 둔 단추에는 오른쪽 위에 작은 점을 찍는다.
+            if self.marked == Some(pick) {
+                let dot = (center.0 + 13.5, center.1 - 13.5);
+                surface.disc(dot, 5.0, CREAM, out);
+                surface.disc(dot, 3.6, ROSE, out);
+            }
             // 묶음 단추에는 안에 단추가 더 있다는 점 셋을 아래에 찍는다.
             if pick.is_group() {
                 for step in [-4.0, 0.0, 4.0] {
@@ -547,6 +562,13 @@ impl Postits {
         self.paint_fan();
         window::show(hwnd);
         self.wake();
+    }
+
+    /// 떠 있는 단추들 가운데 그 단추의 오른쪽 위에 작은 점을 찍는다.
+    pub fn mark_fan(&mut self, pick: Pick) {
+        if let Some(fan) = &mut self.fan {
+            (fan.marked, fan.stale) = (Some(pick), true);
+        }
     }
 
     /// 단추들을 거둔다.
