@@ -24,7 +24,8 @@ use windows_sys::Win32::Graphics::Gdi::{
     SelectObject,
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows_sys::Win32::UI::Controls::Dialogs::{CC_FULLOPEN, CC_RGBINIT, CHOOSECOLORW, ChooseColorW};
+use windows_sys::Win32::System::LibraryLoader::GetProcAddress;
+use windows_sys::Win32::UI::Controls::Dialogs::{CC_FULLOPEN, CC_RGBINIT, CHOOSECOLORW};
 use windows_sys::Win32::UI::HiDpi::GetDpiForWindow;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetCapture, ReleaseCapture, SetCapture};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
@@ -43,7 +44,7 @@ use crate::frames::Frames;
 use crate::geom::Rect;
 use crate::motions::Motions;
 use crate::stage::{Monitor, Stage};
-use crate::win::{fatal, wide};
+use crate::win::{fatal, system_library, wide};
 
 /// 창의 제목. 방송 프로그램에서 창을 고를 때 이 이름으로 보인다.
 pub const TITLE: &str = "데스크탑 꽃핀 - 방송 촬영용";
@@ -571,7 +572,18 @@ pub fn pick(owner: HWND, (x, y): (i32, i32), color: u32) -> Option<StudioPick> {
 }
 
 /// Windows의 색 고르기 창을 띄운다. 고르면 그 색(0xRRGGBB)이고, 그만두면 없다. 닫힐 때까지 돌아오지 않는다.
+///
+/// 색 고르기 창이 든 `comdlg32.dll`은 실행 파일이 켜질 때 불러오지 않고, 쓸 때 시스템 폴더에서 따로 불러온다.
+/// 거의 쓰지 않는 것을 켤 때부터 불러 둘 까닭이 없고, 그 DLL이 끌어오는 다른 DLL도 시스템 폴더에서만 찾게 한다.
 pub fn choose_color(owner: HWND, color: u32) -> Option<u32> {
+    type Choose = unsafe extern "system" fn(*mut CHOOSECOLORW) -> i32;
+    let library = system_library("comdlg32.dll");
+    if library.is_null() {
+        return None;
+    }
+    let found = unsafe { GetProcAddress(library, c"ChooseColorW".as_ptr().cast()) }?;
+    // 받아 온 것은 인자를 알 수 없는 함수 주소다. Windows 문서에 적힌 모양으로 바꿔 쓴다.
+    let choose = unsafe { std::mem::transmute::<unsafe extern "system" fn() -> isize, Choose>(found) };
     // COLORREF는 0x00BBGGRR이다.
     let swap = |c: u32| ((c & 0xFF) << 16) | (c & 0xFF00) | ((c >> 16) & 0xFF);
     let mut custom: [COLORREF; 16] = [0xFF_FFFF; 16];
@@ -584,7 +596,7 @@ pub fn choose_color(owner: HWND, color: u32) -> Option<u32> {
     chooser.rgbResult = swap(color);
     chooser.lpCustColors = custom.as_mut_ptr();
     chooser.Flags = CC_RGBINIT | CC_FULLOPEN;
-    (unsafe { ChooseColorW(&mut chooser) } != 0).then(|| swap(chooser.rgbResult))
+    (unsafe { choose(&mut chooser) } != 0).then(|| swap(chooser.rgbResult))
 }
 
 fn register_class() {
@@ -687,5 +699,12 @@ mod tests {
         assert_eq!(over(0xFFFF_0000, green, 0xFF), 0xFFFF_0000);
         assert_eq!(over(0x8080_0000, green, 0x80), 0xFF80_7F00);
         assert_eq!(COLORS[0].1, 0x00FF00);
+    }
+
+    #[test]
+    fn the_colour_picker_is_found_in_the_system_folder() {
+        let library = system_library("comdlg32.dll");
+        assert!(!library.is_null());
+        assert!(unsafe { GetProcAddress(library, c"ChooseColorW".as_ptr().cast()) }.is_some());
     }
 }
