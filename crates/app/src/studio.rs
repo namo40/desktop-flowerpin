@@ -32,11 +32,11 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetCapture, ReleaseCapture
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     AdjustWindowRectEx, AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyIcon, DestroyMenu,
     DestroyWindow, GA_ROOT, GetAncestor, GetClientRect, GetWindowRect, HICON, HMENU, IDC_ARROW, IsIconic, LoadCursorW,
-    MF_CHECKED, MF_GRAYED, MF_POPUP, MF_SEPARATOR, MF_STRING, MINMAXINFO, PostMessageW, RegisterClassExW,
-    SW_SHOWNOACTIVATE, SW_SHOWNORMAL, SendMessageW, SetForegroundWindow, ShowWindow, TPM_NONOTIFY, TPM_RETURNCMD,
-    TPM_RIGHTBUTTON, TrackPopupMenuEx, WM_CAPTURECHANGED, WM_CLOSE, WM_ERASEBKGND, WM_GETMINMAXINFO, WM_LBUTTONDOWN,
-    WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOVE, WM_NULL, WM_PAINT, WM_RBUTTONUP, WM_SETICON, WM_SIZE, WNDCLASSEXW,
-    WS_OVERLAPPEDWINDOW, WindowFromPoint,
+    MF_CHECKED, MF_GRAYED, MF_POPUP, MF_SEPARATOR, MF_STRING, MINMAXINFO, PostMessageW, RegisterClassExW, SW_RESTORE,
+    SW_SHOW, SW_SHOWNOACTIVATE, SW_SHOWNORMAL, SendMessageW, SetForegroundWindow, ShowWindow, TPM_NONOTIFY,
+    TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenuEx, WM_CAPTURECHANGED, WM_CLOSE, WM_ERASEBKGND, WM_GETMINMAXINFO,
+    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOVE, WM_NULL, WM_PAINT, WM_RBUTTONUP, WM_SETICON, WM_SIZE,
+    WNDCLASSEXW, WS_OVERLAPPEDWINDOW, WindowFromPoint,
 };
 
 use crate::character_window::CharacterWindow;
@@ -319,10 +319,10 @@ impl Studio {
         Some(Rect::new(rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top))
     }
 
-    /// 창을 맨 앞으로 가져온다.
+    /// 창을 맨 앞으로 가져온다. 최소화해 두었으면 되살리고, 최대화해 두었으면 그대로 둔다.
     pub fn bring_to_front(&self) {
         unsafe {
-            ShowWindow(self.hwnd, SW_SHOWNORMAL);
+            ShowWindow(self.hwnd, if self.is_minimized() { SW_RESTORE } else { SW_SHOW });
             SetForegroundWindow(self.hwnd);
         }
     }
