@@ -111,6 +111,9 @@ const GUEST_DOWN: (f64, f64) = (0.2, 0.35);
 const CALL_GAP: Duration = Duration::from_millis(200);
 /// 화면을 전체 화면 프로그램이 쓰고 있는지 확인하는 간격.
 const SCREEN_CHECK: Duration = Duration::from_secs(5);
+/// "다 같이"를 시켰을 때, 하던 것을 멈추고 서는 꽃핀들을 기다리는 가장 긴 시간. 그때까지 서지 못한 꽃핀은 빼고
+/// 시작한다.
+const GATHER_WAIT: Duration = Duration::from_secs(3);
 /// 머리 위 "다 같이" 묶음 안의 단추들. 트레이 메뉴의 "다 같이"와 같은 차례다.
 const TOGETHER_PICKS: [FanPick; 3] = [FanPick::Wave, FanPick::Stretch, FanPick::Yawn];
 
@@ -294,11 +297,24 @@ pub struct App {
     focus: Option<Focus>,
     /// 열려 있는 방송 촬영용 창.
     studio: Option<Studio>,
+    /// "다 같이"를 시켜서 꽃핀들이 서기를 기다리는 중이면 있다.
+    gathering: Option<Gathering>,
     /// 방송 촬영용 창이 열려 있는 동안 세워 둔 바탕화면 꽃핀들과 세운 시각. 창을 닫으면 그 자리에서 이어 간다.
     parked: Option<(Vec<Character>, Instant)>,
     /// 방해하면 안 되는 동안 알릴 때가 된 메모들. 그때가 지나면 포스트잇을 울린다.
     rings_waiting: Vec<u64>,
     dev: Dev,
+}
+
+/// "다 같이"를 시켜서, 꽃핀들이 하던 것을 멈추고 서기를 기다리는 중이다.
+struct Gathering {
+    /// [`tray::TOGETHER`]의 몇 번째인지.
+    index: usize,
+    /// 기다리는 꽃핀들([`Character::id`]).
+    who: Vec<isize>,
+    /// 이때까지 서지 못한 꽃핀은 빼고 시작한다.
+    until: Instant,
+    started: Instant,
 }
 
 /// 줄줄이 오기로 한 꽃핀들. 여러 명을 한꺼번에 초대하면 한 명씩 [`CALL_GAP`]만큼 사이를 두고 나타난다.
@@ -498,6 +514,7 @@ impl App {
             focus: None,
             studio: None,
             parked: None,
+            gathering: None,
             rings_waiting: Vec::new(),
             dev: Dev {
                 pace: dev::Pace::default(),
@@ -705,9 +722,10 @@ impl App {
     /// 때가 된 같이 하기를 시킨다. 그때 할 수 없는 꽃핀은 넘어간다. 저절로 파도를 탈 때가 됐으면 탄다.
     fn play_cues(&mut self, now: Instant) {
         if self.out_of_sight || self.quitting.is_some() {
-            self.cues.clear();
+            self.drop_cues();
             return;
         }
+        self.tend_gathering(now);
         if self.next_wave.is_some_and(|at| now >= at) {
             self.next_wave = together::next_wave(self.habits().whim_rate, &mut self.rng, now);
             let members = self.members();
@@ -730,6 +748,9 @@ impl App {
                 // 메뉴나 단추로 시킨 것이다. 하던 것을 멈추고 한다.
                 if self.can_join(&self.characters[index]) {
                     self.characters[index].join(cue.show, &self.motions, now);
+                } else {
+                    // 차례가 왔을 때 할 수 없게 됐다(머리 위 단추로 멈춰 세움 등). 기다리던 것을 그만둔다.
+                    self.characters[index].actor_mut().stop_waiting();
                 }
             } else if member.free {
                 self.characters[index].show(cue.show, &self.motions, &self.stage, now);
@@ -845,7 +866,7 @@ impl App {
         }
         (self.held, self.menu_target, self.hover, self.dwell) = (None, None, None, None);
         self.calls.clear();
-        self.cues.clear();
+        self.drop_cues();
     }
 
     /// 방송 촬영용 창을 연다. 열려 있으면 앞으로 가져온다. `activate`가 아니면 쓰던 창의 포커스를 빼앗지 않는다.
@@ -1380,19 +1401,77 @@ impl App {
 
     /// 메뉴의 "다 같이"에서 고른 것을 나와 있는 꽃핀들이 함께 한다.
     ///
-    /// 하던 행동을 멈추고 함께 한다. 자던 꽃핀은 깨어 일어난 뒤, 걸터앉은 꽃핀은 일어선 뒤, 떨어지는 꽃핀은
-    /// 내려선 뒤에 한다. 잡혀 있거나 돌아가는 꽃핀은 빠진다.
+    /// 모두 하던 행동을 멈추고 그 자리에 선다. 자던 꽃핀은 깨어 일어나고, 걸터앉은 꽃핀은 일어서고, 떨어지는 꽃핀은
+    /// 내려선다. 모두 선 순간에 함께 시작한다([`App::tend_gathering`]). 잡혀 있거나 돌아가는 꽃핀은 빠진다.
     fn play_together(&mut self, index: usize, now: Instant) {
-        let members = self.members_for(true);
+        // 기다리던 것이 있으면 그만두고 새로 시킨 것을 기다린다.
+        self.end_gathering();
+        let mut who = Vec::new();
+        for index in 0..self.characters.len() {
+            if self.can_join(&self.characters[index]) && self.characters[index].halt(&self.motions, now) {
+                who.push(self.characters[index].id());
+            }
+        }
+        self.note(now, format!("다 같이 {}: {}명이 멈추고 서기를 기다림", tray::TOGETHER[index], who.len()));
+        self.gathering = Some(Gathering { index, who, until: now + GATHER_WAIT, started: now });
+        self.tend_gathering(now);
+    }
+
+    /// "다 같이"를 기다리던 꽃핀들이 모두 섰거나 오래 기다렸으면 함께 시작한다. 그때까지 서지 못한 꽃핀은 빼고,
+    /// 하던 대로 지내게 한다.
+    fn tend_gathering(&mut self, now: Instant) {
+        let Some(gathering) = &self.gathering else { return };
+        let ready = |character: &Character| character.actor().is_waiting();
+        let still: Vec<&Character> = gathering
+            .who
+            .iter()
+            .filter_map(|id| self.characters.iter().find(|character| character.id() == *id))
+            .filter(|character| self.can_join(character))
+            .collect();
+        if !still.iter().all(|character| ready(character)) && now < gathering.until {
+            return;
+        }
+        let ready_ids: Vec<isize> =
+            still.iter().filter(|character| ready(character)).map(|character| character.id()).collect();
+        let (index, waited) = (gathering.index, now.saturating_duration_since(gathering.started));
+        let who = self.gathering.take().map(|gathering| gathering.who).unwrap_or_default();
+        // 서지 못한 꽃핀은 빼고, 하던 대로 지내게 한다. 선 꽃핀은 차례가 올 때까지 계속 서 있는다.
+        for character in &mut self.characters {
+            if who.contains(&character.id()) && !ready_ids.contains(&character.id()) {
+                character.actor_mut().stop_waiting();
+            }
+        }
+        let mut members = self.members_for(true);
+        for member in &mut members {
+            member.free &= ready_ids.contains(&member.who);
+        }
         let mut cues = match index {
             0 => together::wave(&members, None, now),
             1 => together::together(&members, Show::Stretch, &mut self.rng, now),
             _ => together::together(&members, Show::Yawn, &mut self.rng, now),
         };
         cues.iter_mut().for_each(|cue| cue.eager = true);
-        self.note(now, format!("다 같이 {}: {}명", tray::TOGETHER[index], cues.len()));
+        let late = format!("{:.1}초 기다림", waited.as_secs_f64());
+        self.note(now, format!("다 같이 {}: {}명이 함께 시작({late})", tray::TOGETHER[index], cues.len()));
         self.cues.extend(cues);
         self.play_cues(now);
+    }
+
+    /// 같이 하기 신호를 모두 버린다. 다 같이 할 차례를 기다리던 꽃핀들은 하던 대로 지낸다.
+    fn drop_cues(&mut self) {
+        self.cues.clear();
+        self.gathering = None;
+        self.characters.iter_mut().for_each(|character| character.actor_mut().stop_waiting());
+    }
+
+    /// "다 같이"를 기다리던 것을 그만둔다. 기다리던 꽃핀들은 하던 대로 지낸다.
+    fn end_gathering(&mut self) {
+        let Some(gathering) = self.gathering.take() else { return };
+        for character in &mut self.characters {
+            if gathering.who.contains(&character.id()) {
+                character.actor_mut().stop_waiting();
+            }
+        }
     }
 
     /// 바뀐 설정을 화면의 꽃핀에게 바로 반영하고, 저장을 예약한다.
@@ -2947,6 +3026,7 @@ impl App {
         sooner(self.guests_due());
         sooner(self.calls.next);
         sooner(self.cues.iter().map(|cue| cue.at).min());
+        sooner(self.gathering.as_ref().map(|gathering| gathering.until));
         sooner(self.watches_cursor().then_some(self.next_cursor_check));
         sooner(self.focus.and_then(|focus| focus.due(self.away)));
         // 쉬는 시간 알림 판이 떠 있으면 남은 시간이 바뀔 때마다 다시 그린다.

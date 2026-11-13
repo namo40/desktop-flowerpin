@@ -407,6 +407,8 @@ pub struct Actor {
     pending: Option<Whim>,
     /// 다 같이 하라고 한 행동. 바닥에 서면(깨어 일어나거나, 일어서거나, 내려서면) 기다리지 않고 바로 한다.
     joining: Option<Whim>,
+    /// 다 같이 할 차례를 기다린다. 바닥에 서면 다른 것을 하지 않고 가만히 서 있는다.
+    waiting: bool,
     /// 동작을 차례로 보여 주는 중이다([`Actor::play`]).
     showcase: bool,
     /// 반복 동작을 몇 바퀴 더 돌지.
@@ -461,6 +463,7 @@ impl Actor {
             away: false,
             pending: None,
             joining: None,
+            waiting: false,
             showcase: false,
             loops_left: 0,
             started: None,
@@ -846,7 +849,7 @@ impl Actor {
         self.walk = None;
         self.turn_to = None;
         self.pending = None;
-        self.joining = None;
+        (self.joining, self.waiting) = (None, false);
         self.showcase = false;
         self.drag = target;
         true
@@ -881,7 +884,7 @@ impl Actor {
             self.wait = self.rng.range(SETTLE_REST);
             (self.launched, self.sleep_left, self.sit_left) = (false, 0.0, 0);
             (self.pending, self.showcase, self.loops_left, self.started) = (None, false, 0, None);
-            self.joining = None;
+            (self.joining, self.waiting) = (None, false);
             (self.pat_distance, self.pat_quiet) = (0.0, 0.0);
         }
         (self.x, self.y, self.home, self.drag) = (x, y, x, (x, y));
@@ -903,6 +906,42 @@ impl Actor {
         }
     }
 
+    /// 다 같이 하기 전에, 하던 것을 멈추고 그 자리에 서서 기다린다. 걷던 것은 멈추고 다른 행동은 끊는다. 자고 있으면
+    /// 깨어 일어나고, 걸터앉아 있으면 일어서고, 공중에 있으면 내려선 뒤에 선다. 선 뒤에는 [`Actor::join`]이나
+    /// [`Actor::stop_waiting`]까지 가만히 서 있는다. 잡혀 있거나 돌아가는 중이면 하지 않고 `false`다.
+    pub fn halt(&mut self, motions: &Motions) -> bool {
+        if self.leaving || matches!(self.mode, Mode::Drag | Mode::Vanish | Mode::Gone) {
+            return false;
+        }
+        (self.pending, self.goal, self.showcase, self.joining) = (None, None, false, None);
+        (self.walk, self.turn_to) = (None, None);
+        match self.mode {
+            Mode::Act => {
+                self.rest(motions, REST);
+                self.t = 0.0;
+            }
+            Mode::Jump if !self.launched => {
+                self.rest(motions, REST);
+                self.t = 0.0;
+            }
+            Mode::Sleep => self.sleep_left = 0.0,
+            Mode::Sit => self.stand_up(motions),
+            _ => {}
+        }
+        self.waiting = true;
+        true
+    }
+
+    /// 다 같이 할 차례를 기다리며 바닥에 서 있는가.
+    pub fn is_waiting(&self) -> bool {
+        self.waiting && self.mode == Mode::Ground
+    }
+
+    /// 다 같이 할 차례를 기다리던 것을 그만두고 하던 대로 지낸다.
+    pub fn stop_waiting(&mut self) {
+        self.waiting = false;
+    }
+
     /// 다 같이 하라는 행동(기지개, 하품, 점프)을 한다. 하던 것을 멈추고 바로 한다. 자고 있으면 깨어 일어난 뒤,
     /// 걸터앉아 있으면 일어선 뒤, 공중에 있으면 내려선 뒤에 한다. 잡혀 있거나 돌아가는 중이면 하지 않고 `false`다.
     pub fn join(&mut self, show: Show, motions: &Motions) -> bool {
@@ -915,7 +954,7 @@ impl Actor {
         if self.leaving || matches!(self.mode, Mode::Drag | Mode::Vanish | Mode::Gone) {
             return false;
         }
-        (self.pending, self.goal, self.showcase) = (None, None, false);
+        (self.pending, self.goal, self.showcase, self.waiting) = (None, None, false, false);
         match self.mode {
             // 쉬거나 걷거나 다른 행동을 하던 중이면 그것을 끊고 바로 한다. 뛰기 시작했지만 아직 뜨지 않았으면 그것도 끊는다.
             Mode::Ground | Mode::Act => self.start(whim, motions),
@@ -938,7 +977,7 @@ impl Actor {
     pub fn leave(&mut self, motions: &Motions) {
         self.leaving = true;
         self.pending = None;
-        self.joining = None;
+        (self.joining, self.waiting) = (None, false);
         match self.mode {
             Mode::Sleep => self.sleep_left = 0.0,
             Mode::Sit => self.stand_up(motions),
@@ -1404,6 +1443,12 @@ impl Actor {
         if let Some(whim) = self.joining.take() {
             // 다 같이 하라고 했다. 다른 꽃핀들과 맞추려고 기다리지 않고 바로 한다.
             self.start(whim, motions);
+            return;
+        }
+
+        if self.waiting {
+            // 다 같이 할 차례를 기다린다. 걷거나 다른 행동을 하거나 잠들지 않고 가만히 서 있는다.
+            self.idle2_at_first_frame(dt, motions);
             return;
         }
 
@@ -2877,5 +2922,42 @@ mod tests {
         let mut leaving = Actor::stand(&motions, 1000.0, AROUND.floor, 1.0, 5);
         leaving.leave(&motions);
         assert!(!leaving.join(Show::Stretch, &motions));
+    }
+
+    #[test]
+    fn halting_stands_still_until_told() {
+        let motions = sample();
+        // 걷던 꽃핀은 바로 멈춰 서고, 기다리는 동안 걷거나 다른 행동을 하거나 잠들지 않는다.
+        let mut walker = Actor::stand(&motions, 1000.0, AROUND.floor, 1.0, 5);
+        walker.set_habits(Habits { whim_rate: 5.0, ..Habits::default() });
+        assert!(walker.come_to(1400.0));
+        run(&mut walker, &motions, &AROUND, 0.5);
+        assert!(walker.halt(&motions));
+        assert!(walker.is_waiting());
+        walker.set_away(true);
+        let at = walker.position();
+        let seen = run(&mut walker, &motions, &AROUND, 20.0);
+        assert_eq!(names(&seen), ["walk_e", "idle2"]);
+        assert_eq!(walker.position(), at);
+        // 차례가 오면 바로 한다.
+        assert!(walker.join(Show::Stretch, &motions));
+        assert!(!walker.is_waiting() && walker.mode() == Mode::Act);
+        // 자던 꽃핀은 깨어 일어난 뒤에, 떨어지던 꽃핀은 내려선 뒤에 기다린다.
+        let mut sleeper = Actor::stand(&motions, 1000.0, AROUND.floor, 1.0, 5);
+        sleeper.start(Whim::Sleep, &motions);
+        run(&mut sleeper, &motions, &AROUND, 3.0);
+        assert!(sleeper.halt(&motions) && !sleeper.is_waiting());
+        run(&mut sleeper, &motions, &AROUND, 6.0);
+        assert!(sleeper.is_waiting());
+        let mut faller = Actor::appear(&motions, 1000.0, 300.0, 1.0, 5);
+        run(&mut faller, &motions, &AROUND, 0.5);
+        assert!(faller.halt(&motions) && !faller.is_waiting());
+        run(&mut faller, &motions, &AROUND, 6.0);
+        assert!(faller.is_waiting());
+        // 그만 기다리라고 하면 하던 대로 지낸다. 잡히면 기다리던 것을 잊는다.
+        faller.stop_waiting();
+        assert!(!faller.is_waiting());
+        assert!(sleeper.grab(&motions, (1000.0, 900.0)));
+        assert!(!sleeper.is_waiting());
     }
 }
