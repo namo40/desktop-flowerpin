@@ -410,12 +410,20 @@ impl Studio {
     }
 
     /// 창 안쪽을 그림으로 받는다(확인용). 픽셀은 0xRRGGBB이다.
-    pub fn snapshot(&mut self, windows: &[&CharacterWindow]) -> (usize, Vec<[u8; 3]>) {
+    ///
+    /// 함께 돌려주는 수는, 바뀐 곳만 칠해 온 그림이 통째로 다시 그린 그림과 다른 픽셀의 수다. 0이 아니면 다시
+    /// 칠했어야 할 곳을 지나친 것이다.
+    pub fn snapshot(&mut self, windows: &[&CharacterWindow]) -> (usize, Vec<[u8; 3]>, usize) {
+        self.compose(windows);
+        let kept = self.canvas.pixels().to_vec();
         self.full = true;
         self.compose(windows);
         let width = self.canvas.width as usize;
-        let pixels = self.canvas.pixels().iter().map(|&p| [(p >> 16) as u8, (p >> 8) as u8, p as u8]).collect();
-        (width, pixels)
+        let now = self.canvas.pixels();
+        let missed =
+            if kept.len() == now.len() { kept.iter().zip(now.iter()).filter(|(a, b)| a != b).count() } else { 0 };
+        let pixels = now.iter().map(|&p| [(p >> 16) as u8, (p >> 8) as u8, p as u8]).collect();
+        (width, pixels, missed)
     }
 
     /// 창의 상태(확인용).

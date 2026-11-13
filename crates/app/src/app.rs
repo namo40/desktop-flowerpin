@@ -1262,10 +1262,15 @@ impl App {
                 let windows: Vec<&CharacterWindow> =
                     order.iter().map(|&index| self.characters[index].window()).collect();
                 let Some(studio) = &mut self.studio else { return Ok(()) };
-                let (width, pixels) = studio.snapshot(&windows);
+                let (width, pixels, missed) = studio.snapshot(&windows);
                 let modes: Vec<String> =
                     self.characters.iter().map(|character| format!("{:?}", character.actor().mode())).collect();
-                let line = format!("{}, 꽃핀 {}명 [{}]", studio.describe(), self.characters.len(), modes.join(", "));
+                let line = format!(
+                    "{}, 꽃핀 {}명 [{}], 다시 칠하지 않고 지나친 픽셀 {missed}",
+                    studio.describe(),
+                    self.characters.len(),
+                    modes.join(", ")
+                );
                 self.dev.snaps += 1;
                 if let Some(path) = &self.dev.options.settings_shot {
                     let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("shot");
