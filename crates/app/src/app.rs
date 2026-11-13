@@ -2443,7 +2443,7 @@ impl App {
     /// 꽃핀의 머리 위에 단추들을 부채꼴로 띄운다. 그동안 그 꽃핀은 멈춰서 기다린다.
     ///
     /// 무엇인가를 딛고 서 있을 때만 띄운다. 떠 있거나 잡혀 있거나 돌아가는 중이면 띄우지 않는다.
-    /// 꽃핀이 혼자면 "보내기"는 넣지 않는다.
+    /// 꽃핀이 혼자면 "보내기"는 넣지 않는다. 바로 가기는 묶음 안에 있다.
     fn open_fan(&mut self, index: usize) {
         let character = &self.characters[index];
         let standing = character.actor().can_speak() && !character.actor().is_leaving();
@@ -2456,9 +2456,9 @@ impl App {
         if self.staying() > 1 {
             buttons.push((FanPick::Send, true));
         }
-        let rest = [FanPick::Memos, FanPick::Chzzk, FanPick::Youtube, FanPick::Cafe, FanPick::Settings];
-        buttons.extend(rest.map(|pick| (pick, true)));
-        self.postits.open_fan(head, bounds, dpi, &buttons);
+        buttons.extend([FanPick::Memos, FanPick::Links, FanPick::Settings].map(|pick| (pick, true)));
+        let links = [FanPick::Chzzk, FanPick::Youtube, FanPick::Cafe].map(|pick| (pick, true)).to_vec();
+        self.postits.open_fan(head, bounds, dpi, &buttons, &[(FanPick::Links, links)]);
         (self.menu_target, self.held) = (Some(hwnd), Some(hwnd));
     }
 
@@ -2488,6 +2488,8 @@ impl App {
             FanPick::Youtube => self.open(LINKS[links::YOUTUBE].url),
             FanPick::Cafe => self.open(LINKS[links::CAFE].url),
             FanPick::Settings => self.open_settings(),
+            // 묶음을 열고 되돌아가는 것은 단추들이 알아서 한다.
+            FanPick::Links | FanPick::Back => {}
         }
         Ok(())
     }
