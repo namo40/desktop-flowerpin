@@ -19,6 +19,12 @@ use crate::stage::{Monitor, Stage};
 const WALL_MARGIN: f64 = 64.0;
 /// 들어 올릴 때 화면 위 끝에 맞추는 칸의 줄. 머리 조금 위다.
 const HEAD_ROW: f64 = 60.0;
+/// 서 있거나 걸을 때 머리 꼭대기의 줄. 꽃핀 그림에서는 머리카락 위 끝이 칸의 y 84~90에 있다.
+/// 다른 꽃핀이 이 높이에 올라선다.
+const HEAD_TOP_ROW: f64 = 88.0;
+/// 다른 꽃핀의 머리 위에 내려앉을 때, 발바닥 가운데가 머리 가운데에서 이만큼(그림 1배 기준 px) 안이면 받아 준다.
+/// 올라선 뒤에는 가운데에 선다.
+const HEAD_CATCH: f64 = 20.0;
 /// 머리로 치는 범위의 아래 끝. 뒷덜미(잡는 점)에서 발바닥까지를 1로 볼 때, 뒷덜미에서 이만큼 내려간 곳까지다.
 /// 꽃핀 그림에서는 칸의 y 160쯤이고, 얼굴 아래 끝이다. 이 위를 문질러야 쓰다듬는 것으로 친다.
 const HEAD_BELOW_HOLD: f64 = 0.31;
@@ -79,6 +85,14 @@ fn due_after(origin: Instant, from: Instant, wait: f64, smooth: bool) -> Instant
     }
 }
 
+/// 다른 꽃핀이 올라설 수 있는 머리. `under`는 이 꽃핀이 딛고 선 꽃핀들(없으면 0)이다. 그 꽃핀들은 이 머리에
+/// 올라서지 않는다. 제 위에 선 꽃핀의 머리로 올라가려는 일이 없게 한다.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Head {
+    pub perch: Perch,
+    pub under: [isize; 2],
+}
+
 /// 꽃핀이 어떻게 와 있는지.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Stay {
@@ -124,6 +138,8 @@ struct Layout {
     /// 벽에서 떨어져 설 거리와, 들어 올릴 때 발바닥에서 화면 위 끝까지 남길 거리(화면 px).
     wall_margin: f64,
     headroom: f64,
+    /// 발바닥에서 머리 꼭대기까지(화면 px). 다른 꽃핀이 이 높이에 올라선다.
+    crown: f64,
     shadow: Shadow,
 }
 
@@ -152,6 +168,7 @@ impl Layout {
             shadow_reach: (bounds.bottom() - shadow_bottom).max(1) as f64,
             wall_margin: WALL_MARGIN * factor,
             headroom: (character.foot_y as f64 - HEAD_ROW) * factor,
+            crown: (character.foot_y as f64 - HEAD_TOP_ROW) * factor,
             shadow,
         }
     }
@@ -271,6 +288,29 @@ impl Character {
 
     pub fn window(&self) -> &CharacterWindow {
         &self.window
+    }
+
+    /// 이 꽃핀을 가리키는 값. 창 윗변처럼 이 꽃핀의 머리를 딛고 설 때 쓴다.
+    pub fn id(&self) -> isize {
+        self.window.hwnd() as isize
+    }
+
+    /// 다른 꽃핀이 올라설 수 있는 머리 위. 바닥이나 창 위에서 쉬거나 걷고 있을 때만 내준다.
+    /// 다른 행동을 하거나, 잡혔거나, 돌아가는 중이면 위에 선 꽃핀이 떨어진다.
+    pub fn head_perch(&self) -> Option<Perch> {
+        if self.actor.mode() != Mode::Ground || self.actor.is_leaving() {
+            return None;
+        }
+        let (x, y) = self.actor.position();
+        let catch = HEAD_CATCH * self.layout.scale.factor();
+        Some(Perch {
+            window: self.id(),
+            y: y - self.layout.crown,
+            left: x - catch,
+            right: x + catch,
+            origin: x,
+            head: true,
+        })
     }
 
     pub fn actor(&self) -> &Actor {
@@ -422,6 +462,19 @@ impl Character {
         Body { left: self.layout.foot.0, right: self.layout.size.0 - self.layout.foot.0, up: self.layout.foot.1 }
     }
 
+    /// 다른 꽃핀들의 머리 가운데 이 꽃핀이 올라설 수 있는 것. 같은 모니터에 있고, 올라서도 머리가 모니터
+    /// 위로 나가지 않는 것이다. 제 머리와, 제 위에 선 꽃핀의 머리는 뺀다.
+    fn usable_heads<'a>(&self, heads: &'a [Head], monitor: &Monitor) -> impl Iterator<Item = Perch> + Clone + 'a {
+        let mine = self.id();
+        let (left, right) = (monitor.work.x as f64, monitor.work.right() as f64);
+        let top = monitor.area.y as f64 + self.layout.headroom;
+        heads
+            .iter()
+            .filter(move |head| head.perch.window != mine && !head.under.contains(&mine))
+            .filter(move |head| (left..right).contains(&head.perch.origin) && head.perch.y >= top)
+            .map(|head| head.perch)
+    }
+
     /// 이 꽃핀이 올라설 수 있는 창 윗변을 다시 계산한다. 보이는 창, 모니터, 몸 크기가 그대로면 건너뛴다.
     fn refresh_perches(&mut self, desktop: &Desktop, monitor: &Monitor) {
         let body = self.body();
@@ -439,12 +492,13 @@ impl Character {
     /// 시각이 됐으면 상태 기계의 시간을 흘리고, 달라진 모습을 화면에 넘긴다. 걸음을 밟았으면 `true`다.
     ///
     /// `horizon`은 "지금 + [`LOOKAHEAD`]"다. 시간을 어디까지 흘리는지는 [`clock_at`]이 정한다.
+    /// `heads`는 올라설 수 있는 다른 꽃핀들의 머리다(제 머리도 들어 있을 수 있다).
     pub fn tick(
         &mut self,
         frames: &mut Frames,
         motions: &Motions,
         stage: &Stage,
-        desktop: &Desktop,
+        (desktop, heads): (&Desktop, &[Head]),
         horizon: Instant,
     ) -> Result<bool, PackError> {
         if horizon < self.due {
@@ -465,7 +519,15 @@ impl Character {
         self.refresh_perches(desktop, &monitor);
         // 둘레의 상황이 윗변 목록을 빌려 쓰므로, 걸음을 밟는 동안 잠깐 꺼내 둔다.
         let perches = std::mem::take(&mut self.perches);
-        let around = Surroundings { perches: &perches, ..self.surroundings(&monitor) };
+        let heads = self.usable_heads(heads, &monitor);
+        let joined: Vec<Perch>;
+        let all = if heads.clone().next().is_none() {
+            &perches[..]
+        } else {
+            joined = perches.iter().copied().chain(heads).collect();
+            &joined[..]
+        };
+        let around = Surroundings { perches: all, ..self.surroundings(&monitor) };
         self.actor.update(dt, motions, &around);
         let sitting = self.actor.mode() == Mode::Sit;
         if sitting && !self.sitting {

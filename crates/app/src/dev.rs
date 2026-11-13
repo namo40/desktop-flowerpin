@@ -590,24 +590,31 @@ pub fn stacking(windows: &[HWND]) -> Vec<usize> {
     order
 }
 
-/// 겹친 꽃핀끼리 앞뒤가 정한 차례와 거꾸로 된 때를 센다(`--watch-stack`).
+/// 앞뒤가 바뀐 겹친 두 꽃핀이 이 시간 안에 다시 바뀌면 깜빡인 것으로 친다.
+const BLINK_WITHIN: Duration = Duration::from_millis(100);
+
+/// 겹친 꽃핀끼리 앞뒤가 깜빡이는지 센다(`--watch-stack`).
 ///
-/// 화면은 창을 옮기는 도중에도 그려질 수 있다. 그래서 다 옮긴 뒤에 맞더라도, 옮기는 사이에 잠깐 거꾸로
-/// 되면 겹친 꽃핀이 깜빡여 보인다. 창의 앞뒤를 옮길 때마다와 그림을 넘길 때마다 실제 앞뒤를 읽어 본다.
+/// 화면은 창을 옮기는 도중에도 그려질 수 있다. 그래서 다 옮긴 뒤에 맞더라도, 옮기는 사이에 두 꽃핀의 앞뒤가
+/// 바뀌었다 되돌아가면 깜빡여 보인다. 창의 앞뒤를 옮길 때마다와 그림을 넘길 때마다 실제 앞뒤를 읽어, 겹친
+/// 두 꽃핀의 앞뒤가 바뀐 횟수와 그 가운데 곧 다시 바뀐 횟수를 센다. 앞뒤를 다 맞춘 뒤에 정한 차례와 다른
+/// 것이 남았는지도 본다.
 #[derive(Default)]
 pub struct StackWatch {
     /// 읽어 본 횟수.
     checks: u32,
-    /// 그 가운데 거꾸로 된 쌍이 하나라도 있었던 횟수.
-    flipped: u32,
-    /// 거꾸로 된 쌍을 모두 더한 수.
-    pairs: u32,
-    /// 앞뒤를 옮긴 횟수.
-    moves: u32,
-    /// 꽃핀끼리의 앞뒤를 맞춘 횟수.
+    /// 겹친 두 꽃핀의 앞뒤가 바뀐 횟수와, 그 가운데 [`BLINK_WITHIN`] 안에 다시 바뀐 횟수.
+    flips: u32,
+    blinks: u32,
+    /// 앞뒤를 다 맞춘 뒤에 읽어 본 횟수와, 그때 정한 차례와 거꾸로 된 쌍이 남아 있던 횟수.
+    settled: u32,
+    wrong: u32,
+    /// 꽃핀끼리의 앞뒤를 맞춘 횟수, 앞뒤를 옮긴 횟수, 그때 바로 앞에 꽃핀이 아닌 보이는 창이 끼어 있던 횟수.
     restacks: u32,
-    /// 앞뒤를 맞출 때 바로 앞에 꽃핀이 아닌 다른 창이 끼어 있던 횟수.
+    moves: u32,
     strangers: u32,
+    /// 겹친 두 꽃핀(창을 가리키는 값의 작은 쪽, 큰 쪽)마다, 작은 쪽이 앞에 있는지와 마지막으로 바뀐 시각.
+    pairs: std::collections::HashMap<(isize, isize), (bool, Option<Instant>)>,
 }
 
 impl StackWatch {
@@ -621,49 +628,69 @@ impl StackWatch {
         self.restacks += 1;
     }
 
-    /// 앞뒤를 맞출 때 바로 앞에 꽃핀이 아닌 다른 창이 끼어 있었다.
+    /// 앞뒤를 맞출 때 바로 앞에 꽃핀이 아닌 보이는 창이 끼어 있었다.
     pub fn stranger(&mut self) {
         self.strangers += 1;
     }
 
-    /// 실제 앞뒤를 읽어 정한 차례와 견준다. `windows`는 꽃핀 번호 차례이고, `back_to_front`는 정한 차례다.
-    /// 보이는 창 가운데 범위가 겹치는 꽃핀끼리만 본다.
-    pub fn check(&mut self, windows: &[&CharacterWindow], back_to_front: &[usize]) {
+    /// 실제 앞뒤를 읽는다. 보이는 창 가운데 범위가 겹치는 꽃핀끼리만 본다. `windows`는 꽃핀 번호 차례다.
+    /// `wanted`를 주면(뒤에 설 것부터의 차례) 앞뒤를 다 맞춘 뒤라는 뜻이고, 그 차례와도 견준다.
+    pub fn check(&mut self, windows: &[&CharacterWindow], wanted: Option<&[usize]>, now: Instant) {
         let hwnds: Vec<HWND> = windows.iter().map(|window| window.hwnd()).collect();
         let seen: Vec<bool> = windows.iter().map(|window| window.is_visible()).collect();
         let mut actual = vec![usize::MAX; windows.len()];
         for (rank, index) in stacking(&hwnds).into_iter().enumerate() {
             actual[index] = rank;
         }
-        let mut wanted = vec![0; windows.len()];
-        for (rank, &index) in back_to_front.iter().rev().enumerate() {
-            wanted[index] = rank;
+        let mut wanted_rank = vec![0; windows.len()];
+        for (rank, &index) in wanted.unwrap_or(&[]).iter().rev().enumerate() {
+            wanted_rank[index] = rank;
         }
         let overlap = |a: Rect, b: Rect| a.x < b.right() && b.x < a.right() && a.y < b.bottom() && b.y < a.bottom();
-        let mut pairs = 0;
+        let mut wrong = false;
         for a in 0..windows.len() {
             for b in a + 1..windows.len() {
-                if seen[a]
-                    && seen[b]
-                    && overlap(windows[a].screen_rect(), windows[b].screen_rect())
-                    && (actual[a] < actual[b]) != (wanted[a] < wanted[b])
-                {
-                    pairs += 1;
+                if !(seen[a] && seen[b] && overlap(windows[a].screen_rect(), windows[b].screen_rect())) {
+                    continue;
+                }
+                let a_front = actual[a] < actual[b];
+                if wanted.is_some() && a_front != (wanted_rank[a] < wanted_rank[b]) {
+                    wrong = true;
+                }
+                let (key, small_front) = if (hwnds[a] as isize) < (hwnds[b] as isize) {
+                    ((hwnds[a] as isize, hwnds[b] as isize), a_front)
+                } else {
+                    ((hwnds[b] as isize, hwnds[a] as isize), !a_front)
+                };
+                match self.pairs.get_mut(&key) {
+                    Some((was, last)) if *was != small_front => {
+                        self.flips += 1;
+                        if last.is_some_and(|last| now.saturating_duration_since(last) < BLINK_WITHIN) {
+                            self.blinks += 1;
+                        }
+                        *was = small_front;
+                        *last = Some(now);
+                    }
+                    Some(_) => {}
+                    None => {
+                        self.pairs.insert(key, (small_front, None));
+                    }
                 }
             }
         }
         self.checks += 1;
-        if pairs > 0 {
-            self.flipped += 1;
-            self.pairs += pairs;
+        if wanted.is_some() {
+            self.settled += 1;
+            self.wrong += u32::from(wrong);
         }
     }
 
     pub fn summary(&self) -> String {
         format!(
-            "꽃핀 앞뒤 읽기 {}번 가운데 겹친 꽃핀의 앞뒤가 거꾸로였던 때 {}번(거꾸로 된 쌍 모두 {}), 앞뒤 맞추기 {}번, \
-             앞뒤를 옮긴 횟수 {}, 바로 앞에 다른 창이 끼어 있던 때 {}번",
-            self.checks, self.flipped, self.pairs, self.restacks, self.moves, self.strangers
+            "꽃핀 앞뒤 읽기 {}번: 겹친 두 꽃핀의 앞뒤가 바뀐 횟수 {}, 그 가운데 0.1초 안에 되돌아간 것(깜빡임) {}. \
+             다 맞춘 뒤에 읽은 {}번 가운데 정한 차례와 다른 것이 남아 있던 때 {}번. 앞뒤 맞추기 {}번, \
+             앞뒤를 옮긴 횟수 {}, 바로 앞에 다른 보이는 창이 끼어 있던 때 {}번",
+            self.checks, self.flips, self.blinks, self.settled, self.wrong, self.restacks, self.moves, self.strangers
         )
     }
 }

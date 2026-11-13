@@ -20,6 +20,9 @@
 //! 다른 창의 윗변([`Perch`])은 바닥보다 높이 있는 또 하나의 바닥이다. 올라서면 그 윗변의 양 끝이 벽이 되고,
 //! 창이 움직이면 따라간다. 창이 없어지거나 선 자리가 가려지면 바닥까지 떨어진다.
 //!
+//! 다른 꽃핀의 머리도 [`Perch`]로 받는다. 머리 위에서는 걷거나 앉거나 자지 않고, 쉬다가 가끔 기지개나
+//! 하품을 하고 옆으로 뛰어내린다. 머리에 누가 서 있는 꽃핀은 쉬고 걷기만 한다([`Actor::set_carrying`]).
+//!
 //! 한 번짜리 동작이 끝나면 팩에 적힌 "다음 동작"으로 넘어간다. 어떤 동작이 어떤 상태인지는
 //! [`mode_of`]가 정한다. 규칙과 값은 원본 데모에서 가져왔다.
 //!
@@ -93,6 +96,8 @@ const RIDE_SMOOTH: f64 = 0.3;
 const SHAKE_LEG: f64 = 24.0;
 const SHAKE_GAP: f64 = 0.6;
 const SHAKE_TURNS: u32 = 3;
+/// 다른 꽃핀의 머리 위에서 쉬기를 마쳤을 때 뛰어내릴 확률.
+const HEAD_HOP_CHANCE: f64 = 0.25;
 /// 머리를 문지른 거리가 이만큼(px) 쌓이면 쓰다듬은 것으로 친다. 이 시간(초) 동안 문지르지 않으면 쌓인 거리를 버린다.
 const PAT_DISTANCE: f64 = 200.0;
 const PAT_KEEP: f64 = 0.7;
@@ -361,6 +366,10 @@ pub struct Actor {
     vx: f64,
     /// 올라서 있는 창과, 마지막으로 봤을 때 그 창의 왼쪽 끝. 바닥에 있거나 떠 있으면 `None`이다.
     on: Option<(isize, f64)>,
+    /// 올라서 있는 곳이 다른 꽃핀의 머리다. `on`이 있을 때만 뜻이 있다.
+    head: bool,
+    /// 머리에 다른 꽃핀이 서 있다. 그동안에는 쉬고 걷기만 한다.
+    carrying: bool,
     /// 떨어지는 동안 창 윗변을 지나쳐 바닥까지 간다. 스스로 뛰어내렸거나 딛고 있던 윗변이 없어졌을 때다.
     through: bool,
     /// 창 윗변으로 뛰어오르는 길. 뛰어오르는 동안에만 있다.
@@ -430,6 +439,8 @@ impl Actor {
             vy: 0.0,
             vx: 0.0,
             on: None,
+            head: false,
+            carrying: false,
             through: false,
             leap: None,
             hop_dir: None,
@@ -482,6 +493,16 @@ impl Actor {
     /// 올라서 있는 창. 바닥에 있거나 떠 있으면 `None`이다.
     pub fn support(&self) -> Option<isize> {
         self.on.map(|(window, _)| window)
+    }
+
+    /// 다른 꽃핀의 머리 위에 서 있는가.
+    pub fn on_head(&self) -> bool {
+        self.on.is_some() && self.head
+    }
+
+    /// 머리에 다른 꽃핀이 서 있는지 알려 준다. 서 있는 동안에는 쉬고 걷기만 하고, 자리를 비워도 잠들지 않는다.
+    pub fn set_carrying(&mut self, carrying: bool) {
+        self.carrying = carrying;
     }
 
     /// 공중에 있어서 어디에 내려앉을지 알아야 하는가.
@@ -674,14 +695,23 @@ impl Actor {
 
     /// 올라서 있던 창에서 뛰어내리기 시작한다. `dir`이 있으면 그쪽 바깥으로, 없으면 제자리에서 뛴다.
     /// 다른 창 윗변을 지나쳐 바닥까지 내려간다.
+    ///
+    /// 다른 꽃핀의 머리 위에서는 늘 옆으로 뛰고, 아래에 창이 있으면 그 위에 내려선다.
     fn start_hop(&mut self, motions: &Motions, dir: Option<Dir>) {
+        let from_head = self.on_head();
+        let dir = if from_head { Some(dir.unwrap_or_else(|| self.any_dir())) } else { dir };
         self.act(motions.jump);
         self.mode = Mode::Jump;
         self.vy = 0.0;
         self.launched = false;
         self.leap = None;
-        self.through = true;
+        self.through = !from_head;
         self.vx = dir.map_or(0.0, |dir| dir.sign() * HOP_SPEED * self.scale);
+    }
+
+    /// 아무 쪽이나 고른다.
+    fn any_dir(&mut self) -> Dir {
+        if self.rng.chance(0.5) { Dir::West } else { Dir::East }
     }
 
     /// 쉬다가 고른 행동을 시작한다. 뛰어오르거나 뛰어내릴 수 없게 됐으면 그만두고 다시 쉰다.
@@ -709,6 +739,8 @@ impl Actor {
             return false;
         }
         match show {
+            // 다른 꽃핀의 머리 위에서는 앉거나 자거나 뛰지 않는다. 내려가는 것만 된다.
+            Show::Sit | Show::Sleep | Show::Jump | Show::Climb if self.on_head() => false,
             Show::Sit => self.on.is_some() || around.ledge,
             Show::Climb => self.climb_target(around).is_some(),
             Show::Hop => self.on.is_some(),
@@ -802,6 +834,7 @@ impl Actor {
         self.vy = 0.0;
         self.vx = 0.0;
         self.on = None;
+        self.carrying = false;
         self.through = false;
         self.leap = None;
         self.riding = 0.0;
@@ -904,7 +937,8 @@ impl Actor {
         let under = |perch: &&Perch| perch.window == window && perch.holds(self.x + perch.origin - origin);
         let Some(perch) = around.perches.iter().find(under) else {
             self.on = None;
-            self.through = true;
+            // 창이 없어졌으면 다른 창들을 지나쳐 바닥까지 간다. 받치던 꽃핀이 움직였으면 바로 아래에 내려선다.
+            self.through = !self.head;
             self.mode = Mode::Fall;
             self.motion = motions.fall;
             self.t = 0.0;
@@ -918,7 +952,8 @@ impl Actor {
             return *around;
         };
         let (dx, dy) = (perch.origin - origin, perch.y - self.y);
-        if dx.abs() > 0.01 || dy.abs() > 0.01 {
+        // 창은 끄는 대로 움직이므로 자리를 자주 고친다. 다른 꽃핀은 장마다 움직이므로 장에 맞춰 따라가면 된다.
+        if (dx.abs() > 0.01 || dy.abs() > 0.01) && !perch.head {
             self.riding = RIDE_SMOOTH;
         }
         self.x += dx;
@@ -1094,6 +1129,11 @@ impl Actor {
         self.leap = None;
         self.through = false;
         self.on = perch.map(|perch| (perch.window, perch.origin));
+        self.head = perch.is_some_and(|perch| perch.head);
+        if let Some(perch) = perch.filter(|perch| perch.head) {
+            // 다른 꽃핀의 머리 위에는 가운데에 선다.
+            self.x = perch.origin;
+        }
         self.home = self.x;
         self.mode = Mode::Land;
         self.motion = motions.land;
@@ -1257,6 +1297,19 @@ impl Actor {
         None
     }
 
+    /// 다른 꽃핀의 머리 위에서 쉬기를 마쳤을 때 할 일을 고른다. 뛰어내리거나, 기지개나 하품을 한다.
+    fn pick_on_head(&mut self) -> Option<Whim> {
+        let mut r = self.rng.unit();
+        let choices = [(Whim::Hop, HEAD_HOP_CHANCE), WHIMS[0], WHIMS[1]];
+        for (whim, chance) in choices {
+            r -= chance * self.habits.whim_rate;
+            if r < 0.0 {
+                return Some(whim);
+            }
+        }
+        None
+    }
+
     /// idle2로 서서 시간을 흘리고, 지금 idle2의 첫 장을 보여 주고 있는지 돌려준다.
     /// 다른 동작을 하고 있었으면 idle2로 바꾼다(첫 장부터 시작한다).
     fn idle2_at_first_frame(&mut self, dt: f64, motions: &Motions) -> bool {
@@ -1337,12 +1390,28 @@ impl Actor {
                     self.wait = self.rng.range(REST);
                 }
             }
-        } else if self.away {
-            // 사용자가 자리를 비웠으면 쉬는 김에 잠든다.
+        } else if self.on_head() {
+            // 다른 꽃핀의 머리 위에서는 걷지 않는다. 자리를 비웠으면 내려가서 잔다.
+            if self.away {
+                self.hop_dir = None;
+                self.pending = Some(Whim::Hop);
+            } else if self.wait <= 0.0 {
+                match self.pick_on_head() {
+                    Some(whim) => {
+                        self.hop_dir = None;
+                        self.pending = Some(whim);
+                    }
+                    None => self.wait = self.rng.range(REST),
+                }
+            }
+        } else if self.away && !self.carrying {
+            // 사용자가 자리를 비웠으면 쉬는 김에 잠든다. 머리에 누가 서 있으면 내려간 뒤에 잠든다.
             self.pending = Some(Whim::Sleep);
         } else if self.wait <= 0.0 {
             let can_climb = self.climb_target(around).is_some();
-            if let Some(whim) = self.pick_whim(around.ledge, can_climb) {
+            // 머리에 누가 서 있으면 가끔 하는 행동을 하지 않고 쉬고 걷기만 한다.
+            let whim = if self.carrying { None } else { self.pick_whim(around.ledge, can_climb) };
+            if let Some(whim) = whim {
                 self.hop_dir = None;
                 self.pending = Some(whim);
             } else if self.habits.roam {
@@ -2101,9 +2170,9 @@ mod tests {
     }
 
     /// 바닥(y 1000)보다 400px 높이 떠 있는 창의 윗변. 발바닥이 설 수 있는 범위는 x 800~1200이다.
-    const WINDOW: Perch = Perch { window: 7, y: 600.0, left: 800.0, right: 1200.0, origin: 730.0 };
+    const WINDOW: Perch = Perch { window: 7, y: 600.0, left: 800.0, right: 1200.0, origin: 730.0, head: false };
     /// 그 아래에 있는 더 넓은 창의 윗변.
-    const LOWER: Perch = Perch { window: 8, y: 800.0, left: 600.0, right: 1400.0, origin: 530.0 };
+    const LOWER: Perch = Perch { window: 8, y: 800.0, left: 600.0, right: 1400.0, origin: 530.0, head: false };
 
     /// 작업표시줄 위이고, 창들이 떠 있는 곳.
     fn among(perches: &[Perch]) -> Surroundings<'_> {
@@ -2279,6 +2348,105 @@ mod tests {
         assert_eq!((actor.mode(), actor.support()), (Mode::Ground, Some(7)));
     }
 
+    /// `LOWER` 창 위에 선 다른 꽃핀의 머리. 그 꽃핀은 x 1000에 서 있고, 머리 꼭대기는 윗변보다 145px 높다.
+    const HEAD: Perch = Perch { window: 20, y: 655.0, left: 980.0, right: 1020.0, origin: 1000.0, head: true };
+
+    /// `HEAD`를 가로로 `dx`만큼 옮긴 것. 아래 꽃핀이 걸어간 것이다.
+    fn head_at(dx: f64) -> Perch {
+        Perch { left: HEAD.left + dx, right: HEAD.right + dx, origin: HEAD.origin + dx, ..HEAD }
+    }
+
+    /// 다른 꽃핀의 머리 위에 이미 서 있는 꽃핀.
+    fn standing_on_head(motions: &Motions, seed: u64) -> Actor {
+        let mut actor = standing_on(motions, HEAD, HEAD.origin, seed);
+        actor.head = true;
+        actor
+    }
+
+    #[test]
+    fn dropped_near_a_head_stands_in_the_middle_of_it_and_rides_along() {
+        let motions = sample();
+        let perches = [HEAD, LOWER];
+        let mut actor = Actor::stand(&motions, 700.0, LOWER.y, 1.0, 5);
+        actor.set_habits(Habits { whim_rate: 0.0, ..Habits::default() });
+        // 머리 가운데에서 15px 비켜 놓아도 머리 위에 올라서고, 가운데에 선다.
+        carry_and_drop(&mut actor, &motions, &among(&perches), (1015.0, 640.0));
+        run(&mut actor, &motions, &among(&perches), 3.0);
+        assert_eq!((actor.mode(), actor.support(), actor.on_head()), (Mode::Ground, Some(20), true));
+        assert_eq!(actor.position(), (1000.0, 655.0));
+        // 아래 꽃핀이 걸어가면 따라간다. 머리 위에서는 스스로 걷지 않는다.
+        for step in 1..=600 {
+            let walked = [head_at(step as f64 * 0.5), LOWER];
+            actor.update(STEP, &motions, &among(&walked));
+            assert_eq!(actor.position().0, 1000.0 + step as f64 * 0.5);
+        }
+        assert_eq!(actor.support(), Some(20));
+    }
+
+    #[test]
+    fn hops_off_a_head_sideways_and_lands_on_the_window_below() {
+        let motions = sample();
+        let perches = [HEAD, LOWER];
+        for seed in 1..=6 {
+            let mut actor = standing_on_head(&motions, seed);
+            // 머리 위에 있는 동안 거친 동작. 머리 위에서는 걷거나 앉거나 자지 않는다.
+            let mut on_top = Vec::new();
+            for _ in 0..(60.0 / STEP) as usize {
+                actor.update(STEP, &motions, &among(&perches));
+                if !actor.on_head() {
+                    break;
+                }
+                on_top.push(motions.clip(actor.motion()).name.clone());
+            }
+            assert!(
+                on_top.iter().all(|name| ["idle2", "stretch", "yawn", "jump"].contains(&name.as_str())),
+                "{on_top:?}"
+            );
+            assert_eq!(on_top.last().map(String::as_str), Some("jump"), "씨앗 {seed}");
+            // 옆으로 뛰어내려, 지나치지 않고 아래에 있는 창 위에 내려선다.
+            let seen = run(&mut actor, &motions, &among(&[LOWER]), 3.0);
+            assert!(names(&seen).contains(&"land"), "씨앗 {seed}: {seen:?}");
+            assert_eq!((actor.support(), actor.position().1), (Some(8), LOWER.y), "씨앗 {seed}");
+            assert!((actor.position().0 - HEAD.origin).abs() > HEAD.right - HEAD.origin, "씨앗 {seed}");
+        }
+        // 자리를 비우면 내려가서 잔다.
+        let mut actor = standing_on_head(&motions, 3);
+        actor.set_away(true);
+        let seen = run(&mut actor, &motions, &among(&perches), 10.0);
+        assert!(names(&seen).contains(&"jump") && names(&seen).contains(&"sleep_loop"), "{seen:?}");
+        assert_eq!((actor.mode(), actor.on_head(), actor.position().1), (Mode::Sleep, false, LOWER.y));
+    }
+
+    #[test]
+    fn when_the_one_below_moves_on_steps_down_onto_the_window_below() {
+        let motions = sample();
+        let mut actor = standing_on_head(&motions, 5);
+        actor.set_habits(Habits { roam: false, whim_rate: 0.0 });
+        run(&mut actor, &motions, &among(&[HEAD, LOWER]), 1.0);
+        // 아래 꽃핀이 잡혀 가거나, 다른 행동을 하거나, 돌아갔다. 창을 지나치지 않고 바로 아래 창에 내려선다.
+        let seen = run(&mut actor, &motions, &among(&[LOWER]), 5.0);
+        assert!(names(&seen).contains(&"fall") && names(&seen).contains(&"land"), "{seen:?}");
+        assert_eq!((actor.mode(), actor.support(), actor.position()), (Mode::Ground, Some(8), (1000.0, LOWER.y)));
+    }
+
+    #[test]
+    fn carrying_someone_only_rests_and_walks() {
+        let motions = sample();
+        for seed in 1..=4 {
+            let mut actor = Actor::stand(&motions, 1000.0, AROUND.floor, 1.0, seed);
+            // 가끔 하는 행동을 아주 자주 하게 해도, 머리에 누가 서 있는 동안에는 하지 않는다. 자리를 비워도 자지 않는다.
+            actor.set_habits(Habits { whim_rate: 5.0, ..Habits::default() });
+            actor.set_carrying(true);
+            actor.set_away(seed % 2 == 0);
+            let seen = run(&mut actor, &motions, &among(&[WINDOW]), 60.0);
+            assert!(names(&seen).iter().all(|name| ["idle", "idle2", "walk_w", "walk_e"].contains(name)), "{seen:?}");
+            // 내려가면 다시 한다.
+            actor.set_carrying(false);
+            let seen = run(&mut actor, &motions, &among(&[WINDOW]), 30.0);
+            assert!(names(&seen).iter().any(|name| !["idle", "idle2", "walk_w", "walk_e"].contains(name)), "{seen:?}");
+        }
+    }
+
     #[test]
     fn falls_to_the_floor_when_the_window_goes_away() {
         let motions = sample();
@@ -2382,7 +2550,7 @@ mod tests {
         actor.x = 1520.0;
         assert_eq!(actor.climb_target(&around), Some(WINDOW));
         // 가까운 윗변이 여럿이면 옆으로 가장 가까운 것을 고른다.
-        let two = [WINDOW, Perch { window: 9, y: 300.0, left: 1400.0, right: 1800.0, origin: 1330.0 }];
+        let two = [WINDOW, Perch { window: 9, y: 300.0, left: 1400.0, right: 1800.0, origin: 1330.0, head: false }];
         assert_eq!(actor.climb_target(&among(&two)).map(|perch| perch.window), Some(9));
     }
 

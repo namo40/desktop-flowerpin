@@ -42,7 +42,10 @@ pub struct Perch {
     pub left: f64,
     pub right: f64,
     /// 창의 왼쪽 끝. 창이 옆으로 움직였을 때 얼마나 움직였는지 아는 데 쓴다.
+    /// 다른 꽃핀의 머리이면 그 꽃핀의 발바닥 가운데다.
     pub origin: f64,
+    /// 창의 윗변이 아니라 다른 꽃핀의 머리 위다.
+    pub head: bool,
 }
 
 impl Perch {
@@ -87,6 +90,7 @@ pub fn find(panes: &[Pane], body: Body, stage: Rect) -> Vec<Perch> {
                     left: left as f64,
                     right: right as f64,
                     origin: pane.rect.x as f64,
+                    head: false,
                 });
             }
         }
@@ -207,7 +211,7 @@ mod tests {
 
     #[test]
     fn gap_is_the_sideways_distance() {
-        let perch = Perch { window: 1, y: 500.0, left: 470.0, right: 1120.0, origin: 400.0 };
+        let perch = Perch { window: 1, y: 500.0, left: 470.0, right: 1120.0, origin: 400.0, head: false };
         assert_eq!((perch.gap(300.0), perch.gap(800.0), perch.gap(1200.0)), (170.0, 0.0, 80.0));
         assert!(perch.holds(470.0) && perch.holds(1120.4) && !perch.holds(1121.0));
     }

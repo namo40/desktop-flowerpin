@@ -181,9 +181,23 @@ impl CharacterWindow {
         unsafe { SetWindowPos(self.hwnd, front, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE) };
     }
 
-    /// 화면에서 이 창 바로 앞에 놓인 창. 맨 앞이면 빈 값이다.
-    pub fn just_ahead(&self) -> HWND {
-        unsafe { GetWindow(self.hwnd, GW_HWNDPREV) }
+    /// 이 창이 `front` 창의 바로 뒤에 있는가. 사이에 보이지 않는 창만 끼어 있으면 바로 뒤로 친다.
+    /// 끼어 있던 다른 창이 있으면 그 창도 함께 돌려준다(보이지 않는 창은 빼고, 가장 가까운 것).
+    ///
+    /// 보이지 않는 창은 앞뒤가 화면에 드러나지 않는다. 늘 맨 앞으로 올라오는 보이지 않는 창(다른 프로그램의
+    /// 오버레이 등)이 있으면, 그 창을 건너뛰지 않을 때 앞뒤를 맞출 때마다 꽃핀을 모두 옮기게 된다.
+    pub fn is_just_behind(&self, front: HWND) -> (bool, Option<HWND>) {
+        let mut ahead = unsafe { GetWindow(self.hwnd, GW_HWNDPREV) };
+        while !ahead.is_null() {
+            if ahead == front {
+                return (true, None);
+            }
+            if unsafe { IsWindowVisible(ahead) } != 0 {
+                return (false, Some(ahead));
+            }
+            ahead = unsafe { GetWindow(ahead, GW_HWNDPREV) };
+        }
+        (false, None)
     }
 
     /// 창의 왼쪽 위를 화면의 `(x, y)`로 옮긴다. 다음 `present` 때 화면에 반영된다.
