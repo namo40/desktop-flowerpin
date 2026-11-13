@@ -131,6 +131,9 @@ function Expand-Template([string]$path, [hashtable]$values) {
 
 $name = "DesktopFlowerpin-$version-windows-x64"
 $values = @{ VERSION = $version; COMMIT = $short; DATE = (Get-Date -Format 'yyyy-MM-dd'); ZIP = "$name.zip" }
+# 릴리스 글의 그림은 이 커밋에 든 화면 그림(docs/images)을 가리킨다. 커밋 번호를 통째로 적어야 주소가 되고,
+# 나중에 그 그림을 바꾸거나 지워도 이 릴리스의 글에는 그때의 그림이 남는다.
+$values.COMMIT_FULL = $commit
 $withBom = New-Object System.Text.UTF8Encoding $true
 $withoutBom = New-Object System.Text.UTF8Encoding $false
 # 안내 글은 메모장에서 한글이 깨지지 않게 BOM을 붙이고, 줄 끝을 Windows식으로 한다.

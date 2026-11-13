@@ -59,6 +59,9 @@ pub const HIDES: [(&str, Option<u64>); 3] = [("10분", Some(600)), ("1시간", S
 /// "여러 명 초대하기"에서 고를 수 있는 수.
 pub const CALLS: [usize; 3] = [3, 5, 10];
 
+/// "다 같이" 메뉴의 항목. 파도 점프는 왼쪽부터 차례로 뛴다.
+pub const TOGETHER: [&str; 3] = ["파도 점프", "기지개", "하품"];
+
 /// 메뉴에서 고를 수 있는 것.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MenuItem {
@@ -94,6 +97,12 @@ pub enum MenuItem {
     Link(usize),
     /// 꽃핀에게 시켜서 볼 행동. 메뉴에는 없고, 확인용 스크립트가 번호로 고른다.
     Show(Show),
+    /// 나와 있는 꽃핀이 다 같이 한다. [`TOGETHER`]의 몇 번째인지다.
+    Together(usize),
+    /// 쉬는 시간 알림 판을 연다.
+    FocusPanel,
+    /// 방송 촬영용 창을 연다.
+    Studio,
 }
 
 impl MenuItem {
@@ -113,8 +122,11 @@ impl MenuItem {
             MenuItem::Unhide => 13,
             MenuItem::MemoList => 14,
             MenuItem::Update => 15,
+            MenuItem::Studio => 16,
             MenuItem::CallMany(index) => 20 + index as u32,
             MenuItem::CallFill => 23,
+            MenuItem::Together(index) => 30 + index as u32,
+            MenuItem::FocusPanel => 40,
             MenuItem::Link(index) => 100 + index as u32,
             MenuItem::Show(show) => 200 + Show::ALL.iter().position(|&other| other == show).unwrap_or(0) as u32,
         }
@@ -135,8 +147,11 @@ impl MenuItem {
             13 => Some(MenuItem::Unhide),
             14 => Some(MenuItem::MemoList),
             15 => Some(MenuItem::Update),
+            16 => Some(MenuItem::Studio),
             20..=22 => Some(MenuItem::CallMany((id - 20) as usize)),
             23 => Some(MenuItem::CallFill),
+            30.. if ((id - 30) as usize) < TOGETHER.len() => Some(MenuItem::Together((id - 30) as usize)),
+            40 => Some(MenuItem::FocusPanel),
             100.. if ((id - 100) as usize) < LINKS.len() => Some(MenuItem::Link((id - 100) as usize)),
             200.. if ((id - 200) as usize) < Show::ALL.len() => Some(MenuItem::Show(Show::ALL[(id - 200) as usize])),
             _ => None,
@@ -209,6 +224,8 @@ pub struct MenuState<'a> {
     pub hidden: bool,
     /// 더 새 버전이 나와 있으면 그 버전. 있으면 맨 위에 "새 버전 받기"를 넣는다.
     pub update: Option<&'a str>,
+    /// 쉬는 시간 알림이 돌고 있으면 지금의 상태(예: "집중하는 중 (18분 남음)"). 있으면 "그만하기"를 넣는다.
+    pub focus: Option<String>,
 }
 
 /// 화면의 `(x, y)`에 메뉴를 띄우고, 고른 것을 돌려준다. 메뉴가 닫힐 때까지 돌아오지 않는다.
@@ -256,7 +273,8 @@ fn build(state: &MenuState) -> Option<HMENU> {
         let links = CreatePopupMenu();
         let memos = CreatePopupMenu();
         let calls = CreatePopupMenu();
-        if menu.is_null() || links.is_null() || memos.is_null() || calls.is_null() {
+        let together = CreatePopupMenu();
+        if menu.is_null() || links.is_null() || memos.is_null() || calls.is_null() || together.is_null() {
             return None;
         }
         let add = |menu, item: MenuItem, label: &str| {
@@ -289,7 +307,19 @@ fn build(state: &MenuState) -> Option<HMENU> {
         let flags = if state.can_call { MF_POPUP } else { MF_POPUP | MF_GRAYED };
         AppendMenuW(menu, flags, calls as usize, wide("여러 명 초대하기").as_ptr());
         add_if(menu, state.can_send, MenuItem::SendAll, "모두 보내기");
+        // 다 같이 하기. 숨겨 둔 동안에는 줄이 통째로 흐리다.
+        for (index, name) in TOGETHER.iter().enumerate() {
+            add(together, MenuItem::Together(index), name);
+        }
+        let flags = if state.hidden { MF_POPUP | MF_GRAYED } else { MF_POPUP };
+        AppendMenuW(menu, flags, together as usize, wide("다 같이").as_ptr());
         AppendMenuW(menu, MF_SEPARATOR, 0, null());
+        // 쉬는 시간 알림 판을 연다. 돌고 있으면 지금의 상태를 줄의 이름에 함께 적는다.
+        let timer_name = match &state.focus {
+            Some(label) => format!("쉬는 시간 알림: {label}..."),
+            None => "쉬는 시간 알림...".to_string(),
+        };
+        add(menu, MenuItem::FocusPanel, &timer_name);
         AppendMenuW(menu, MF_POPUP, memos as usize, wide("메모").as_ptr());
         AppendMenuW(menu, MF_SEPARATOR, 0, null());
         if state.hidden {
@@ -304,6 +334,7 @@ fn build(state: &MenuState) -> Option<HMENU> {
         AppendMenuW(menu, MF_SEPARATOR, 0, null());
         AppendMenuW(menu, MF_POPUP, links as usize, wide("바로 가기").as_ptr());
         // 이름 끝의 "..."은 창이 열린다는 뜻이다.
+        add(menu, MenuItem::Studio, "방송 촬영용 창...");
         add(menu, MenuItem::Settings, "설정...");
         add(menu, MenuItem::Quit, "끝내기");
         Some(menu)
@@ -691,7 +722,7 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -751,7 +782,7 @@ mod tests {
     }
 
     /// 메뉴의 줄을 위에서부터 읽는다. 줄마다 이름과, 흐린지다. 나누는 줄은 이름이 "-"다.
-    fn lines(menu: HMENU) -> Vec<(String, bool)> {
+    pub(crate) fn lines(menu: HMENU) -> Vec<(String, bool)> {
         use windows_sys::Win32::UI::WindowsAndMessaging::{
             GetMenuItemCount, GetMenuState, GetMenuStringW, MF_BYPOSITION,
         };
@@ -774,14 +805,21 @@ mod tests {
     }
 
     /// 흐린 줄의 이름을 괄호로 싼다.
-    fn marked(lines: Vec<(String, bool)>) -> Vec<String> {
+    pub(crate) fn marked(lines: Vec<(String, bool)>) -> Vec<String> {
         lines.into_iter().map(|(name, grayed)| if grayed { format!("({name})") } else { name }).collect()
     }
 
     #[test]
     fn the_menu_lists_what_can_be_done_now() {
-        let state =
-            |can_call, can_send| MenuState { live: None, can_call, can_send, hidden: false, room: 3, update: None };
+        let state = |can_call, can_send| MenuState {
+            live: None,
+            can_call,
+            can_send,
+            hidden: false,
+            room: 3,
+            update: None,
+            focus: None,
+        };
         let names = |state: &MenuState| {
             let menu = build(state).expect("메뉴");
             let read = marked(lines(menu));
@@ -795,19 +833,29 @@ mod tests {
                 "꽃핀 초대하기",
                 "여러 명 초대하기",
                 "(모두 보내기)",
+                "다 같이",
                 "-",
+                "쉬는 시간 알림...",
                 "메모",
                 "-",
                 "잠깐 숨기기",
                 "-",
                 "바로 가기",
+                "방송 촬영용 창...",
                 "설정...",
                 "끝내기"
             ]
         );
-        // 숨겨 둔 동안에는 "잠깐 숨기기" 자리에 "다시 보이기"가 온다.
+        // 숨겨 둔 동안에는 "잠깐 숨기기" 자리에 "다시 보이기"가 오고, "다 같이"는 흐리다.
         let hidden = MenuState { hidden: true, ..state(false, false) };
-        assert_eq!(names(&hidden)[5..], ["-", "다시 보이기", "-", "바로 가기", "설정...", "끝내기"]);
+        assert_eq!(names(&hidden)[3], "(다 같이)");
+        assert_eq!(
+            names(&hidden)[7..],
+            ["-", "다시 보이기", "-", "바로 가기", "방송 촬영용 창...", "설정...", "끝내기"]
+        );
+        // 쉬는 시간 알림이 돌고 있으면 줄의 이름이 지금의 상태다.
+        let timing = MenuState { focus: Some("쉬는 중 (3분 남음)".to_string()), ..state(true, true) };
+        assert_eq!(names(&timing)[5], "쉬는 시간 알림: 쉬는 중 (3분 남음)...");
         // 더 초대할 수 없으면 초대하는 두 줄이 흐리다.
         assert_eq!(names(&state(false, true))[..3], ["(꽃핀 초대하기)", "(여러 명 초대하기)", "모두 보내기"]);
         // 방송 중이면 방송 정보가 맨 위에 들어간다.
@@ -820,10 +868,33 @@ mod tests {
     }
 
     #[test]
+    fn everyone_can_do_something_together() {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{GetMenuItemID, GetSubMenu};
+        let state =
+            MenuState { live: None, can_call: true, can_send: true, hidden: false, room: 3, update: None, focus: None };
+        let menu = build(&state).expect("메뉴");
+        let together = unsafe { GetSubMenu(menu, 3) };
+        assert_eq!(marked(lines(together)), ["파도 점프", "기지개", "하품"]);
+        let ids: Vec<u32> = (0..3).map(|i| unsafe { GetMenuItemID(together, i) }).collect();
+        assert_eq!(ids, [30, 31, 32]);
+        unsafe { DestroyMenu(menu) };
+        assert_eq!(MenuItem::from_id(31), Some(MenuItem::Together(1)));
+        assert_eq!(MenuItem::from_id(33), None);
+    }
+
+    #[test]
     fn several_can_be_invited_at_once() {
         use windows_sys::Win32::UI::WindowsAndMessaging::GetSubMenu;
         let read = |room: usize| {
-            let state = MenuState { live: None, can_call: true, can_send: false, hidden: false, room, update: None };
+            let state = MenuState {
+                live: None,
+                can_call: true,
+                can_send: false,
+                hidden: false,
+                room,
+                update: None,
+                focus: None,
+            };
             let menu = build(&state).expect("메뉴");
             // "꽃핀 초대하기" 바로 아래 줄에 딸린 메뉴다.
             let names = marked(lines(unsafe { GetSubMenu(menu, 1) }));
@@ -847,13 +918,17 @@ mod tests {
         items.extend((0..HIDES.len()).map(MenuItem::Hide));
         items.extend((0..LINKS.len()).map(MenuItem::Link));
         items.extend(Show::ALL.map(MenuItem::Show));
+        items.extend((0..TOGETHER.len()).map(MenuItem::Together));
+        items.extend([MenuItem::FocusPanel, MenuItem::Studio]);
         for (n, item) in items.iter().enumerate() {
             // 0은 "아무것도 고르지 않음"이다.
             assert_ne!(item.id(), 0);
             assert_eq!(MenuItem::from_id(item.id()), Some(*item));
             assert!(items[..n].iter().all(|other| other.id() != item.id()), "{item:?}");
         }
-        for id in [0, 16, 19, 24, 99, 100 + LINKS.len() as u32, 199, 200 + Show::ALL.len() as u32] {
+        for id in
+            [0, 17, 19, 24, 29, 33, 41, 42, 48, 49, 50, 99, 100 + LINKS.len() as u32, 199, 200 + Show::ALL.len() as u32]
+        {
             assert_eq!(MenuItem::from_id(id), None, "{id}");
         }
     }

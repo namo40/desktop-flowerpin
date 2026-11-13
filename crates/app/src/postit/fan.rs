@@ -3,6 +3,10 @@
 //! 포스트잇의 단추와 같은 둥근 단추가 머리 위에 활 모양으로 늘어선다. 누르면 그 일을 하고 닫힌다. 마우스를
 //! 올리면 그 단추의 이름이 부채꼴 안쪽 한가운데에 뜬다. 마우스가 벗어난 채로 조금 지나면 저절로 닫힌다.
 //!
+//! 단추는 두 단계다. 관련된 단추들은 묶음 단추 하나에 들어 있다. 묶음 단추를 누르면 떠 있던 단추들이 머리로
+//! 들어갔다가, 묶음 안의 단추들이 맨 앞의 "되돌아가기"와 함께 튀어나온다. 되돌아가기를 누르면 같은 움직임으로
+//! 처음 단추들이 돌아온다.
+//!
 //! 포스트잇과 같은 종류의 창이라 그리는 법과 일어난 일을 받는 법이 같다. 눌러도 쓰던 창의 포커스를 빼앗지 않는다.
 //! 어떤 단추를 넣을지와, 눌렀을 때 무엇을 할지는 앱이 정한다. 여기서는 무엇을 눌렀는지([`Pick`])만 알린다.
 //!
@@ -46,6 +50,12 @@ const PICTURE: f32 = 24.0;
 /// 단추 하나가 튀어나오는 데 걸리는 초와, 다음 단추가 늦게 나오는 초.
 const OPEN: f32 = 0.16;
 const STAGGER: f32 = 0.018;
+/// 단추 하나가 머리로 들어가는 데 걸리는 초. 묶음을 열거나 되돌아갈 때다.
+const RETRACT: f32 = 0.12;
+/// 단추 창의 가장 좁은 반폭. 단추가 적은 묶음에서도 이름표가 들어가게 한다.
+const NAME_REACH: f32 = 100.0;
+/// 한 단계에 늘어설 수 있는 단추의 가장 많은 수. 이보다 많으면 반원을 넘어 양 끝 단추가 머리 옆으로 내려온다.
+pub const MOST: usize = 7;
 /// 마우스가 벗어난 뒤 닫히기까지의 초. 한 번도 올라오지 않았으면 더 기다린다.
 const LINGER: f32 = 1.5;
 const UNSEEN: f32 = 5.0;
@@ -57,35 +67,96 @@ const SOURCE: usize = 96;
 /// 단추 하나. 눌렀을 때 무엇을 할지는 앱이 정한다.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Pick {
-    /// 꽃핀을 하나 더 초대한다.
+    /// 묶음: 초대하기(1명, 3명, 5명, 10명, 가득).
     Invite,
-    /// 이 꽃핀을 보낸다.
+    /// 묶음: 보내기(이 꽃핀, 다 보내기).
     Send,
+    /// 꽃핀을 1명, 3명, 5명, 10명 더 초대하거나, 남은 자리만큼 초대한다.
+    CallOne,
+    CallThree,
+    CallFive,
+    CallTen,
+    CallFill,
+    /// 이 꽃핀을 보낸다.
+    SendThis,
+    /// 처음 꽃핀 한 명만 남기고 모두 보낸다.
+    SendAll,
     /// 메모 목록 창을 연다.
     Memos,
+    /// 쉬는 시간 알림 판을 연다.
+    Focus,
     /// 바로 가기: 치지직 방송, 유튜브, 팬카페.
     Chzzk,
     Youtube,
     Cafe,
     /// 설정 창을 연다.
     Settings,
+    /// 묶음: 바로 가기(치지직, 유튜브, 카페).
+    Links,
+    /// 묶음: 다 같이(파도 점프, 기지개, 하품). 나와 있는 꽃핀들이 함께 한다.
+    Together,
+    Wave,
+    Stretch,
+    Yawn,
+    /// 묶음 안의 맨 앞 단추. 처음 단추들로 돌아간다.
+    Back,
 }
 
 impl Pick {
-    /// 모든 단추. 왼쪽부터 놓이는 차례다.
-    pub const ALL: [Pick; 7] =
-        [Pick::Invite, Pick::Send, Pick::Memos, Pick::Chzzk, Pick::Youtube, Pick::Cafe, Pick::Settings];
+    /// 모든 단추.
+    pub const ALL: [Pick; 21] = [
+        Pick::Invite,
+        Pick::Send,
+        Pick::CallOne,
+        Pick::CallThree,
+        Pick::CallFive,
+        Pick::CallTen,
+        Pick::CallFill,
+        Pick::SendThis,
+        Pick::SendAll,
+        Pick::Focus,
+        Pick::Memos,
+        Pick::Links,
+        Pick::Together,
+        Pick::Wave,
+        Pick::Stretch,
+        Pick::Yawn,
+        Pick::Back,
+        Pick::Chzzk,
+        Pick::Youtube,
+        Pick::Cafe,
+        Pick::Settings,
+    ];
+
+    /// 누르면 안에 든 단추들이 나오는 묶음 단추인가.
+    pub fn is_group(self) -> bool {
+        matches!(self, Pick::Invite | Pick::Send | Pick::Links | Pick::Together)
+    }
 
     /// 마우스를 올리면 뜨는 이름.
     pub fn name(self) -> &'static str {
         match self {
             Pick::Invite => "초대하기",
             Pick::Send => "보내기",
+            Pick::CallOne => "1명 초대",
+            Pick::CallThree => "3명 초대",
+            Pick::CallFive => "5명 초대",
+            Pick::CallTen => "10명 초대",
+            Pick::CallFill => "가득 채우기",
+            Pick::SendThis => "이 꽃핀 보내기",
+            Pick::SendAll => "다 보내기 (1명만 남김)",
             Pick::Memos => "메모 목록",
+            Pick::Focus => "쉬는 시간",
             Pick::Chzzk => "치지직 방송",
             Pick::Youtube => "유튜브",
             Pick::Cafe => "카페",
             Pick::Settings => "설정",
+            Pick::Links => "바로 가기",
+            Pick::Together => "다 같이",
+            Pick::Wave => "파도 점프",
+            Pick::Stretch => "기지개",
+            Pick::Yawn => "하품",
+            Pick::Back => "되돌아가기",
         }
     }
 
@@ -94,21 +165,42 @@ impl Pick {
         match self {
             Pick::Invite => "invite",
             Pick::Send => "send",
+            Pick::CallOne => "call1",
+            Pick::CallThree => "call3",
+            Pick::CallFive => "call5",
+            Pick::CallTen => "call10",
+            Pick::CallFill => "fill",
+            Pick::SendThis => "send1",
+            Pick::SendAll => "sendall",
             Pick::Memos => "memos",
+            Pick::Focus => "focus",
             Pick::Chzzk => "chzzk",
             Pick::Youtube => "youtube",
             Pick::Cafe => "cafe",
             Pick::Settings => "settings",
+            Pick::Links => "links",
+            Pick::Together => "together",
+            Pick::Wave => "wave",
+            Pick::Stretch => "stretch",
+            Pick::Yawn => "yawn",
+            Pick::Back => "back",
         }
     }
 
-    /// 아이콘 글꼴(Segoe MDL2 Assets)의 글자: 사람과 더하기, 문 밖으로 나가는 화살표, 줄 목록, 톱니바퀴.
+    /// 아이콘 글꼴(Segoe MDL2 Assets)의 글자: 사람과 더하기, 문 밖으로 나가는 화살표, 줄 목록, 톱니바퀴,
+    /// 사슬 고리, 사람 여럿, 왼쪽 화살표, 초시계.
     fn glyph(self) -> Option<&'static str> {
         match self {
             Pick::Invite => Some("\u{E8FA}"),
-            Pick::Send => Some("\u{F3B1}"),
+            Pick::Send | Pick::SendThis => Some("\u{F3B1}"),
             Pick::Memos => Some("\u{E8FD}"),
             Pick::Settings => Some("\u{E713}"),
+            Pick::Links => Some("\u{E71B}"),
+            Pick::Together => Some("\u{E716}"),
+            Pick::Back => Some("\u{E72B}"),
+            Pick::Focus => Some("\u{E916}"),
+            Pick::Wave | Pick::Stretch | Pick::Yawn => None,
+            Pick::CallOne | Pick::CallThree | Pick::CallFive | Pick::CallTen | Pick::CallFill | Pick::SendAll => None,
             Pick::Chzzk | Pick::Youtube | Pick::Cafe => None,
         }
     }
@@ -119,7 +211,23 @@ impl Pick {
             Pick::Chzzk => Some(include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/res/icons/chzzk.png"))),
             Pick::Youtube => Some(include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/res/icons/youtube.png"))),
             Pick::Cafe => Some(include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/res/icons/naver_cafe.png"))),
-            Pick::Invite | Pick::Send | Pick::Memos | Pick::Settings => None,
+            _ => None,
+        }
+    }
+
+    /// 그림 대신 단추에 적는 짧은 글. 행동은 알맞은 아이콘이 없어 글로 적는다.
+    fn caption(self) -> Option<&'static str> {
+        match self {
+            Pick::CallOne => Some("1명"),
+            Pick::CallThree => Some("3명"),
+            Pick::CallFive => Some("5명"),
+            Pick::CallTen => Some("10명"),
+            Pick::CallFill => Some("가득"),
+            Pick::SendAll => Some("모두"),
+            Pick::Wave => Some("파도"),
+            Pick::Stretch => Some("기지개"),
+            Pick::Yawn => Some("하품"),
+            _ => None,
         }
     }
 }
@@ -134,6 +242,14 @@ pub fn spread(count: usize) -> Vec<(f32, f32)> {
             (RADIUS * sin, -RADIUS * cos)
         })
         .collect()
+}
+
+/// 단추의 이름이 뜨는 높이. 가장 아래 단추와 같은 높이인데, 단추가 적어 활이 얕으면 가운데 단추에 닿지 않게
+/// 그 아래로 내린다. `spots`와 같은 좌표다.
+fn name_height(spots: &[(f32, f32)]) -> f32 {
+    let lowest = spots.iter().map(|spot| spot.1).fold(f32::MIN, f32::max);
+    let highest = spots.iter().map(|spot| spot.1).fold(f32::MAX, f32::min);
+    lowest.max(highest + BUTTON + 13.0)
 }
 
 /// 단추들을 띄울 창의 자리와 크기, 창 안에서 단추들이 놓일 자리.
@@ -153,10 +269,12 @@ pub struct Plan {
 pub fn plan(head: (i32, i32), bounds: Rect, scale: f32, count: usize) -> Plan {
     let spots = spread(count);
     let lowest = spots.iter().map(|spot| spot.1).fold(-RADIUS, f32::max);
-    let reach = spots.iter().map(|spot| spot.0.abs()).fold(0.0, f32::max) + BUTTON + EDGE;
+    // 단추가 적어도 이름표(예: "다 보내기 (1명만 남김)")가 잘리지 않을 만큼은 넓힌다.
+    let reach = (spots.iter().map(|spot| spot.0.abs()).fold(0.0, f32::max) + BUTTON + EDGE).max(NAME_REACH);
     // 창의 가장자리. 활의 중심에서 잰 것이다.
     let (left, top) = (-reach, -RADIUS - BUTTON - EDGE);
-    let size = (2.0 * reach, lowest + BUTTON + EDGE - top);
+    // 이름표(높이 22)도 창 안에 들게 한다.
+    let size = (2.0 * reach, (lowest + BUTTON).max(name_height(&spots) + 11.0) + EDGE - top);
     // 가장 아래 단추의 아래 끝이 머리 꼭대기 바로 위에 온다.
     let head_below = lowest + BUTTON + LIFT;
     let px = |units: f32| (units * scale).round() as i32;
@@ -252,16 +370,33 @@ fn shrink(pixels: &[[u8; 4]], side: usize, to: usize) -> Vec<[u8; 4]> {
     out
 }
 
+/// 묶음 단추와 그 안에 든 단추들(무엇인지, 누를 수 있는지).
+pub type Group = (Pick, Vec<(Pick, bool)>);
+
 pub struct Fan {
     pub hwnd: HWND,
     at: (i32, i32),
     scale: f32,
     /// 창의 크기(100%일 때).
     size: (f32, f32),
-    /// 단추들: 무엇인지, 누를 수 있는지, 창 안에서의 가운데.
+    /// 지금 보이는 단추들: 무엇인지, 누를 수 있는지, 창 안에서의 가운데.
     buttons: Vec<(Pick, bool, (f32, f32))>,
     /// 단추들이 튀어나오는 곳.
     origin: (f32, f32),
+    /// 처음 단추들과, 묶음마다 안에 든 단추들.
+    top: Vec<(Pick, bool)>,
+    groups: Vec<Group>,
+    /// 머리 꼭대기와 벗어나면 안 되는 범위. 단계가 바뀌면 단추 수에 맞춰 다시 놓는다.
+    head: (i32, i32),
+    bounds: Rect,
+    /// 지금 보이는 묶음. 처음 단추들이면 없다.
+    level: Option<Pick>,
+    /// 단추들이 머리로 들어가는 중이다. 다 들어간 뒤에 보일 묶음(처음 단추들이면 없음)과 들어가기 시작한 뒤 흐른 초.
+    leaving: Option<(Option<Pick>, f32)>,
+    /// 오른쪽 위에 작은 점을 찍어 둔 단추. 쉬는 시간 알림이 도는 중임을 알린다.
+    marked: Option<Pick>,
+    /// 마우스를 올렸을 때 [`Pick::name`] 대신 띄울 이름. "가득 채우기 (12명)"처럼 그때그때 다른 것이다.
+    names: HashMap<Pick, String>,
     /// 마우스가 올라가 있는 단추.
     hot: Option<usize>,
     /// 마우스가 단추 위에 있다. 한 번이라도 올라왔으면 `seen`이다.
@@ -282,14 +417,23 @@ pub struct Fan {
 }
 
 impl Fan {
-    fn new(hwnd: HWND, plan: Plan, scale: f32, buttons: &[(Pick, bool)]) -> Fan {
-        Fan {
-            hwnd,
-            at: plan.at,
+    /// 머리 꼭대기(`head`) 위에 처음 단추들(`top`)을 띄울 준비를 한다. 창은 아직 없다.
+    fn new((head, bounds): ((i32, i32), Rect), scale: f32, top: &[(Pick, bool)], groups: &[Group]) -> Fan {
+        let mut fan = Fan {
+            hwnd: null_mut(),
+            at: (0, 0),
             scale,
-            size: plan.size,
-            buttons: buttons.iter().zip(plan.spots).map(|(&(pick, enabled), spot)| (pick, enabled, spot)).collect(),
-            origin: plan.origin,
+            size: (0.0, 0.0),
+            buttons: Vec::new(),
+            origin: (0.0, 0.0),
+            top: top.iter().copied().take(MOST).collect(),
+            groups: groups.to_vec(),
+            head,
+            bounds,
+            level: None,
+            leaving: None,
+            marked: None,
+            names: HashMap::new(),
             hot: None,
             inside: false,
             seen: false,
@@ -300,7 +444,60 @@ impl Fan {
             settled: false,
             labels: HashMap::new(),
             pictures: HashMap::new(),
+        };
+        fan.arrange(None);
+        fan
+    }
+
+    /// 그 단계(처음 단추들이면 `None`, 아니면 묶음)의 단추들. 묶음 안에서는 맨 앞에 되돌아가기가 있다.
+    fn level_buttons(&self, level: Option<Pick>) -> Vec<(Pick, bool)> {
+        match level.and_then(|group| self.groups.iter().find(|(pick, _)| *pick == group)) {
+            Some((_, inner)) => std::iter::once((Pick::Back, true)).chain(inner.iter().copied()).take(MOST).collect(),
+            None => self.top.clone(),
         }
+    }
+
+    /// 그 단계의 단추들을 머리 위에 늘어놓고, 처음부터 튀어나오게 한다.
+    fn arrange(&mut self, level: Option<Pick>) {
+        let buttons = self.level_buttons(level);
+        let plan = plan(self.head, self.bounds, self.scale, buttons.len());
+        self.buttons = buttons.iter().zip(plan.spots).map(|(&(pick, enabled), spot)| (pick, enabled, spot)).collect();
+        (self.at, self.size, self.origin) = (plan.at, plan.size, plan.origin);
+        (self.level, self.leaving, self.hot) = (level, None, None);
+        (self.age, self.settled, self.stale) = (0.0, false, true);
+    }
+
+    /// 단추들이 다 들어가는 데 걸리는 초.
+    fn retract_time(&self) -> f32 {
+        RETRACT + STAGGER * self.buttons.len().saturating_sub(1) as f32
+    }
+
+    /// 단추 하나가 머리에서 얼마나 나와 있는지(0~1). `at`번째 단추다.
+    fn out(&self, at: usize) -> f32 {
+        if let Some((_, gone)) = self.leaving {
+            // 오른쪽 끝의 단추부터 머리로 들어간다.
+            let late = (self.buttons.len() - 1 - at) as f32 * STAGGER;
+            let part = ((gone - late) / RETRACT).clamp(0.0, 1.0);
+            return 1.0 - part.powi(3);
+        }
+        // 머리 꼭대기에서 제자리로 튀어나온다. 뒤의 단추일수록 조금 늦게 나온다.
+        let part = ((self.age - at as f32 * STAGGER) / OPEN).clamp(0.0, 1.0);
+        1.0 - (1.0 - part).powi(3)
+    }
+
+    /// 단추를 눌렀다. 묶음이나 되돌아가기면 단추들을 머리로 들이고 `None`을, 아니면 그 단추를 돌려준다.
+    /// 단추들이 들어가는 동안에는 누른 것을 받지 않는다.
+    fn press(&mut self, at: usize) -> Option<Pick> {
+        let (pick, enabled, _) = *self.buttons.get(at)?;
+        if !enabled || self.leaving.is_some() {
+            return None;
+        }
+        if pick == Pick::Back || pick.is_group() {
+            let target = (pick != Pick::Back).then_some(pick);
+            (self.leaving, self.hot, self.stale) = (Some((target, 0.0)), None, true);
+            return None;
+        }
+        Some(pick)
     }
 
     fn size_px(&self) -> (i32, i32) {
@@ -312,14 +509,15 @@ impl Fan {
         self.buttons.iter().position(|&(_, _, spot)| (x - spot.0).hypot(y - spot.1) <= BUTTON)
     }
 
-    /// 단추의 이름이 뜨는 자리. 가로로는 한가운데, 세로로는 가장 아래 단추와 같은 높이다.
+    /// 단추의 이름이 뜨는 자리. 가로로는 한가운데다.
     fn name_spot(&self) -> (f32, f32) {
-        (self.size.0 / 2.0, self.buttons.iter().map(|button| button.2.1).fold(0.0, f32::max))
+        let spots: Vec<(f32, f32)> = self.buttons.iter().map(|button| button.2).collect();
+        (self.size.0 / 2.0, name_height(&spots))
     }
 
-    /// 아직 펼쳐지는 중인가.
+    /// 아직 펼쳐지거나 들어가는 중인가.
     fn is_opening(&self) -> bool {
-        self.age < OPEN + STAGGER * self.buttons.len() as f32
+        self.leaving.is_some() || self.age < OPEN + STAGGER * self.buttons.len() as f32
     }
 
     /// 한 줄짜리 글이나 아이콘 글자의 그림.
@@ -339,9 +537,7 @@ impl Fan {
         let shadow = rgb(0x141E46);
         for at in 0..self.buttons.len() {
             let (pick, enabled, spot) = self.buttons[at];
-            // 머리 꼭대기에서 제자리로 튀어나온다. 뒤의 단추일수록 조금 늦게 나온다.
-            let part = ((self.age - at as f32 * STAGGER) / OPEN).clamp(0.0, 1.0);
-            let out = 1.0 - (1.0 - part).powi(3);
+            let out = self.out(at);
             if out <= 0.0 {
                 continue;
             }
@@ -365,15 +561,31 @@ impl Fan {
                 let side = ((PICTURE * scale).round() as usize).clamp(1, SOURCE);
                 let small = self.pictures.entry((pick, side)).or_insert_with(|| shrink(pixels, SOURCE, side));
                 surface.picture(small, side as i32, center, ink);
+            } else if let Some(caption) = pick.caption() {
+                let block = self.label(caption, 10.5, true, scale);
+                surface.stamp(block, center, ROSE, ink);
+            }
+            // 점을 찍어 둔 단추에는 오른쪽 위에 작은 점을 찍는다.
+            if self.marked == Some(pick) {
+                let dot = (center.0 + 13.5, center.1 - 13.5);
+                surface.disc(dot, 5.0, CREAM, out);
+                surface.disc(dot, 3.6, ROSE, out);
+            }
+            // 묶음 단추에는 안에 단추가 더 있다는 점 셋을 아래에 찍는다.
+            if pick.is_group() {
+                for step in [-4.0, 0.0, 4.0] {
+                    surface.disc((center.0 + step, center.1 + 11.5), 1.3, ROSE, ink);
+                }
             }
         }
         // 마우스를 올린 단추의 이름. 부채꼴 안쪽의 한가운데, 양 끝 단추와 같은 높이에 뜬다.
         if let Some((pick, _, _)) = self.hot.map(|at| self.buttons[at]) {
             let middle = self.name_spot();
-            let wide = self.label(pick.name(), 12.0, true, scale).w as f32 / scale + 18.0;
+            let name = self.names.get(&pick).cloned().unwrap_or_else(|| pick.name().to_string());
+            let wide = self.label(&name, 12.0, true, scale).w as f32 / scale + 18.0;
             let rect = (middle.0 - wide / 2.0, middle.1 - 11.0, middle.0 + wide / 2.0, middle.1 + 11.0);
             surface.frame(rect, 11.0, PINK, CREAM, 1.5);
-            let block = self.label(pick.name(), 12.0, true, scale);
+            let block = self.label(&name, 12.0, true, scale);
             surface.stamp(block, middle, DEEP, 1.0);
         }
     }
@@ -382,12 +594,12 @@ impl Fan {
 impl Postits {
     /// 머리 꼭대기의 가운데(`head`, 화면 좌표) 위에 단추들을 부채꼴로 띄운다. 떠 있던 것은 닫는다.
     /// `bounds`는 벗어나면 안 되는 범위, `dpi`는 그 모니터의 화면 배율이다. 단추마다 누를 수 있는지를 함께 준다.
-    pub fn open_fan(&mut self, head: (i32, i32), bounds: Rect, dpi: u32, buttons: &[(Pick, bool)]) {
+    /// `groups`는 묶음 단추마다 안에 든 단추들이다. 한 단계에 [`MOST`]개까지 늘어선다.
+    pub fn open_fan(&mut self, head: (i32, i32), bounds: Rect, dpi: u32, buttons: &[(Pick, bool)], groups: &[Group]) {
         self.close_fan();
         window::start();
         let scale = dpi.max(96) as f32 / 96.0;
-        let plan = plan(head, bounds, scale, buttons.len());
-        let mut fan = Fan::new(null_mut(), plan, scale, buttons);
+        let mut fan = Fan::new((head, bounds), scale, buttons, groups);
         // 꽃핀이 늘 위에 떠 있을 수 있으므로, 단추는 그보다도 위에 띄운다.
         fan.hwnd = window::create(fan.at, fan.size_px(), true);
         let hwnd = fan.hwnd;
@@ -395,6 +607,20 @@ impl Postits {
         self.paint_fan();
         window::show(hwnd);
         self.wake();
+    }
+
+    /// 떠 있는 단추들 가운데 그 단추에 마우스를 올렸을 때의 이름을 바꾼다.
+    pub fn name_fan(&mut self, pick: Pick, name: String) {
+        if let Some(fan) = &mut self.fan {
+            fan.names.insert(pick, name);
+        }
+    }
+
+    /// 떠 있는 단추들 가운데 그 단추의 오른쪽 위에 작은 점을 찍는다.
+    pub fn mark_fan(&mut self, pick: Pick) {
+        if let Some(fan) = &mut self.fan {
+            (fan.marked, fan.stale) = (Some(pick), true);
+        }
     }
 
     /// 단추들을 거둔다.
@@ -437,14 +663,14 @@ impl Postits {
         match event {
             Event::Press { hwnd: on, x, y } | Event::Double { hwnd: on, x, y } if on == hwnd => {
                 window::stop_pressing();
-                let pressed = fan.hit(x as f32 / scale, y as f32 / scale).map(|at| fan.buttons[at]);
-                if let Some((pick, true, _)) = pressed {
+                let pressed = fan.hit(x as f32 / scale, y as f32 / scale).and_then(|at| fan.press(at));
+                if let Some(pick) = pressed {
                     self.close_fan();
                     self.outcomes.push(Outcome::Fan(pick));
                 }
             }
             Event::Move { hwnd: on, x, y } if on == hwnd => {
-                let hot = fan.hit(x as f32 / scale, y as f32 / scale);
+                let hot = fan.hit(x as f32 / scale, y as f32 / scale).filter(|_| fan.leaving.is_none());
                 fan.stale |= hot != fan.hot;
                 (fan.hot, fan.inside, fan.seen, fan.quiet) = (hot, true, true, 0.0);
                 let can_press = hot.is_some_and(|at| fan.buttons[at].1);
@@ -471,6 +697,13 @@ impl Postits {
         let Some(fan) = &mut self.fan else { return false };
         fan.age += dt;
         fan.since_drawn += dt;
+        // 단추들이 다 들어갔으면 다음 단계의 단추들이 튀어나온다.
+        if let Some((target, gone)) = fan.leaving {
+            fan.leaving = Some((target, gone + dt));
+            if gone + dt >= fan.retract_time() {
+                fan.arrange(target);
+            }
+        }
         if !fan.inside {
             fan.quiet += dt;
         }
@@ -523,8 +756,13 @@ impl Postits {
             FanStep::Leave => {
                 self.fan_event(Event::Leave { hwnd });
             }
-            // 다 펼쳐진 모습으로 넘어간다. 그림을 뽑을 때 펼쳐지는 중간이 찍히지 않게 한다.
-            FanStep::Settle => (fan.age, fan.stale) = (fan.age.max(1.0), true),
+            // 다 펼쳐진 모습으로 넘어간다. 그림을 뽑을 때 펼쳐지거나 들어가는 중간이 찍히지 않게 한다.
+            FanStep::Settle => {
+                if let Some((target, _)) = fan.leaving {
+                    fan.arrange(target);
+                }
+                (fan.age, fan.stale) = (fan.age.max(1.0), true);
+            }
         }
         self.wake();
     }
@@ -539,7 +777,8 @@ impl Postits {
             .collect();
         let size = fan.size_px();
         Some(format!(
-            "부채꼴 단추: 자리 {:?}, 크기 {}x{}(배율 {:.0}%), 단추 [{}], 마우스 {}",
+            "부채꼴 단추: {}, 자리 {:?}, 크기 {}x{}(배율 {:.0}%), 단추 [{}], 마우스 {}",
+            fan.level.map_or("처음", Pick::name),
             fan.at,
             size.0,
             size.1,
@@ -558,7 +797,7 @@ mod tests {
 
     #[test]
     fn buttons_fan_out_with_the_middle_highest() {
-        for count in 1..=Pick::ALL.len() {
+        for count in 1..=MOST {
             let spots = spread(count);
             assert_eq!(spots.len(), count);
             // 단추를 모두 띄워도 반원을 넘지 않는다. 양 끝의 단추가 머리 옆으로 내려오지 않는다.
@@ -641,11 +880,12 @@ mod tests {
         let [blue, green, red, alpha] = at(cafe, 40, 60);
         assert!(green > 150 && red < 60 && blue < 140 && alpha == 255, "{:?}", at(cafe, 40, 60));
         assert_eq!(at(cafe, 95, 95)[3], 0);
-        // 글자로 그리는 단추에는 그림이 없다. 단추마다 글자나 그림 가운데 하나가 있다.
+        // 글자로 그리는 단추에는 그림이 없다. 단추마다 아이콘 글자, 그림, 짧은 글 가운데 꼭 하나가 있다.
         assert!(source(Pick::Invite).is_none() && Pick::Invite.glyph().is_some());
-        assert!(Pick::ALL.iter().all(|pick| pick.glyph().is_some() != pick.picture().is_some()));
-        // 맨 오른쪽은 설정이다.
-        assert_eq!(Pick::ALL.last(), Some(&Pick::Settings));
+        for pick in Pick::ALL {
+            let kinds = [pick.glyph().is_some(), pick.picture().is_some(), pick.caption().is_some()];
+            assert_eq!(kinds.iter().filter(|&&kind| kind).count(), 1, "{}", pick.name());
+        }
     }
 
     #[test]
@@ -669,7 +909,7 @@ mod tests {
         text::load_fonts();
         let buttons = [(Pick::Invite, false), (Pick::Send, true), (Pick::Memos, true), (Pick::Settings, true)];
         let made = plan((1000, 600), SCREEN, 1.0, buttons.len());
-        let mut fan = Fan::new(null_mut(), made.clone(), 1.0, &buttons);
+        let mut fan = Fan::new(((1000, 600), SCREEN), 1.0, &buttons, &[]);
         let (wide, tall) = fan.size_px();
         let mut pixels = vec![0u32; (wide * tall) as usize];
         let alpha = |pixels: &[u32], spot: (f32, f32)| pixels[spot.1 as usize * wide as usize + spot.0 as usize] >> 24;
@@ -695,5 +935,41 @@ mod tests {
         // 단추 사이의 빈 곳은 비어 있어서, 클릭이 뒤로 넘어간다.
         let between = ((made.spots[1].0 + made.spots[2].0) / 2.0, made.spots[1].1 + BUTTON);
         assert_eq!(alpha(&pixels, between), 0);
+    }
+
+    #[test]
+    fn a_group_opens_in_place_and_goes_back() {
+        let links = [(Pick::Chzzk, true), (Pick::Youtube, true), (Pick::Cafe, false)];
+        let top = [(Pick::Invite, true), (Pick::Memos, true), (Pick::Links, true), (Pick::Settings, true)];
+        let mut fan = Fan::new(((1000, 600), SCREEN), 1.0, &top, &[(Pick::Links, links.to_vec())]);
+        let picks = |fan: &Fan| fan.buttons.iter().map(|button| button.0).collect::<Vec<_>>();
+        fan.age = 1.0;
+        // 보통 단추는 그대로 돌려준다.
+        assert_eq!(fan.press(1), Some(Pick::Memos));
+        // 묶음 단추를 누르면 단추들이 오른쪽 끝부터 머리로 들어간다. 그동안은 누른 것을 받지 않는다.
+        assert_eq!(fan.press(2), None);
+        assert_eq!(fan.level, None);
+        fan.leaving = Some((Some(Pick::Links), RETRACT * 0.5));
+        assert!(fan.out(3) < fan.out(0) && fan.out(0) > 0.99);
+        assert_eq!(fan.press(1), None);
+        // 다 들어가면 묶음 안의 단추들이 맨 앞의 되돌아가기와 함께, 단추 수에 맞춰 다시 놓인다.
+        fan.arrange(Some(Pick::Links));
+        assert_eq!(picks(&fan), [Pick::Back, Pick::Chzzk, Pick::Youtube, Pick::Cafe]);
+        assert_eq!(fan.level, Some(Pick::Links));
+        assert!(fan.age == 0.0 && fan.out(0) == 0.0);
+        assert_eq!(fan.size, plan((1000, 600), SCREEN, 1.0, 4).size);
+        fan.age = 1.0;
+        // 흐린 단추는 눌러도 아무 일이 없다.
+        assert_eq!(fan.press(3), None);
+        assert!(fan.leaving.is_none());
+        assert_eq!(fan.press(1), Some(Pick::Chzzk));
+        // 되돌아가기를 누르면 같은 움직임으로 처음 단추들이 돌아온다.
+        assert_eq!(fan.press(0), None);
+        assert_eq!(fan.leaving.map(|leaving| leaving.0), Some(None));
+        fan.arrange(None);
+        assert_eq!(picks(&fan), [Pick::Invite, Pick::Memos, Pick::Links, Pick::Settings]);
+        // 한 단계에는 많아야 MOST개만 늘어선다.
+        let many: Vec<(Pick, bool)> = Pick::ALL.iter().map(|&pick| (pick, true)).collect();
+        assert_eq!(Fan::new(((1000, 600), SCREEN), 1.0, &many, &[]).buttons.len(), MOST);
     }
 }

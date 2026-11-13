@@ -14,6 +14,7 @@ mod clock;
 mod desktop;
 mod dev;
 mod dialog;
+mod focus;
 mod frames;
 mod geom;
 mod key;
@@ -30,7 +31,9 @@ mod settings_window;
 mod shadow;
 mod stage;
 mod store;
+mod studio;
 mod text;
+mod together;
 mod tray;
 mod update;
 mod usage;
@@ -91,11 +94,24 @@ fn run(options: dev::Options) -> Result<Vec<String>, PackError> {
                     update: update.as_deref(),
                     can_send: app.can_send(),
                     hidden: app.is_tucked(),
+                    focus: app.focus_menu(),
                 };
                 let item = app::run_modal(&mut app, || tray::pick(owner, x, y, &state));
                 if app.picked(item, Instant::now())? {
                     break;
                 }
+            }
+            Flow::StudioMenu(x, y) => {
+                // 방송 촬영용 창을 오른쪽 클릭했을 때의 메뉴. 색을 직접 고르면 Windows의 색 고르기 창을 띄운다.
+                let Some((owner, state)) = app.studio_menu() else { continue };
+                let picked = app::run_modal(&mut app, || studio::pick(owner, (x, y), &state));
+                let custom = match picked {
+                    Some(studio::StudioPick::Custom) => {
+                        app::run_modal(&mut app, || studio::choose_color(owner, state.color))
+                    }
+                    _ => None,
+                };
+                app.studio_picked(picked, custom, Instant::now())?;
             }
             Flow::MemoMenu(id, x, y) => {
                 // 포스트잇을 오른쪽 클릭했을 때의 메뉴.

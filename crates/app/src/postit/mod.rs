@@ -18,6 +18,7 @@
 mod alarm;
 mod draw;
 mod fan;
+mod focus_panel;
 mod list;
 mod panel;
 mod text;
@@ -42,12 +43,15 @@ use crate::win;
 use alarm::Alarm;
 use draw::{COLORS, Hit, Ink, Look, Rgb, TOOLS};
 use fan::Fan;
+use focus_panel::FocusPanel;
 use list::{FOUND_SIZE, FOUND_TIME, List};
 use panel::{Action, Draft, Kind, Model, Panel, Surface};
 use text::{DT_EDITCONTROL, DT_WORDBREAK, Font, Painter};
 use window::{Canvas, Cursor, Editor, Event};
 
 pub use fan::Pick as FanPick;
+pub use focus_panel::FocusAct;
+pub use panel::FocusModel;
 pub use window::{NOTE_CLASS, menu};
 
 /// 움직이는 동안 시간을 흘리는 간격. 창을 옮기는 일은 이 간격으로 한다.
@@ -83,6 +87,10 @@ pub enum Outcome {
     Fan(FanPick),
     /// 꽃핀 머리 위의 단추들이 아무것도 누르지 않은 채 닫혔다.
     FanClosed,
+    /// 쉬는 시간 알림 판에서 무엇인가를 눌렀다.
+    Focus(FocusAct),
+    /// 메모 목록 창의 "항상 위"를 바꿨다. 앱이 기억해 둔다.
+    ListTop(bool),
 }
 
 /// 목표로 다가가는 값. 용수철처럼 조금 지나쳤다가 돌아온다.
@@ -302,8 +310,14 @@ pub struct Postits {
     search: Option<Editor>,
     /// 메모 목록을 닫을 때 있던 자리. 다시 열면 그 자리에 띄운다.
     list_spot: Option<(i32, i32)>,
+    /// 메모 목록 창을 늘 다른 창 위에 둔다. 앱이 기억해 두었다가 알려 준다.
+    list_top: bool,
     /// 꽃핀 머리 위에 부채꼴로 뜬 단추들. 떠 있을 때만 있다.
     fan: Option<Fan>,
+    /// 꽃핀 옆에 뜬 쉬는 시간 알림 판. 떠 있을 때만 있다.
+    focus: Option<FocusPanel>,
+    /// 쉬는 시간 알림 판을 마지막으로 옮겨 둔 자리. 다시 열면 그 자리에 띄운다(앱이 켜져 있는 동안).
+    focus_spot: Option<(i32, i32)>,
     /// 움직이는 것이 있다. 있는 동안에는 짧은 간격으로 시간을 흘린다.
     awake: bool,
     last: Instant,
@@ -344,7 +358,10 @@ impl Postits {
             list: None,
             search: None,
             list_spot: None,
+            list_top: false,
             fan: None,
+            focus: None,
+            focus_spot: None,
             awake: false,
             last: Instant::now(),
             wall,
@@ -361,6 +378,7 @@ impl Postits {
             self.settle(index);
         }
         self.settle_list();
+        self.settle_focus();
     }
 
     /// 화면의 한 점이 놓인 모니터의 화면 배율. 어느 모니터에도 들지 않으면 가장 가까운 모니터의 것이다.
@@ -906,7 +924,11 @@ impl Postits {
     }
 
     fn handle(&mut self, event: Event, memos: &mut Memos) {
-        if self.fan_event(event) || self.list_event(event, memos) || self.panel_event(event, memos) {
+        if self.fan_event(event)
+            || self.focus_event(event)
+            || self.list_event(event, memos)
+            || self.panel_event(event, memos)
+        {
             self.wake();
             return;
         }

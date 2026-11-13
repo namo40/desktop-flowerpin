@@ -34,6 +34,7 @@ pub enum Key {
     AlwaysOnTop,
     UpdateCheck,
     IdleActions,
+    FollowCursor,
     Stay,
     MaxCharacters,
     LiveCheck,
@@ -45,7 +46,7 @@ pub enum Key {
 }
 
 /// 항목 수.
-pub const COUNT: usize = 13;
+pub const COUNT: usize = 14;
 
 /// 파일에 적는 값.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -116,6 +117,8 @@ pub const SPECS: [Spec; COUNT] = [
     flag(Key::UpdateCheck, "update_check", 0, true),
     // 꽃핀
     choice(Key::IdleActions, "idle_actions", 1, &[number("적게", 50), number("보통", 100), number("자주", 200)], 1),
+    // 마우스 커서가 바닥 가까이에 머물면 가까운 꽃핀이 그 아래로 걸어온다.
+    flag(Key::FollowCursor, "follow_cursor", 1, true),
     // 더 부른 꽃핀이 머무는 시간(초). 0이면 보낼 때까지 머문다.
     Spec { key: Key::Stay, name: "stay_seconds", tab: 1, picks: &[], range: Some((0, 3600)), default: 30 },
     // 한 번에 나와 있을 수 있는 꽃핀의 수. 기본 꽃핀도 센다.

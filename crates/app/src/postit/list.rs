@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 use windows_sys::Win32::Foundation::HWND;
 
 use super::draw::{self, COLORS, CREAM, DEEP, HOT, INK, PINK, ROSE, Rgb, WHITE, from_hsv, mix, rgb, round_box, to_hsv};
-use super::panel::Surface;
+use super::panel::{Surface, flower_pin};
 use super::text::{self, Block};
 use super::window::{self, Cursor, Editor, Event, KEY_ESCAPE};
 use super::{Outcome, Phase, Postits};
@@ -187,6 +187,8 @@ pub enum Spot {
     /// 제목 줄. 끌어서 창을 옮긴다.
     Head,
     Close,
+    /// 제목 줄의 꽃 핀. 창을 늘 다른 창 위에 둘지 켜고 끈다.
+    Pin,
     /// 찾는 말을 적는 칸.
     Search,
     /// 찾는 말 지우기.
@@ -297,6 +299,8 @@ pub struct List {
     pub scroll: f32,
     /// 마우스가 올라가 있는 것.
     pub hot: Option<Spot>,
+    /// 창을 늘 다른 창 위에 둔다.
+    pub top: bool,
     /// 창을 끄는 중: 커서에서 창의 왼쪽 위까지의 거리.
     moving: Option<(i32, i32)>,
     /// 넘기는 막대를 끄는 중: 잡은 곳에서 막대의 위 끝까지의 거리.
@@ -329,6 +333,7 @@ impl List {
             asking: false,
             scroll: 0.0,
             hot: None,
+            top: false,
             moving: None,
             scrolling: None,
             reveal: false,
@@ -421,7 +426,7 @@ impl List {
     fn print(&self, view: &View) -> u64 {
         let mut hasher = DefaultHasher::new();
         (view.limit, view.typing, &self.query, self.filter, self.sort, self.selected, self.asking).hash(&mut hasher);
-        (self.hot, self.scrolling.is_some(), self.scroll.to_bits(), self.scale.to_bits()).hash(&mut hasher);
+        (self.hot, self.scrolling.is_some(), self.scroll.to_bits(), self.scale.to_bits(), self.top).hash(&mut hasher);
         for entry in view.entries {
             (entry.id, &entry.first, &entry.rest, &entry.search, &entry.chip, entry.top, entry.held).hash(&mut hasher);
             entry.next.map(|next| (next.day(), next.minute_of_day())).hash(&mut hasher);
@@ -560,6 +565,13 @@ impl List {
         }
         self.put(surface, CLOSE, 11.0, false, Anchor::Center(right - 24.0), y + 22.0, ROSE);
         self.spot(close, Spot::Close, None);
+        // 항상 위: 닫기 단추 왼쪽의 꽃 핀.
+        let pin = (right - 64.0, y + 10.0, right - 40.0, y + 34.0);
+        if self.hot == Some(Spot::Pin) {
+            surface.disc((right - 52.0, y + 22.0), 12.0, HOT, 1.0);
+        }
+        flower_pin(surface, (right - 52.0, y + 22.0), self.top);
+        self.spot(pin, Spot::Pin, None);
 
         // 찾는 말을 적는 칸.
         let (tools, middle) = (y + TOOLS_TOP, y + TOOLS_TOP + 15.0);
@@ -819,10 +831,25 @@ impl Postits {
             );
         }
         list.hwnd = window::create_active(list.at, (wide, tall));
+        list.top = self.list_top;
+        if list.top {
+            window::set_layer(list.hwnd, true);
+        }
         // 그림은 이번 바퀴의 끝에 그려 넘긴다. 그때까지는 창에 아무것도 없어서 보이지 않는다.
         window::show_active(list.hwnd);
         self.list = Some(list);
         self.wake();
+    }
+
+    /// 메모 목록 창을 늘 다른 창 위에 둘지 정한다(기억해 둔 것). 떠 있으면 바로 바꾼다.
+    pub fn set_list_top(&mut self, top: bool) {
+        self.list_top = top;
+        if let Some(list) = &mut self.list
+            && list.top != top
+        {
+            list.top = top;
+            window::set_layer(list.hwnd, top);
+        }
     }
 
     /// 메모 목록을 닫는다. 찾는 말과 고른 것은 남기지 않는다.
@@ -993,6 +1020,12 @@ impl Postits {
         match spot {
             Spot::Head | Spot::Scroll => {}
             Spot::Close => self.close_list(),
+            Spot::Pin => {
+                list.top = !list.top;
+                window::set_layer(list.hwnd, list.top);
+                self.list_top = list.top;
+                self.outcomes.push(Outcome::ListTop(list.top));
+            }
             Spot::Search => self.open_search(memos),
             Spot::Clear => {
                 (list.scroll, list.query) = (0.0, String::new());
@@ -1149,6 +1182,7 @@ impl Postits {
                     "raise" => Spot::Foot(Foot::Raise),
                     "search" => Spot::Search,
                     "clear" => Spot::Clear,
+                    "pin" => Spot::Pin,
                     _ => Spot::Close,
                 };
                 self.list_act(spot, memos);

@@ -56,6 +56,7 @@ impl Monitor {
     }
 }
 
+#[derive(Clone, Debug)]
 pub struct Stage {
     monitors: Vec<Monitor>,
 }

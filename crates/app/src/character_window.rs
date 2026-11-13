@@ -7,7 +7,7 @@
 //! 창에서 일어난 일(누르기, 끌기, 모니터가 바뀜)은 창 메시지를 받는 자리에서 처리하지 않고
 //! [`WindowEvent`]로 적어 두기만 한다. 메인 루프가 [`take_events`]로 꺼내 처리한다.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
 use std::ptr::{null, null_mut};
 use std::sync::Once;
@@ -20,9 +20,9 @@ use windows_sys::Win32::Graphics::Gdi::{
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetCapture, ReleaseCapture, SetCapture};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, HTCLIENT, HWND_NOTOPMOST, HWND_TOP, HWND_TOPMOST, IDC_HAND,
-    IsWindowVisible, LoadCursorW, MA_NOACTIVATE, RegisterClassExW, SW_HIDE, SW_SHOWNOACTIVATE, SWP_NOACTIVATE,
-    SWP_NOMOVE, SWP_NOSIZE, SetCursor, SetWindowPos, ShowWindow, ULW_ALPHA, UPDATELAYEREDWINDOWINFO,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, GW_HWNDPREV, GetWindow, HTCLIENT, HWND_NOTOPMOST, HWND_TOP,
+    HWND_TOPMOST, IDC_HAND, IsWindowVisible, LoadCursorW, MA_NOACTIVATE, RegisterClassExW, SW_HIDE, SW_SHOWNOACTIVATE,
+    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SetCursor, SetWindowPos, ShowWindow, ULW_ALPHA, UPDATELAYEREDWINDOWINFO,
     UpdateLayeredWindowIndirect, WM_CAPTURECHANGED, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_LBUTTONDOWN, WM_LBUTTONUP,
     WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_RBUTTONUP, WM_SETCURSOR, WM_SETTINGCHANGE, WNDCLASSEXW, WS_EX_LAYERED,
     WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
@@ -80,12 +80,17 @@ pub struct CharacterWindow {
     pos: (i32, i32),
     /// 마지막으로 화면에 넘긴 위치. 아직 한 번도 넘기지 않았으면 `None`.
     presented_pos: Option<(i32, i32)>,
+    /// 화면에 내보내지 않는다. 그림 버퍼만 쓰고, 창은 늘 숨어 있다(방송 촬영용 창 안의 꽃핀).
+    offscreen: bool,
+    /// 화면에 내보내지 않을 때, 그림이나 자리가 바뀐 범위(화면 좌표). 가져다 쓰는 창이 [`CharacterWindow::take_changed`]로
+    /// 꺼내 그곳만 다시 그린다.
+    changed: Cell<Rect>,
 }
 
 impl CharacterWindow {
     /// 크기가 `width`×`height`이고 왼쪽 위가 화면 `(x, y)`에 오는 창을 만든다. 처음에는 보이지 않는다.
-    /// `topmost`면 다른 창들보다 늘 위에 있다.
-    pub fn new(width: i32, height: i32, x: i32, y: i32, topmost: bool) -> CharacterWindow {
+    /// `topmost`면 다른 창들보다 늘 위에 있다. `offscreen`이면 화면에 내보내지 않고 그림 버퍼에만 그린다.
+    pub fn new(width: i32, height: i32, x: i32, y: i32, topmost: bool, offscreen: bool) -> CharacterWindow {
         register_class();
         let class = wide(CLASS_NAME);
         // 작업표시줄과 Alt+Tab에 나오지 않고, 눌러도 다른 창의 포커스를 빼앗지 않는다.
@@ -136,6 +141,8 @@ impl CharacterWindow {
             height,
             pos: (x, y),
             presented_pos: None,
+            offscreen,
+            changed: Cell::new(Rect::EMPTY),
         }
     }
 
@@ -169,6 +176,9 @@ impl CharacterWindow {
 
     /// 창을 숨기거나 다시 보인다. 다시 보일 때도 다른 창의 포커스를 빼앗지 않는다.
     pub fn set_visible(&self, visible: bool) {
+        if self.offscreen {
+            return;
+        }
         unsafe { ShowWindow(self.hwnd, if visible { SW_SHOWNOACTIVATE } else { SW_HIDE }) };
     }
 
@@ -179,6 +189,25 @@ impl CharacterWindow {
     /// 이 창을 `front` 창의 바로 뒤에 둔다. 다른 창들 사이에서의 높이는 `front`를 따라간다.
     pub fn place_behind(&self, front: HWND) {
         unsafe { SetWindowPos(self.hwnd, front, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE) };
+    }
+
+    /// 이 창이 `front` 창의 바로 뒤에 있는가. 사이에 보이지 않는 창만 끼어 있으면 바로 뒤로 친다.
+    /// 끼어 있던 다른 창이 있으면 그 창도 함께 돌려준다(보이지 않는 창은 빼고, 가장 가까운 것).
+    ///
+    /// 보이지 않는 창은 앞뒤가 화면에 드러나지 않는다. 늘 맨 앞으로 올라오는 보이지 않는 창(다른 프로그램의
+    /// 오버레이 등)이 있으면, 그 창을 건너뛰지 않을 때 앞뒤를 맞출 때마다 꽃핀을 모두 옮기게 된다.
+    pub fn is_just_behind(&self, front: HWND) -> (bool, Option<HWND>) {
+        let mut ahead = unsafe { GetWindow(self.hwnd, GW_HWNDPREV) };
+        while !ahead.is_null() {
+            if ahead == front {
+                return (true, None);
+            }
+            if unsafe { IsWindowVisible(ahead) } != 0 {
+                return (false, Some(ahead));
+            }
+            ahead = unsafe { GetWindow(ahead, GW_HWNDPREV) };
+        }
+        (false, None)
     }
 
     /// 창의 왼쪽 위를 화면의 `(x, y)`로 옮긴다. 다음 `present` 때 화면에 반영된다.
@@ -197,6 +226,11 @@ impl CharacterWindow {
         unsafe { std::slice::from_raw_parts(self.bits, (self.width * self.height) as usize) }
     }
 
+    /// 화면에 내보내지 않는 창에서, 지난번에 꺼낸 뒤로 그림이나 자리가 바뀐 범위(화면 좌표)를 꺼낸다.
+    pub fn take_changed(&self) -> Rect {
+        self.changed.replace(Rect::EMPTY)
+    }
+
     /// 창 버퍼에서 `dirty` 범위를 화면에 넘기고, 자리가 바뀌었으면 함께 옮긴다.
     ///
     /// 화면에 넘기는 호출은 넘기는 픽셀 수보다 부를 때마다 드는 비용이 크다. 그래서 그림과 위치를
@@ -210,6 +244,18 @@ impl CharacterWindow {
         let moved = self.presented_pos != Some(self.pos);
         let dirty = if first { Rect::new(0, 0, self.width, self.height) } else { dirty.clip(self.width, self.height) };
         if !moved && dirty.is_empty() {
+            return;
+        }
+        if self.offscreen {
+            // 화면에 내보내지 않는다. 버퍼에 그려진 것을 다른 창이 가져다 쓴다. 그 창이 바뀐 곳만 다시 그리도록
+            // 바뀐 범위를 화면 좌표로 모아 둔다. 자리를 옮겼으면 옛 자리와 새 자리 전체다.
+            let area = match self.presented_pos {
+                Some(old) if moved => self.screen_rect().union(Rect::new(old.0, old.1, self.width, self.height)),
+                Some(_) => Rect::new(self.pos.0 + dirty.x, self.pos.1 + dirty.y, dirty.w, dirty.h),
+                None => self.screen_rect(),
+            };
+            self.changed.set(self.changed.get().union(area));
+            self.presented_pos = Some(self.pos);
             return;
         }
 

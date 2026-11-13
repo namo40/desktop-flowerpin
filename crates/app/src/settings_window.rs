@@ -114,6 +114,7 @@ const CONTROLS: [Control; settings::COUNT] = [
     check(Key::AlwaysOnTop, 1104),
     check(Key::UpdateCheck, 1106),
     combo(Key::IdleActions, 1203, 1212, None),
+    check(Key::FollowCursor, 1207),
     field(Key::Stay, 1205, 1214),
     field(Key::MaxCharacters, 1206, 1215),
     check(Key::LiveCheck, 1301),

@@ -88,6 +88,13 @@ const HOP_SPEED: f64 = 110.0;
 const PERCH_SNAP: f64 = 24.0;
 /// 올라선 창이 움직이면 이만큼(초) 동안 자리를 자주 고친다. 창을 끌고 다닐 때 뒤처져 보이지 않게 한다.
 const RIDE_SMOOTH: f64 = 0.3;
+/// 올라선 창을 흔들면 떨어진다. 창이 한 방향으로 이만큼(px) 넘게 움직였다가 방향을 바꾸는 것을, 바꿀 때마다
+/// 이만큼(초) 안에 이어서 이만큼(번) 하면 흔든 것으로 친다. 창을 끌어 옮기다 조금 되돌리는 정도로는 떨어지지 않는다.
+const SHAKE_LEG: f64 = 24.0;
+const SHAKE_GAP: f64 = 0.6;
+const SHAKE_TURNS: u32 = 3;
+/// 커서 아래로 걸어갈 때, 그 자리에서 이만큼(px) 안에 오면 멈춘다.
+const ARRIVE: f64 = 24.0;
 /// 머리를 문지른 거리가 이만큼(px) 쌓이면 쓰다듬은 것으로 친다. 이 시간(초) 동안 문지르지 않으면 쌓인 거리를 버린다.
 const PAT_DISTANCE: f64 = 200.0;
 const PAT_KEEP: f64 = 0.7;
@@ -222,6 +229,43 @@ struct Leap {
     t: f64,
 }
 
+/// 올라선 창을 흔드는지 알아본다. 창이 움직인 만큼을 걸음마다 받는다.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct Shake {
+    /// 가로와 세로마다, 지금 움직이는 방향(-1, 0, 1)과 그 방향으로 움직인 거리(px).
+    axes: [(f64, f64); 2],
+    /// 이어서 방향을 바꾼 횟수와, 마지막으로 바꾼 뒤 흐른 시간(초).
+    turns: u32,
+    quiet: f64,
+}
+
+impl Shake {
+    /// 창이 `dt`초 동안 `moved`만큼 움직였다. `leg`는 방향을 바꾼 것으로 치려면 그 전에 움직였어야 하는 거리다.
+    /// 흔든 것으로 치면 `true`를 돌려준다.
+    fn feed(&mut self, dt: f64, moved: (f64, f64), leg: f64) -> bool {
+        self.quiet += dt;
+        if self.quiet > SHAKE_GAP {
+            self.turns = 0;
+        }
+        for (axis, d) in self.axes.iter_mut().zip([moved.0, moved.1]) {
+            if d.abs() < 0.01 {
+                continue;
+            }
+            let dir = d.signum();
+            if dir == axis.0 {
+                axis.1 += d.abs();
+                continue;
+            }
+            if axis.0 != 0.0 && axis.1 >= leg {
+                self.turns += 1;
+                self.quiet = 0.0;
+            }
+            *axis = (dir, d.abs());
+        }
+        self.turns >= SHAKE_TURNS
+    }
+}
+
 /// 꽃핀의 버릇.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Habits {
@@ -281,7 +325,7 @@ impl Rng {
         low + (high - low) * self.unit()
     }
 
-    fn chance(&mut self, probability: f64) -> bool {
+    pub fn chance(&mut self, probability: f64) -> bool {
         self.unit() < probability
     }
 }
@@ -327,12 +371,16 @@ pub struct Actor {
     hop_dir: Option<Dir>,
     /// 올라선 창이 방금 움직였다. 이 시간(초) 동안 자리를 자주 고친다.
     riding: f64,
+    /// 올라선 창을 흔드는지 본다.
+    shake: Shake,
     /// 표시 배율. 길이와 빠르기 상수에 곱한다.
     scale: f64,
     /// 마지막으로 내려앉은 곳.
     home: f64,
     /// 걷고 있는 방향.
     walk: Option<Dir>,
+    /// 걸어가서 멈출 자리(x). 커서 아래로 걸어갈 때만 있다.
+    goal: Option<f64>,
     /// idle로 잠깐 선 뒤에 걸을 방향.
     turn_to: Option<Dir>,
     /// 지금 하는 일(쉬기, 걷기, 잠깐 서기)을 마칠 때까지 남은 시간(초).
@@ -357,10 +405,16 @@ pub struct Actor {
     away: bool,
     /// idle2가 첫 장으로 돌아오면 시작할 행동.
     pending: Option<Whim>,
+    /// 다 같이 하라고 한 행동. 바닥에 서면(깨어 일어나거나, 일어서거나, 내려서면) 기다리지 않고 바로 한다.
+    joining: Option<Whim>,
+    /// 다 같이 할 차례를 기다린다. 바닥에 서면 다른 것을 하지 않고 가만히 서 있는다.
+    waiting: bool,
     /// 동작을 차례로 보여 주는 중이다([`Actor::play`]).
     showcase: bool,
     /// 반복 동작을 몇 바퀴 더 돌지.
     loops_left: u32,
+    /// 혼자 시작한 가끔 하는 행동. 앱이 꺼내 가서 옆 꽃핀이 따라 하게 한다.
+    started: Option<Whim>,
     rng: Rng,
 }
 
@@ -390,9 +444,11 @@ impl Actor {
             leap: None,
             hop_dir: None,
             riding: 0.0,
+            shake: Shake::default(),
             scale,
             home: x,
             walk: None,
+            goal: None,
             turn_to: None,
             wait,
             drag: (x, y),
@@ -406,8 +462,11 @@ impl Actor {
             sit_left: 0,
             away: false,
             pending: None,
+            joining: None,
+            waiting: false,
             showcase: false,
             loops_left: 0,
+            started: None,
             rng,
         }
     }
@@ -437,6 +496,23 @@ impl Actor {
     /// 올라서 있는 창. 바닥에 있거나 떠 있으면 `None`이다.
     pub fn support(&self) -> Option<isize> {
         self.on.map(|(window, _)| window)
+    }
+
+    /// 가로 자리 `x`로 걸어가서 멈춘다. 바닥이나 창 위에서 쉬거나 걷고 있을 때만 하고, 그러면 `true`다.
+    /// 이미 그 자리 가까이에 있거나, 할 일을 고른 뒤거나, 다 같이 할 차례를 기다리는 중이면 하지 않는다.
+    /// 디딘 곳의 끝까지 가도 닿지 않으면 끝에서 멈춘다. 걷는 시간이 다 돼도 멈추지 않고 닿을 때까지 걷는다.
+    pub fn come_to(&mut self, x: f64) -> bool {
+        let arrive = ARRIVE * self.scale;
+        if self.mode != Mode::Ground || self.leaving || self.pending.is_some() || self.waiting {
+            return false;
+        }
+        if (x - self.x).abs() <= arrive {
+            return false;
+        }
+        self.goal = Some(x);
+        self.walk = Some(if x < self.x { Dir::West } else { Dir::East });
+        self.turn_to = None;
+        true
     }
 
     /// 공중에 있어서 어디에 내려앉을지 알아야 하는가.
@@ -648,8 +724,16 @@ impl Actor {
                 self.start_hop(motions, dir);
             }
             Whim::Climb | Whim::Hop => self.rest(motions, REST),
-            other => self.start(other, motions),
+            other => {
+                self.start(other, motions);
+                self.started = Some(other);
+            }
         }
+    }
+
+    /// 쉬다가 혼자 시작한 가끔 하는 행동이 있으면 꺼낸다. 사용자나 앱이 시킨 행동은 들어 있지 않다.
+    pub fn take_started(&mut self) -> Option<Whim> {
+        self.started.take()
     }
 
     /// 지금 이 행동을 골라서 볼 수 있는가.
@@ -763,6 +847,7 @@ impl Actor {
         self.walk = None;
         self.turn_to = None;
         self.pending = None;
+        (self.joining, self.waiting) = (None, false);
         self.showcase = false;
         self.drag = target;
         true
@@ -785,10 +870,109 @@ impl Actor {
         }
     }
 
+    /// 하던 일을 멈추고 바닥의 `(x, y)`에 바로 선다. 떨어지는 모습 없이 쉬기(idle2)부터 한다. 방송 촬영용 창의
+    /// 크기가 바뀌어 꽃핀들을 새 바닥에 다시 세울 때 쓴다. 손을 흔들며 사라지는 중이면 그 자리에서 이어 간다.
+    /// 돌아가라는 말을 들었으면 선 뒤에 손을 흔들고 사라진다.
+    pub fn settle_at(&mut self, motions: &Motions, (x, y): (f64, f64)) {
+        if !matches!(self.mode, Mode::Vanish | Mode::Gone) {
+            (self.mode, self.motion, self.t) = (Mode::Ground, motions.idle2, 0.0);
+            (self.vx, self.vy, self.on, self.through) = (0.0, 0.0, None, false);
+            (self.leap, self.hop_dir, self.riding, self.shake) = (None, None, 0.0, Shake::default());
+            (self.walk, self.goal, self.turn_to) = (None, None, None);
+            self.wait = self.rng.range(SETTLE_REST);
+            (self.launched, self.sleep_left, self.sit_left) = (false, 0.0, 0);
+            (self.pending, self.showcase, self.loops_left, self.started) = (None, false, 0, None);
+            (self.joining, self.waiting) = (None, false);
+            (self.pat_distance, self.pat_quiet) = (0.0, 0.0);
+        }
+        (self.x, self.y, self.home, self.drag) = (x, y, x, (x, y));
+    }
+
+    /// 무대가 통째로 옮겨 갔다(방송 촬영용 창을 옮김). 같은 만큼 함께 옮겨 가고, 하던 일은 그대로 이어 간다.
+    /// 그 창 안에는 올라설 다른 창이 없으므로, 딛고 선 창은 따지지 않는다.
+    pub fn shift(&mut self, (dx, dy): (f64, f64)) {
+        (self.x, self.y, self.home) = (self.x + dx, self.y + dy, self.home + dx);
+        self.drag = (self.drag.0 + dx, self.drag.1 + dy);
+        if let Some(goal) = &mut self.goal {
+            *goal += dx;
+        }
+        if let Some(leap) = &mut self.leap {
+            leap.from = (leap.from.0 + dx, leap.from.1 + dy);
+        }
+    }
+
+    /// 다 같이 하기 전에, 하던 것을 멈추고 그 자리에 서서 기다린다. 걷던 것은 멈추고 다른 행동은 끊는다. 자고 있으면
+    /// 깨어 일어나고, 걸터앉아 있으면 일어서고, 공중에 있으면 내려선 뒤에 선다. 선 뒤에는 [`Actor::join`]이나
+    /// [`Actor::stop_waiting`]까지 가만히 서 있는다. 잡혀 있거나 돌아가는 중이면 하지 않고 `false`다.
+    pub fn halt(&mut self, motions: &Motions) -> bool {
+        if self.leaving || matches!(self.mode, Mode::Drag | Mode::Vanish | Mode::Gone) {
+            return false;
+        }
+        (self.pending, self.goal, self.showcase, self.joining) = (None, None, false, None);
+        (self.walk, self.turn_to) = (None, None);
+        match self.mode {
+            Mode::Act => {
+                self.rest(motions, REST);
+                self.t = 0.0;
+            }
+            Mode::Jump if !self.launched => {
+                self.rest(motions, REST);
+                self.t = 0.0;
+            }
+            Mode::Sleep => self.sleep_left = 0.0,
+            Mode::Sit => self.stand_up(motions),
+            _ => {}
+        }
+        self.waiting = true;
+        true
+    }
+
+    /// 다 같이 할 차례를 기다리며 바닥에 서 있는가.
+    pub fn is_waiting(&self) -> bool {
+        self.waiting && self.mode == Mode::Ground
+    }
+
+    /// 다 같이 할 차례를 기다리던 것을 그만두고 하던 대로 지낸다.
+    pub fn stop_waiting(&mut self) {
+        self.waiting = false;
+    }
+
+    /// 다 같이 하라는 행동(기지개, 하품, 점프)을 한다. 하던 것을 멈추고 바로 한다. 자고 있으면 깨어 일어난 뒤,
+    /// 걸터앉아 있으면 일어선 뒤, 공중에 있으면 내려선 뒤에 한다. 잡혀 있거나 돌아가는 중이면 하지 않고 `false`다.
+    pub fn join(&mut self, show: Show, motions: &Motions) -> bool {
+        let whim = match show {
+            Show::Stretch => Whim::Stretch,
+            Show::Yawn => Whim::Yawn,
+            Show::Jump => Whim::Jump,
+            _ => return false,
+        };
+        if self.leaving || matches!(self.mode, Mode::Drag | Mode::Vanish | Mode::Gone) {
+            return false;
+        }
+        (self.pending, self.goal, self.showcase, self.waiting) = (None, None, false, false);
+        match self.mode {
+            // 쉬거나 걷거나 다른 행동을 하던 중이면 그것을 끊고 바로 한다. 뛰기 시작했지만 아직 뜨지 않았으면 그것도 끊는다.
+            Mode::Ground | Mode::Act => self.start(whim, motions),
+            Mode::Jump if !self.launched => self.start(whim, motions),
+            Mode::Sleep => {
+                self.sleep_left = 0.0;
+                self.joining = Some(whim);
+            }
+            Mode::Sit => {
+                self.stand_up(motions);
+                self.joining = Some(whim);
+            }
+            // 공중에 있거나, 나타나는 중이거나, 착지하는 중이다. 바닥에 선 뒤에 한다.
+            _ => self.joining = Some(whim),
+        }
+        true
+    }
+
     /// 사라지라고 한다. 바닥에 서 있지 않으면 내려와 선 뒤에 사라진다. 자고 있으면 깨고, 앉아 있으면 일어난다.
     pub fn leave(&mut self, motions: &Motions) {
         self.leaving = true;
         self.pending = None;
+        (self.joining, self.waiting) = (None, false);
         match self.mode {
             Mode::Sleep => self.sleep_left = 0.0,
             Mode::Sit => self.stand_up(motions),
@@ -823,7 +1007,7 @@ impl Actor {
             return;
         }
         // 창 위에 서 있으면 그 윗변이 바닥이고 양 끝이 벽이다.
-        let here = self.footing(motions, around);
+        let here = self.footing(dt, motions, around);
         match self.mode {
             Mode::Ground => self.ground_step(dt, motions, &here),
             _ => self.air_step(dt, motions, &here),
@@ -846,9 +1030,12 @@ impl Actor {
     /// 딛고 있는 곳의 상황을 돌려준다. 창 위에 서 있으면 그 윗변이 바닥이고 양 끝이 벽이다.
     ///
     /// 창이 움직였으면 따라 움직인다. 딛고 있던 윗변이 없어졌으면(창을 닫았거나, 최소화했거나, 선 자리가
-    /// 다른 창에 가려졌으면) 그 자리에서 바닥까지 떨어지기 시작한다.
-    fn footing<'a>(&mut self, motions: &Motions, around: &Surroundings<'a>) -> Surroundings<'a> {
-        let Some((window, origin)) = self.on else { return *around };
+    /// 다른 창에 가려졌으면) 그 자리에서 바닥까지 떨어지기 시작한다. 창을 흔들면 놓친 것처럼 떨어진다.
+    fn footing<'a>(&mut self, dt: f64, motions: &Motions, around: &Surroundings<'a>) -> Surroundings<'a> {
+        let Some((window, origin)) = self.on else {
+            self.shake = Shake::default();
+            return *around;
+        };
         if !self.is_standing() {
             return *around;
         }
@@ -876,7 +1063,30 @@ impl Actor {
         self.x += dx;
         self.y = perch.y;
         self.on = Some((window, perch.origin));
+        if self.shake.feed(dt, (dx, dy), SHAKE_LEG * self.scale) && self.mode != Mode::Vanish {
+            self.shaken_off(motions);
+            return *around;
+        }
         Surroundings { floor: perch.y, left: perch.left, right: perch.right, ledge: true, ..*around }
+    }
+
+    /// 흔들리는 창에서 놓친다. 그 자리에 잠깐 떠 있다가(hang_to_fall) 창들을 지나쳐 바닥까지 떨어진다.
+    fn shaken_off(&mut self, motions: &Motions) {
+        self.on = None;
+        self.through = true;
+        self.mode = Mode::Release;
+        self.motion = motions.hang_to_fall;
+        self.t = 0.0;
+        self.vy = 0.0;
+        self.vx = 0.0;
+        self.leap = None;
+        self.riding = 0.0;
+        self.shake = Shake::default();
+        self.walk = None;
+        self.turn_to = None;
+        self.pending = None;
+        self.showcase = false;
+        self.sit_left = 0;
     }
 
     /// 장이 바뀌지 않아도 자리를 자주 고쳐야 하는가. 떨어지는 중이거나 끌려가는 중이면 그렇다.
@@ -972,6 +1182,7 @@ impl Actor {
         self.mode = Mode::Ground;
         self.motion = motions.idle2;
         self.walk = None;
+        self.goal = None;
         self.turn_to = None;
         self.pending = None;
         self.showcase = false;
@@ -1054,8 +1265,10 @@ impl Actor {
                 }
                 if self.y >= around.floor {
                     self.touch_down(motions, around.floor, None);
-                } else if let (Mode::Release, Some(perch)) = (self.mode, self.perch_at_feet(around)) {
-                    // 창 윗변 가까이에 놓았다. 떨어뜨리지 않고 그 위에 올려놓는다.
+                } else if let (Mode::Release, false, Some(perch)) =
+                    (self.mode, self.through, self.perch_at_feet(around))
+                {
+                    // 창 윗변 가까이에 놓았다. 떨어뜨리지 않고 그 위에 올려놓는다. 흔들려 놓친 것이면 그대로 떨어진다.
                     self.touch_down(motions, perch.y, Some(perch));
                 } else {
                     self.follow_when_over(motions);
@@ -1223,6 +1436,18 @@ impl Actor {
             return;
         }
 
+        if let Some(whim) = self.joining.take() {
+            // 다 같이 하라고 했다. 다른 꽃핀들과 맞추려고 기다리지 않고 바로 한다.
+            self.start(whim, motions);
+            return;
+        }
+
+        if self.waiting {
+            // 다 같이 할 차례를 기다린다. 걷거나 다른 행동을 하거나 잠들지 않고 가만히 서 있는다.
+            self.idle2_at_first_frame(dt, motions);
+            return;
+        }
+
         if let Some(whim) = self.pending {
             // 가끔 하는 행동도 idle2의 첫 장에서 이어지게 그려져 있다. 혼자 시작하는 것이라 서두를 까닭이 없으므로
             // idle2가 첫 장으로 돌아올 때까지 기다렸다 시작한다.
@@ -1234,8 +1459,14 @@ impl Actor {
 
         self.wait -= dt;
         if let Some(dir) = self.walk {
-            if self.at_edge(dir, around) {
+            if self.goal.is_some_and(|goal| (goal - self.x) * dir.sign() <= ARRIVE * self.scale) {
+                // 가려던 자리에 왔다. 멈춰 쉰다.
                 self.walk = None;
+                self.goal = None;
+                self.wait = self.rng.range(REST);
+            } else if self.at_edge(dir, around) {
+                self.walk = None;
+                self.goal = None;
                 if self.on.is_some() && self.habits.whim_rate > 0.0 && self.rng.chance(HOP_AT_END) {
                     // 창 윗변의 끝이다. 돌아서지 않고 바깥쪽으로 뛰어내리기도 한다.
                     self.hop_dir = Some(dir);
@@ -1245,7 +1476,8 @@ impl Actor {
                     self.turn_to = Some(dir.opposite());
                     self.wait = self.rng.range(TURN_PAUSE);
                 }
-            } else if self.wait <= 0.0 {
+            } else if self.goal.is_none() && self.wait <= 0.0 {
+                // 걷는 시간이 다 됐다. 가려는 자리가 있으면 닿을 때까지 걷는다.
                 self.walk = None;
                 if self.rng.chance(TURN_CHANCE) {
                     self.turn_to = Some(dir.opposite());
@@ -1258,7 +1490,7 @@ impl Actor {
             if self.wait <= 0.0 {
                 self.turn_to = None;
                 if self.habits.roam && !self.at_edge(dir, around) {
-                    self.walk = Some(dir);
+                    (self.walk, self.goal) = (Some(dir), None);
                     self.wait = self.rng.range(WALK);
                 } else {
                     self.wait = self.rng.range(REST);
@@ -1278,7 +1510,8 @@ impl Actor {
                 if self.at_edge(dir, around) {
                     dir = dir.opposite();
                 }
-                self.walk = Some(dir);
+                // 혼자 걷기 시작한다. 커서를 따라가다 끊긴 자리(남은 목표)로 걸음이 짧게 끝나지 않게 한다.
+                (self.walk, self.goal) = (Some(dir), None);
                 self.wait = self.rng.range(WALK);
             } else {
                 self.wait = self.rng.range(REST);
@@ -2128,6 +2361,121 @@ mod tests {
         assert_eq!((actor.mode(), actor.position()), (Mode::Ground, (1100.0, 550.0)));
     }
 
+    /// `WINDOW`를 `(dx, dy)`만큼 옮긴 것.
+    fn shifted(dx: f64, dy: f64) -> Perch {
+        Perch {
+            y: WINDOW.y + dy,
+            left: WINDOW.left + dx,
+            right: WINDOW.right + dx,
+            origin: WINDOW.origin + dx,
+            ..WINDOW
+        }
+    }
+
+    /// 창을 `seconds`초 동안 걸음마다 `at(흐른 시간)`의 자리로 옮기며 시간을 흘린다. 아래에는 `LOWER`가 있다.
+    /// 그동안 거친 동작을 돌려준다.
+    fn move_window(
+        actor: &mut Actor,
+        motions: &Motions,
+        seconds: f64,
+        at: impl Fn(f64) -> (f64, f64),
+    ) -> Vec<MotionId> {
+        let steps = (seconds / STEP).round() as usize;
+        let mut seen = vec![actor.motion()];
+        for i in 1..=steps {
+            let (dx, dy) = at(i as f64 * STEP);
+            let perches = [shifted(dx, dy), LOWER];
+            actor.update(STEP, motions, &among(&perches));
+            if seen.last() != Some(&actor.motion()) {
+                seen.push(actor.motion());
+            }
+        }
+        seen
+    }
+
+    #[test]
+    fn shaking_the_window_shakes_the_character_off() {
+        let motions = sample();
+        for (name, start, wave) in [
+            ("쉬는 중에 좌우로", None, (60.0, 0.0)),
+            ("걸터앉은 중에 좌우로", Some(Whim::Sit), (60.0, 0.0)),
+            ("쉬는 중에 위아래로", None, (0.0, 40.0)),
+        ] {
+            let mut actor = standing_on(&motions, WINDOW, 1000.0, 5);
+            actor.set_habits(Habits { roam: false, whim_rate: 0.0 });
+            if let Some(whim) = start {
+                actor.start(whim, &motions);
+            }
+            run(&mut actor, &motions, &among(&[WINDOW, LOWER]), 1.0);
+            assert_eq!(actor.support(), Some(7), "{name}");
+            // 0.4초에 한 번 왔다 갔다 한다. 1.2초면 방향을 여섯 번 바꾼다.
+            let swing = |t: f64| (t * std::f64::consts::TAU / 0.4).sin();
+            let shaken = move_window(&mut actor, &motions, 1.2, |t| (wave.0 * swing(t), wave.1 * swing(t)));
+            assert!(shaken.contains(&motions.hang_to_fall), "{name}: {shaken:?}");
+            assert_eq!(actor.support(), None, "{name}");
+            // 아래에 다른 창이 있어도 지나쳐 바닥까지 떨어진다.
+            let seen = run(&mut actor, &motions, &among(&[WINDOW, LOWER]), 5.0);
+            assert!(names(&seen).contains(&"fall") && names(&seen).contains(&"land"), "{name}: {seen:?}");
+            assert_eq!(
+                (actor.mode(), actor.support(), actor.position().1),
+                (Mode::Ground, None, AROUND.floor),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn moving_the_window_around_is_not_shaking() {
+        let motions = sample();
+        let mut actor = standing_on(&motions, WINDOW, 1000.0, 5);
+        actor.set_habits(Habits { roam: false, whim_rate: 0.0 });
+        run(&mut actor, &motions, &among(&[WINDOW, LOWER]), 1.0);
+        // 오른쪽으로 300 옮겼다가 다시 왼쪽으로 되돌린다. 방향을 한 번 바꾼다.
+        move_window(&mut actor, &motions, 2.0, |t| (300.0 * (1.0 - (t - 1.0).abs()), 0.0));
+        // 끌고 가다 손이 떨려 조금씩 오간다. 한 번에 움직인 거리가 짧다.
+        move_window(&mut actor, &motions, 1.0, |t| (8.0 * (t * std::f64::consts::TAU / 0.2).sin(), 0.0));
+        // 천천히 왔다 갔다 한다. 방향을 바꾸는 사이가 길다.
+        move_window(&mut actor, &motions, 6.0, |t| (200.0 * (t * std::f64::consts::TAU / 3.0).sin(), 0.0));
+        assert_eq!((actor.mode(), actor.support()), (Mode::Ground, Some(7)));
+    }
+
+    #[test]
+    fn walks_over_to_a_spot_and_stops_there() {
+        let motions = sample();
+        let mut actor = Actor::stand(&motions, 1000.0, AROUND.floor, 1.0, 5);
+        actor.set_habits(Habits { roam: false, whim_rate: 0.0 });
+        assert!(actor.come_to(1300.0));
+        let seen = run(&mut actor, &motions, &AROUND, 10.0);
+        assert_eq!(names(&seen)[..3], ["idle2", "walk_e", "idle2"]);
+        assert!((actor.position().0 - 1300.0).abs() <= ARRIVE + 2.0, "{:?}", actor.position());
+        // 이미 가까이에 있으면 가지 않는다.
+        assert!(!actor.come_to(actor.position().0 + 10.0));
+        // 왼쪽으로도 간다. 돌아다니는 꽃핀도 걷던 것을 그만두고 간다.
+        actor.set_habits(Habits::default());
+        assert!(actor.come_to(700.0));
+        run(&mut actor, &motions, &AROUND, 0.1);
+        assert_eq!(actor.motion(), motions.walk_w);
+        for _ in 0..(30.0 / STEP) as usize {
+            actor.update(STEP, &motions, &AROUND);
+            if actor.motion() != motions.walk_w {
+                break;
+            }
+        }
+        assert!((actor.position().0 - 700.0).abs() <= ARRIVE + 2.0, "{:?}", actor.position());
+        // 디딘 창의 끝까지 가도 닿지 않으면 끝에서 멈춘다. 다른 행동을 하면 가지 않는다.
+        let mut on_window = standing_on(&motions, WINDOW, 1000.0, 5);
+        on_window.set_habits(Habits { roam: false, whim_rate: 0.0 });
+        assert!(on_window.come_to(1500.0));
+        run(&mut on_window, &motions, &among(&[WINDOW]), 20.0);
+        assert_eq!(
+            (on_window.mode(), on_window.support(), on_window.position().0),
+            (Mode::Ground, Some(7), WINDOW.right)
+        );
+        let mut busy = Actor::stand(&motions, 1000.0, AROUND.floor, 1.0, 5);
+        busy.start(Whim::Stretch, &motions);
+        assert!(!busy.come_to(1500.0));
+    }
+
     #[test]
     fn falls_to_the_floor_when_the_window_goes_away() {
         let motions = sample();
@@ -2501,5 +2849,136 @@ mod tests {
             let seen = run(&mut actor, &motions, &ON_LEDGE, 3.0);
             assert_eq!(names(&seen), ["stretch", "idle2"], "{busy_with:?}");
         }
+    }
+
+    #[test]
+    fn settling_stops_everything_and_stands_on_the_new_floor() {
+        let motions = sample();
+        let mut actor = Actor::appear(&motions, 300.0, 100.0, 1.0, 7);
+        // 나타나서 떨어지는 중이었다.
+        run(&mut actor, &motions, &AROUND, 0.5);
+        assert!(actor.is_airborne());
+        actor.settle_at(&motions, (450.0, 700.0));
+        assert_eq!((actor.mode(), actor.motion(), actor.position()), (Mode::Ground, motions.idle2, (450.0, 700.0)));
+        assert_eq!((actor.home(), actor.support()), (450.0, None));
+        // 돌아가라는 말을 들었으면 선 뒤에 손을 흔들고 사라진다.
+        actor.leave(&motions);
+        actor.settle_at(&motions, (460.0, 700.0));
+        assert!(actor.is_leaving() && actor.mode() == Mode::Ground);
+        // 옮기면 하던 일은 그대로이고 자리만 같이 옮겨 간다.
+        actor.shift((-30.0, 12.0));
+        assert_eq!((actor.mode(), actor.position(), actor.home()), (Mode::Ground, (430.0, 712.0), 430.0));
+    }
+
+    #[test]
+    fn joining_in_stops_what_it_was_doing() {
+        let motions = sample();
+        let name = |actor: &Actor| motions.clip(actor.motion()).name.clone();
+        // 걷던 꽃핀은 바로 한다.
+        let mut walker = Actor::stand(&motions, 1000.0, AROUND.floor, 1.0, 5);
+        assert!(walker.come_to(1400.0));
+        run(&mut walker, &motions, &AROUND, 0.5);
+        assert!(walker.join(Show::Stretch, &motions));
+        assert_eq!((walker.mode(), name(&walker).as_str()), (Mode::Act, "stretch"));
+        // 다른 행동을 하던 꽃핀은 그것을 끊고 한다.
+        let mut busy = Actor::stand(&motions, 1000.0, AROUND.floor, 1.0, 5);
+        busy.start(Whim::Yawn, &motions);
+        run(&mut busy, &motions, &AROUND, 0.2);
+        assert!(busy.join(Show::Jump, &motions));
+        assert_eq!((busy.mode(), name(&busy).as_str()), (Mode::Jump, "jump"));
+        // 자던 꽃핀은 깨어 일어난 뒤에 한다.
+        let mut sleeper = Actor::stand(&motions, 1000.0, AROUND.floor, 1.0, 5);
+        sleeper.start(Whim::Sleep, &motions);
+        run(&mut sleeper, &motions, &AROUND, 3.0);
+        assert_eq!(sleeper.mode(), Mode::Sleep);
+        assert!(sleeper.join(Show::Stretch, &motions));
+        let seen = run(&mut sleeper, &motions, &AROUND, 6.0);
+        let seen = names(&seen);
+        let woke = seen.iter().position(|&name| name == "sleep_out").expect("깨어남");
+        let stretched = seen.iter().position(|&name| name == "stretch").expect("기지개");
+        assert!(woke < stretched, "{seen:?}");
+        // 걸터앉은 꽃핀은 일어선 뒤에 한다.
+        let mut sitter = Actor::stand(&motions, 1000.0, ON_LEDGE.floor, 1.0, 5);
+        sitter.start(Whim::Sit, &motions);
+        run(&mut sitter, &motions, &ON_LEDGE, 0.3);
+        assert_eq!(name(&sitter), "edge_loop");
+        assert!(sitter.join(Show::Yawn, &motions));
+        let seen = run(&mut sitter, &motions, &ON_LEDGE, 6.0);
+        assert!(names(&seen).contains(&"yawn"), "{seen:?}");
+        // 떨어지는 꽃핀은 내려선 뒤에 한다.
+        let mut faller = Actor::appear(&motions, 1000.0, 300.0, 1.0, 5);
+        run(&mut faller, &motions, &AROUND, 0.5);
+        assert!(faller.is_airborne());
+        assert!(faller.join(Show::Stretch, &motions));
+        let seen = run(&mut faller, &motions, &AROUND, 6.0);
+        assert!(names(&seen).contains(&"stretch"), "{seen:?}");
+        // 잡혀 있거나 돌아가는 중이면 하지 않는다.
+        let mut held = Actor::stand(&motions, 1000.0, AROUND.floor, 1.0, 5);
+        assert!(held.grab(&motions, (1000.0, 900.0)));
+        assert!(!held.join(Show::Stretch, &motions));
+        let mut leaving = Actor::stand(&motions, 1000.0, AROUND.floor, 1.0, 5);
+        leaving.leave(&motions);
+        assert!(!leaving.join(Show::Stretch, &motions));
+    }
+
+    #[test]
+    fn halting_stands_still_until_told() {
+        let motions = sample();
+        // 걷던 꽃핀은 바로 멈춰 서고, 기다리는 동안 걷거나 다른 행동을 하거나 잠들지 않는다.
+        let mut walker = Actor::stand(&motions, 1000.0, AROUND.floor, 1.0, 5);
+        walker.set_habits(Habits { whim_rate: 5.0, ..Habits::default() });
+        assert!(walker.come_to(1400.0));
+        run(&mut walker, &motions, &AROUND, 0.5);
+        assert!(walker.halt(&motions));
+        assert!(walker.is_waiting());
+        walker.set_away(true);
+        let at = walker.position();
+        let seen = run(&mut walker, &motions, &AROUND, 20.0);
+        assert_eq!(names(&seen), ["walk_e", "idle2"]);
+        assert_eq!(walker.position(), at);
+        // 차례가 오면 바로 한다.
+        assert!(walker.join(Show::Stretch, &motions));
+        assert!(!walker.is_waiting() && walker.mode() == Mode::Act);
+        // 자던 꽃핀은 깨어 일어난 뒤에, 떨어지던 꽃핀은 내려선 뒤에 기다린다.
+        let mut sleeper = Actor::stand(&motions, 1000.0, AROUND.floor, 1.0, 5);
+        sleeper.start(Whim::Sleep, &motions);
+        run(&mut sleeper, &motions, &AROUND, 3.0);
+        assert!(sleeper.halt(&motions) && !sleeper.is_waiting());
+        run(&mut sleeper, &motions, &AROUND, 6.0);
+        assert!(sleeper.is_waiting());
+        let mut faller = Actor::appear(&motions, 1000.0, 300.0, 1.0, 5);
+        run(&mut faller, &motions, &AROUND, 0.5);
+        assert!(faller.halt(&motions) && !faller.is_waiting());
+        run(&mut faller, &motions, &AROUND, 6.0);
+        assert!(faller.is_waiting());
+        // 그만 기다리라고 하면 하던 대로 지낸다. 잡히면 기다리던 것을 잊는다.
+        faller.stop_waiting();
+        assert!(!faller.is_waiting());
+        assert!(sleeper.grab(&motions, (1000.0, 900.0)));
+        assert!(!sleeper.is_waiting());
+    }
+
+    #[test]
+    fn a_walk_to_the_cursor_that_was_cut_short_leaves_nothing_behind() {
+        let motions = sample();
+        // 커서 쪽으로 걷다가 다 같이 하려고 멈춰 섰고, 차례가 오기 전에 그만뒀다. 그 뒤에도 다시 돌아다닌다.
+        let mut walker = Actor::stand(&motions, 1000.0, AROUND.floor, 1.0, 5);
+        walker.set_habits(Habits { whim_rate: 0.0, ..Habits::default() });
+        assert!(walker.come_to(1600.0));
+        run(&mut walker, &motions, &AROUND, 0.5);
+        assert!(walker.halt(&motions));
+        run(&mut walker, &motions, &AROUND, 0.5);
+        // 기다리는 동안에는 커서 쪽으로 가지 않는다.
+        assert!(walker.is_waiting() && !walker.come_to(1800.0));
+        walker.stop_waiting();
+        let seen = run(&mut walker, &motions, &AROUND, 10.0);
+        assert!(names(&seen).iter().any(|name| name.starts_with("walk")), "{seen:?}");
+        // 걷다가 다른 행동으로 끊기면 가려던 자리는 잊는다. 다음에 혼자 걸을 때 그 자리에서 멈추지 않는다.
+        let mut poked = Actor::stand(&motions, 1000.0, AROUND.floor, 1.0, 5);
+        assert!(poked.come_to(1600.0));
+        run(&mut poked, &motions, &AROUND, 0.3);
+        poked.start(Whim::Stretch, &motions);
+        run(&mut poked, &motions, &AROUND, 6.0);
+        assert_eq!((poked.mode(), poked.goal), (Mode::Ground, None));
     }
 }

@@ -19,6 +19,8 @@ use crate::stage::{Monitor, Stage};
 const WALL_MARGIN: f64 = 64.0;
 /// 들어 올릴 때 화면 위 끝에 맞추는 칸의 줄. 머리 조금 위다.
 const HEAD_ROW: f64 = 60.0;
+/// 서 있거나 걸을 때 머리 꼭대기의 줄. 꽃핀 그림에서는 머리카락 위 끝이 칸의 y 84~90에 있다.
+const HEAD_TOP_ROW: f64 = 88.0;
 /// 머리로 치는 범위의 아래 끝. 뒷덜미(잡는 점)에서 발바닥까지를 1로 볼 때, 뒷덜미에서 이만큼 내려간 곳까지다.
 /// 꽃핀 그림에서는 칸의 y 160쯤이고, 얼굴 아래 끝이다. 이 위를 문질러야 쓰다듬는 것으로 친다.
 const HEAD_BELOW_HOLD: f64 = 0.31;
@@ -97,6 +99,8 @@ pub struct Look {
     pub dpi_override: Option<u32>,
     /// 다른 창들보다 늘 위에 있는다.
     pub topmost: bool,
+    /// 화면에 내보내지 않고 그림 버퍼에만 그린다. 방송 촬영용 창 안의 꽃핀이다([`crate::studio`]).
+    pub offscreen: bool,
 }
 
 impl Look {
@@ -124,6 +128,8 @@ struct Layout {
     /// 벽에서 떨어져 설 거리와, 들어 올릴 때 발바닥에서 화면 위 끝까지 남길 거리(화면 px).
     wall_margin: f64,
     headroom: f64,
+    /// 발바닥에서 머리 꼭대기까지(화면 px). 서 있을 때의 키다. 커서가 꽃핀 가까이에 있는지 볼 때 쓴다.
+    crown: f64,
     shadow: Shadow,
 }
 
@@ -152,6 +158,7 @@ impl Layout {
             shadow_reach: (bounds.bottom() - shadow_bottom).max(1) as f64,
             wall_margin: WALL_MARGIN * factor,
             headroom: (character.foot_y as f64 - HEAD_ROW) * factor,
+            crown: (character.foot_y as f64 - HEAD_TOP_ROW) * factor,
             shadow,
         }
     }
@@ -243,7 +250,7 @@ impl Character {
     ) -> Result<Character, PackError> {
         let layout = Layout::new(frames, scale);
         let (x, y) = layout.window_position(actor.foot(motions));
-        let window = CharacterWindow::new(layout.size.0, layout.size.1, x, y, look.topmost);
+        let window = CharacterWindow::new(layout.size.0, layout.size.1, x, y, look.topmost, look.offscreen);
         let mut character = Character {
             window,
             layout,
@@ -271,6 +278,22 @@ impl Character {
 
     pub fn window(&self) -> &CharacterWindow {
         &self.window
+    }
+
+    /// 발바닥에서 머리 꼭대기까지(화면 px). 서 있을 때의 키다.
+    pub fn height(&self) -> f64 {
+        self.layout.crown
+    }
+
+    /// 있는 모니터를 가리키는 값(모니터의 왼쪽 위). 같은 값이면 같은 모니터다.
+    pub fn monitor_key(&self, stage: &Stage) -> (i32, i32) {
+        let area = self.monitor(stage).area;
+        (area.x, area.y)
+    }
+
+    /// 이 꽃핀을 가리키는 값. 같이 하기에서 누구인지 가리킬 때 쓴다.
+    pub fn id(&self) -> isize {
+        self.window.hwnd() as isize
     }
 
     pub fn actor(&self) -> &Actor {
@@ -340,6 +363,16 @@ impl Character {
         ((turns * std::f64::consts::PI).sin().powi(2) * BLINK_PEAK * 255.0).round() as u8
     }
 
+    /// 하던 일을 멈추고 무대의 바닥, 가로 `x`에 바로 선다. 벽에 붙지 않게 안쪽으로 맞춘다. 방송 촬영용 창의 크기가
+    /// 바뀌었을 때 쓴다.
+    pub fn settle_at(&mut self, motions: &Motions, stage: &Stage, x: f64, now: Instant) {
+        let monitor = stage.nearest(x.round() as i32, stage.primary().work.y);
+        let around = self.surroundings(monitor);
+        let x = x.clamp(around.left, around.right.max(around.left));
+        self.actor.settle_at(motions, (x, around.floor));
+        self.wake(now);
+    }
+
     /// 상태를 밖에서 바꿨을 때(잡기, 놓기 등) 다음 걸음을 바로 밟게 한다.
     pub fn wake(&mut self, now: Instant) {
         self.due = now;
@@ -376,6 +409,22 @@ impl Character {
     }
 
     /// 시킨 행동을 바로 보여 준다. 지금 할 수 없으면 아무 일도 하지 않는다.
+    /// 다 같이 하기 전에 하던 것을 멈추고 서서 기다린다([`Actor::halt`]).
+    pub fn halt(&mut self, motions: &Motions, now: Instant) -> bool {
+        let halted = self.actor.halt(motions);
+        if halted {
+            self.wake(now);
+        }
+        halted
+    }
+
+    /// 다 같이 하라는 행동을 한다([`Actor::join`]). 하던 것을 멈추고 한다.
+    pub fn join(&mut self, show: Show, motions: &Motions, now: Instant) {
+        if self.actor.join(show, motions) {
+            self.wake(now);
+        }
+    }
+
     pub fn show(&mut self, show: Show, motions: &Motions, stage: &Stage, now: Instant) {
         let around = Surroundings { perches: &self.perches, ..self.surroundings(self.monitor(stage)) };
         if self.actor.show(show, motions, &around) {
@@ -469,8 +518,8 @@ impl Character {
         self.actor.update(dt, motions, &around);
         let sitting = self.actor.mode() == Mode::Sit;
         if sitting && !self.sitting {
-            // 다리가 단 아래로 내려온다. 단(작업표시줄)보다 앞에 있어야 보인다.
-            self.keep_on_top();
+            // 다리가 단 아래로 내려온다. 단(작업표시줄)보다 앞에 있어야 보인다. 이 꽃핀만 먼저 올리면 다른
+            // 꽃핀들의 앞으로 잠깐 나와 깜빡여 보이므로, 앱이 꽃핀들을 차례대로 함께 올리게 한다.
             self.raised = true;
         }
         self.sitting = sitting;
@@ -502,7 +551,8 @@ impl Character {
         self.layout = Layout::new(frames, scale);
         self.actor.set_scale(scale.factor());
         let (x, y) = self.layout.window_position(self.actor.foot(motions));
-        self.window = CharacterWindow::new(self.layout.size.0, self.layout.size.1, x, y, self.look.topmost);
+        self.window =
+            CharacterWindow::new(self.layout.size.0, self.layout.size.1, x, y, self.look.topmost, self.look.offscreen);
         self.shown = None;
         self.drawn = Rect::EMPTY;
         self.raised = true;

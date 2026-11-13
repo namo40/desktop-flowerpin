@@ -224,7 +224,7 @@ impl Bubble {
         // 꼬리를 달 수 있을 만큼은 넓고 높아야 한다.
         let least = 2 * sizes.tail_inset();
         let size = ((label.width + 2 * sizes.pad.0).max(least), (label.height + 2 * sizes.pad.1).max(least));
-        let window = CharacterWindow::new(size.0 + 2 * sizes.tail, size.1 + sizes.tail, 0, 0, topmost);
+        let window = CharacterWindow::new(size.0 + 2 * sizes.tail, size.1 + sizes.tail, 0, 0, topmost, false);
         Bubble { window, label, sizes, size, drawn: None }
     }
 
