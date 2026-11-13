@@ -898,6 +898,39 @@ impl Actor {
         }
     }
 
+    /// 하던 일을 멈추고 바닥의 `(x, y)`에 바로 선다. 떨어지는 모습 없이 쉬기(idle2)부터 한다. 방송 촬영용 창의
+    /// 크기가 바뀌어 꽃핀들을 새 바닥에 다시 세울 때 쓴다. 손을 흔들며 사라지는 중이면 그 자리에서 이어 간다.
+    /// 돌아가라는 말을 들었으면 선 뒤에 손을 흔들고 사라진다.
+    pub fn settle_at(&mut self, motions: &Motions, (x, y): (f64, f64)) {
+        if !matches!(self.mode, Mode::Vanish | Mode::Gone) {
+            (self.mode, self.motion, self.t) = (Mode::Ground, motions.idle2, 0.0);
+            (self.vx, self.vy, self.on, self.head, self.through) = (0.0, 0.0, None, false, false);
+            (self.leap, self.hop_dir, self.riding, self.shake) = (None, None, 0.0, Shake::default());
+            (self.walk, self.goal, self.turn_to) = (None, None, None);
+            self.wait = self.rng.range(SETTLE_REST);
+            (self.launched, self.sleep_left, self.sit_left) = (false, 0.0, 0);
+            (self.pending, self.showcase, self.loops_left, self.started) = (None, false, 0, None);
+            (self.pat_distance, self.pat_quiet) = (0.0, 0.0);
+        }
+        (self.x, self.y, self.home, self.drag) = (x, y, x, (x, y));
+    }
+
+    /// 무대가 통째로 옮겨 갔다(방송 촬영용 창을 옮김). 같은 만큼 함께 옮겨 가고, 하던 일은 그대로 이어 간다.
+    pub fn shift(&mut self, (dx, dy): (f64, f64)) {
+        (self.x, self.y, self.home) = (self.x + dx, self.y + dy, self.home + dx);
+        self.drag = (self.drag.0 + dx, self.drag.1 + dy);
+        // 딛고 있는 머리도 같이 옮겨 갔다. 머리가 움직인 것으로 보고 따라가지 않게 한다.
+        if let Some((_, left)) = &mut self.on {
+            *left += dx;
+        }
+        if let Some(goal) = &mut self.goal {
+            *goal += dx;
+        }
+        if let Some(leap) = &mut self.leap {
+            leap.from = (leap.from.0 + dx, leap.from.1 + dy);
+        }
+    }
+
     /// 사라지라고 한다. 바닥에 서 있지 않으면 내려와 선 뒤에 사라진다. 자고 있으면 깨고, 앉아 있으면 일어난다.
     pub fn leave(&mut self, motions: &Motions) {
         self.leaving = true;
@@ -2900,5 +2933,24 @@ mod tests {
             let seen = run(&mut actor, &motions, &ON_LEDGE, 3.0);
             assert_eq!(names(&seen), ["stretch", "idle2"], "{busy_with:?}");
         }
+    }
+
+    #[test]
+    fn settling_stops_everything_and_stands_on_the_new_floor() {
+        let motions = sample();
+        let mut actor = Actor::appear(&motions, 300.0, 100.0, 1.0, 7);
+        // 나타나서 떨어지는 중이었다.
+        run(&mut actor, &motions, &AROUND, 0.5);
+        assert!(actor.is_airborne());
+        actor.settle_at(&motions, (450.0, 700.0));
+        assert_eq!((actor.mode(), actor.motion(), actor.position()), (Mode::Ground, motions.idle2, (450.0, 700.0)));
+        assert_eq!((actor.home(), actor.support()), (450.0, None));
+        // 돌아가라는 말을 들었으면 선 뒤에 손을 흔들고 사라진다.
+        actor.leave(&motions);
+        actor.settle_at(&motions, (460.0, 700.0));
+        assert!(actor.is_leaving() && actor.mode() == Mode::Ground);
+        // 옮기면 하던 일은 그대로이고 자리만 같이 옮겨 간다.
+        actor.shift((-30.0, 12.0));
+        assert_eq!((actor.mode(), actor.position(), actor.home()), (Mode::Ground, (430.0, 712.0), 430.0));
     }
 }

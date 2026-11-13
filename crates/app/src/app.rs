@@ -1043,10 +1043,36 @@ impl App {
     }
 
     /// 방송 촬영용 창의 자리나 크기가 바뀌었다. 꽃핀들의 무대를 다시 읽고, 창의 자리를 기억해 둔다.
+    ///
+    /// 크기가 바뀌었으면 꽃핀들이 하던 일을 멈추고, 창 너비에 대한 비율대로 가로 자리를 옮겨 새 바닥에 바로 선다.
+    /// 다른 꽃핀의 머리 위에 있던 꽃핀도 바닥에 내려선다. 옮기기만 했으면 꽃핀들도 같은 만큼 옮겨 가서 창 안의
+    /// 자리가 그대로이고, 하던 일을 이어 간다.
     fn studio_moved(&mut self, now: Instant) {
         let Some(studio) = &self.studio else { return };
+        let old = self.stage.primary().work;
         self.stage = studio.stage().clone();
-        self.characters.iter_mut().for_each(|character| character.wake(now));
+        let new = self.stage.primary().work;
+        if (old.w, old.h) != (new.w, new.h) {
+            self.close_fan(now);
+            for character in &mut self.characters {
+                let ratio = ((character.actor().position().0 - old.x as f64) / old.w.max(1) as f64).clamp(0.0, 1.0);
+                character.settle_at(&self.motions, &self.stage, new.x as f64 + ratio * new.w as f64, now);
+            }
+            self.tiers = tiers(&self.carriers());
+            self.note(
+                now,
+                format!(
+                    "방송 촬영용 창의 크기가 바뀜: {}x{} → {}x{}, 꽃핀들을 새 바닥에 세움",
+                    old.w, old.h, new.w, new.h
+                ),
+            );
+        } else if (old.x, old.y) != (new.x, new.y) {
+            let moved = ((new.x - old.x) as f64, (new.y - old.y) as f64);
+            for character in &mut self.characters {
+                character.actor_mut().shift(moved);
+                character.wake(now);
+            }
+        }
         self.remember_studio(now);
     }
 

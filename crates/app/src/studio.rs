@@ -14,15 +14,15 @@
 //!
 //! [`Look::offscreen`]: crate::character::Look::offscreen
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
 use std::ptr::{null, null_mut};
 use std::sync::Once;
 use windows_sys::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
     BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BeginPaint, BitBlt, ClientToScreen, CreateCompatibleDC, CreateDIBSection,
-    DIB_RGB_COLORS, DeleteDC, DeleteObject, EndPaint, GetDC, HBITMAP, HDC, HGDIOBJ, PAINTSTRUCT, ReleaseDC, SRCCOPY,
-    SelectObject,
+    CreateSolidBrush, DIB_RGB_COLORS, DeleteDC, DeleteObject, EndPaint, FillRect, GetDC, HBITMAP, HDC, HGDIOBJ,
+    PAINTSTRUCT, ReleaseDC, SRCCOPY, SelectObject,
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::LibraryLoader::GetProcAddress;
@@ -129,6 +129,9 @@ pub struct MenuState {
 
 thread_local! {
     static EVENTS: RefCell<Vec<StudioEvent>> = const { RefCell::new(Vec::new()) };
+    /// 마지막으로 창에 그린 바탕색(0xRRGGBB)과 그린 범위(창 안쪽의 너비, 높이). 테두리를 끌어 창을 키우는 동안에는
+    /// 앱이 그릴 차례가 오지 않으므로, 창 메시지를 받는 자리에서 새로 드러난 곳을 이 색으로 칠한다.
+    static BACKDROP: Cell<(u32, i32, i32)> = const { Cell::new((0, 0, 0)) };
 }
 
 fn push(event: StudioEvent) {
@@ -396,6 +399,7 @@ impl Studio {
             BitBlt(dc, region.x, region.y, region.w, region.h, self.canvas.dc, region.x, region.y, SRCCOPY);
             ReleaseDC(self.hwnd, dc);
         }
+        BACKDROP.set((self.color, width, height));
     }
 
     /// 창 안쪽을 그림으로 받는다(확인용). 픽셀은 0xRRGGBB이다.
@@ -630,10 +634,24 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
         }
         // 바탕은 그림 버퍼로 칠하므로 지우지 않는다. 지우면 깜빡인다.
         WM_ERASEBKGND => 1,
+        // 다시 그리는 것은 앱이 한다. 다만 지난번에 그린 범위 밖(창을 키워 새로 드러난 곳)은 여기서 바로 바탕색으로
+        // 칠한다. 테두리를 끄는 동안 그곳이 검거나 지저분하게 방송 화면에 잡히지 않게 한다.
         WM_PAINT => {
             let mut paint: PAINTSTRUCT = unsafe { std::mem::zeroed() };
             unsafe {
-                BeginPaint(hwnd, &mut paint);
+                let dc = BeginPaint(hwnd, &mut paint);
+                let (color, width, height) = BACKDROP.get();
+                let dirty = paint.rcPaint;
+                let outside = [
+                    RECT { left: dirty.left.max(width), ..dirty },
+                    RECT { top: dirty.top.max(height), right: dirty.right.min(width), ..dirty },
+                ];
+                let swap = ((color & 0xFF) << 16) | (color & 0xFF00) | ((color >> 16) & 0xFF);
+                let brush = CreateSolidBrush(swap);
+                for rect in outside.iter().filter(|rect| rect.left < rect.right && rect.top < rect.bottom) {
+                    FillRect(dc, rect, brush);
+                }
+                DeleteObject(brush);
                 EndPaint(hwnd, &paint);
             }
             push(StudioEvent::Paint);

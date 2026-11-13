@@ -393,6 +393,16 @@ impl Character {
         ((turns * std::f64::consts::PI).sin().powi(2) * BLINK_PEAK * 255.0).round() as u8
     }
 
+    /// 하던 일을 멈추고 무대의 바닥, 가로 `x`에 바로 선다. 벽에 붙지 않게 안쪽으로 맞춘다. 방송 촬영용 창의 크기가
+    /// 바뀌었을 때 쓴다.
+    pub fn settle_at(&mut self, motions: &Motions, stage: &Stage, x: f64, now: Instant) {
+        let monitor = stage.nearest(x.round() as i32, stage.primary().work.y);
+        let around = self.surroundings(monitor);
+        let x = x.clamp(around.left, around.right.max(around.left));
+        self.actor.settle_at(motions, (x, around.floor));
+        self.wake(now);
+    }
+
     /// 상태를 밖에서 바꿨을 때(잡기, 놓기 등) 다음 걸음을 바로 밟게 한다.
     pub fn wake(&mut self, now: Instant) {
         self.due = now;
