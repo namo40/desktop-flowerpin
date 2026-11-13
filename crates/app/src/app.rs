@@ -656,8 +656,9 @@ impl App {
         self.next_wave = together::next_wave(habits.whim_rate, &mut self.rng, Instant::now());
     }
 
-    /// 같이 하기를 따져 볼 꽃핀들. 꽃핀 번호 차례다.
-    fn members(&self) -> Vec<Member> {
+    /// 같이 하기를 따져 볼 꽃핀들. 꽃핀 번호 차례다. `eager`면 메뉴나 단추로 시킨 것이라, 잡혀 있거나 돌아가는
+    /// 꽃핀만 빼고 모두 할 수 있는 것으로 친다([`App::can_join`]). 아니면 쉬거나 걷는 꽃핀만이다.
+    fn members_for(&self, eager: bool) -> Vec<Member> {
         let dragged = match self.pointer {
             Pointer::Dragging { hwnd } => Some(hwnd),
             _ => None,
@@ -669,11 +670,35 @@ impl App {
                 who: character.id(),
                 x: actor.position().0,
                 monitor: character.monitor_key(&self.stage),
-                free: actor.mode() == Mode::Ground && !actor.is_leaving() && hwnd != self.held && hwnd != dragged,
+                free: if eager {
+                    self.can_join(character)
+                } else {
+                    actor.mode() == Mode::Ground && !actor.is_leaving() && hwnd != self.held && hwnd != dragged
+                },
                 scale: character.scale().factor(),
             }
         };
         self.characters.iter().map(member).collect()
+    }
+
+    /// 저절로 하는 같이 하기(따라 하기, 파도)를 따져 볼 꽃핀들.
+    fn members(&self) -> Vec<Member> {
+        self.members_for(false)
+    }
+
+    /// 메뉴나 단추로 시킨 "다 같이"를 할 수 있는가. 잡혀 있거나, 머리 위 단추를 띄워 멈춰 세웠거나, 돌아가는
+    /// 중이면 못 한다. 다른 행동을 하던 꽃핀도 멈추고 한다.
+    fn can_join(&self, character: &Character) -> bool {
+        let actor = character.actor();
+        let hwnd = Some(character.window().hwnd());
+        let dragged = match self.pointer {
+            Pointer::Dragging { hwnd } => Some(hwnd),
+            _ => None,
+        };
+        !actor.is_leaving()
+            && !matches!(actor.mode(), Mode::Drag | Mode::Vanish | Mode::Gone)
+            && hwnd != self.held
+            && hwnd != dragged
     }
 
     /// 때가 된 같이 하기를 시킨다. 그때 할 수 없는 꽃핀은 넘어간다. 저절로 파도를 탈 때가 됐으면 탄다.
@@ -700,7 +725,12 @@ impl App {
         for cue in due {
             let Some(index) = members.iter().position(|member| member.who == cue.who) else { continue };
             let member = members[index];
-            if member.free {
+            if cue.eager {
+                // 메뉴나 단추로 시킨 것이다. 하던 것을 멈추고 한다.
+                if self.can_join(&self.characters[index]) {
+                    self.characters[index].join(cue.show, &self.motions, now);
+                }
+            } else if member.free {
                 self.characters[index].show(cue.show, &self.motions, &self.stage, now);
             }
         }
@@ -1343,13 +1373,17 @@ impl App {
     }
 
     /// 메뉴의 "다 같이"에서 고른 것을 나와 있는 꽃핀들이 함께 한다.
+    ///
+    /// 하던 행동을 멈추고 함께 한다. 자던 꽃핀은 깨어 일어난 뒤, 걸터앉은 꽃핀은 일어선 뒤, 떨어지는 꽃핀은
+    /// 내려선 뒤에 한다. 잡혀 있거나 돌아가는 꽃핀은 빠진다.
     fn play_together(&mut self, index: usize, now: Instant) {
-        let members = self.members();
-        let cues = match index {
+        let members = self.members_for(true);
+        let mut cues = match index {
             0 => together::wave(&members, None, now),
             1 => together::together(&members, Show::Stretch, &mut self.rng, now),
             _ => together::together(&members, Show::Yawn, &mut self.rng, now),
         };
+        cues.iter_mut().for_each(|cue| cue.eager = true);
         self.note(now, format!("다 같이 {}: {}명", tray::TOGETHER[index], cues.len()));
         self.cues.extend(cues);
         self.play_cues(now);

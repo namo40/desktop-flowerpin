@@ -409,6 +409,13 @@ impl Character {
     }
 
     /// 시킨 행동을 바로 보여 준다. 지금 할 수 없으면 아무 일도 하지 않는다.
+    /// 다 같이 하라는 행동을 한다([`Actor::join`]). 하던 것을 멈추고 한다.
+    pub fn join(&mut self, show: Show, motions: &Motions, now: Instant) {
+        if self.actor.join(show, motions) {
+            self.wake(now);
+        }
+    }
+
     pub fn show(&mut self, show: Show, motions: &Motions, stage: &Stage, now: Instant) {
         let around = Surroundings { perches: &self.perches, ..self.surroundings(self.monitor(stage)) };
         if self.actor.show(show, motions, &around) {

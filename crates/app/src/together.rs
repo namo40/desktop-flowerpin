@@ -29,6 +29,8 @@ pub struct Cue {
     /// 시킬 꽃핀([`crate::character::Character::id`]).
     pub who: isize,
     pub show: Show,
+    /// 메뉴나 단추로 시킨 것이다. 하던 것을 멈추고 한다. 아니면(저절로 하는 것) 쉬거나 걷는 꽃핀만 한다.
+    pub eager: bool,
 }
 
 /// 같이 하기를 따져 볼 꽃핀 한 명.
@@ -76,7 +78,7 @@ pub fn follow(members: &[Member], leader: usize, show: Show, rate: f64, rng: &mu
         .map(|(_, member)| (member, (member.x - lead.x).abs()))
         .filter(|&(_, distance)| distance <= reach);
     let (member, _) = near.min_by(|a, b| a.1.total_cmp(&b.1))?;
-    Some(Cue { at: now + Duration::from_secs_f64(rng.range(FOLLOW_DELAY)), who: member.who, show })
+    Some(Cue { at: now + Duration::from_secs_f64(rng.range(FOLLOW_DELAY)), who: member.who, show, eager: false })
 }
 
 /// 파도 점프. 뛸 수 있는 꽃핀들이 왼쪽부터 차례로 뛴다. `monitor`를 주면 그 모니터의 꽃핀만 뛴다.
@@ -88,15 +90,20 @@ pub fn wave(members: &[Member], monitor: Option<(i32, i32)>, now: Instant) -> Ve
     jumpers
         .iter()
         .enumerate()
-        .map(|(index, member)| Cue { at: now + gap(index), who: member.who, show: Show::Jump })
+        .map(|(index, member)| Cue { at: now + gap(index), who: member.who, show: Show::Jump, eager: false })
         .collect()
 }
 
 /// 다 같이 기지개나 하품을 한다. 저마다 조금씩 늦게 시작한다.
 pub fn together(members: &[Member], show: Show, rng: &mut Rng, now: Instant) -> Vec<Cue> {
     let able = members.iter().filter(|member| member.can(show));
-    able.map(|member| Cue { at: now + Duration::from_secs_f64(rng.range(TOGETHER_SPREAD)), who: member.who, show })
-        .collect()
+    able.map(|member| Cue {
+        at: now + Duration::from_secs_f64(rng.range(TOGETHER_SPREAD)),
+        who: member.who,
+        show,
+        eager: false,
+    })
+    .collect()
 }
 
 /// 다음에 저절로 파도를 탈 때. `rate`가 0이면(가끔 하는 행동을 하지 않으면) 없다.

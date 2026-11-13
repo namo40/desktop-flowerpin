@@ -405,6 +405,8 @@ pub struct Actor {
     away: bool,
     /// idle2가 첫 장으로 돌아오면 시작할 행동.
     pending: Option<Whim>,
+    /// 다 같이 하라고 한 행동. 바닥에 서면(깨어 일어나거나, 일어서거나, 내려서면) 기다리지 않고 바로 한다.
+    joining: Option<Whim>,
     /// 동작을 차례로 보여 주는 중이다([`Actor::play`]).
     showcase: bool,
     /// 반복 동작을 몇 바퀴 더 돌지.
@@ -458,6 +460,7 @@ impl Actor {
             sit_left: 0,
             away: false,
             pending: None,
+            joining: None,
             showcase: false,
             loops_left: 0,
             started: None,
@@ -843,6 +846,7 @@ impl Actor {
         self.walk = None;
         self.turn_to = None;
         self.pending = None;
+        self.joining = None;
         self.showcase = false;
         self.drag = target;
         true
@@ -877,6 +881,7 @@ impl Actor {
             self.wait = self.rng.range(SETTLE_REST);
             (self.launched, self.sleep_left, self.sit_left) = (false, 0.0, 0);
             (self.pending, self.showcase, self.loops_left, self.started) = (None, false, 0, None);
+            self.joining = None;
             (self.pat_distance, self.pat_quiet) = (0.0, 0.0);
         }
         (self.x, self.y, self.home, self.drag) = (x, y, x, (x, y));
@@ -898,10 +903,42 @@ impl Actor {
         }
     }
 
+    /// 다 같이 하라는 행동(기지개, 하품, 점프)을 한다. 하던 것을 멈추고 바로 한다. 자고 있으면 깨어 일어난 뒤,
+    /// 걸터앉아 있으면 일어선 뒤, 공중에 있으면 내려선 뒤에 한다. 잡혀 있거나 돌아가는 중이면 하지 않고 `false`다.
+    pub fn join(&mut self, show: Show, motions: &Motions) -> bool {
+        let whim = match show {
+            Show::Stretch => Whim::Stretch,
+            Show::Yawn => Whim::Yawn,
+            Show::Jump => Whim::Jump,
+            _ => return false,
+        };
+        if self.leaving || matches!(self.mode, Mode::Drag | Mode::Vanish | Mode::Gone) {
+            return false;
+        }
+        (self.pending, self.goal, self.showcase) = (None, None, false);
+        match self.mode {
+            // 쉬거나 걷거나 다른 행동을 하던 중이면 그것을 끊고 바로 한다. 뛰기 시작했지만 아직 뜨지 않았으면 그것도 끊는다.
+            Mode::Ground | Mode::Act => self.start(whim, motions),
+            Mode::Jump if !self.launched => self.start(whim, motions),
+            Mode::Sleep => {
+                self.sleep_left = 0.0;
+                self.joining = Some(whim);
+            }
+            Mode::Sit => {
+                self.stand_up(motions);
+                self.joining = Some(whim);
+            }
+            // 공중에 있거나, 나타나는 중이거나, 착지하는 중이다. 바닥에 선 뒤에 한다.
+            _ => self.joining = Some(whim),
+        }
+        true
+    }
+
     /// 사라지라고 한다. 바닥에 서 있지 않으면 내려와 선 뒤에 사라진다. 자고 있으면 깨고, 앉아 있으면 일어난다.
     pub fn leave(&mut self, motions: &Motions) {
         self.leaving = true;
         self.pending = None;
+        self.joining = None;
         match self.mode {
             Mode::Sleep => self.sleep_left = 0.0,
             Mode::Sit => self.stand_up(motions),
@@ -1361,6 +1398,12 @@ impl Actor {
                 self.motion = motions.despawn;
                 self.t = 0.0;
             }
+            return;
+        }
+
+        if let Some(whim) = self.joining.take() {
+            // 다 같이 하라고 했다. 다른 꽃핀들과 맞추려고 기다리지 않고 바로 한다.
+            self.start(whim, motions);
             return;
         }
 
@@ -2783,5 +2826,56 @@ mod tests {
         // 옮기면 하던 일은 그대로이고 자리만 같이 옮겨 간다.
         actor.shift((-30.0, 12.0));
         assert_eq!((actor.mode(), actor.position(), actor.home()), (Mode::Ground, (430.0, 712.0), 430.0));
+    }
+
+    #[test]
+    fn joining_in_stops_what_it_was_doing() {
+        let motions = sample();
+        let name = |actor: &Actor| motions.clip(actor.motion()).name.clone();
+        // 걷던 꽃핀은 바로 한다.
+        let mut walker = Actor::stand(&motions, 1000.0, AROUND.floor, 1.0, 5);
+        assert!(walker.come_to(1400.0));
+        run(&mut walker, &motions, &AROUND, 0.5);
+        assert!(walker.join(Show::Stretch, &motions));
+        assert_eq!((walker.mode(), name(&walker).as_str()), (Mode::Act, "stretch"));
+        // 다른 행동을 하던 꽃핀은 그것을 끊고 한다.
+        let mut busy = Actor::stand(&motions, 1000.0, AROUND.floor, 1.0, 5);
+        busy.start(Whim::Yawn, &motions);
+        run(&mut busy, &motions, &AROUND, 0.2);
+        assert!(busy.join(Show::Jump, &motions));
+        assert_eq!((busy.mode(), name(&busy).as_str()), (Mode::Jump, "jump"));
+        // 자던 꽃핀은 깨어 일어난 뒤에 한다.
+        let mut sleeper = Actor::stand(&motions, 1000.0, AROUND.floor, 1.0, 5);
+        sleeper.start(Whim::Sleep, &motions);
+        run(&mut sleeper, &motions, &AROUND, 3.0);
+        assert_eq!(sleeper.mode(), Mode::Sleep);
+        assert!(sleeper.join(Show::Stretch, &motions));
+        let seen = run(&mut sleeper, &motions, &AROUND, 6.0);
+        let seen = names(&seen);
+        let woke = seen.iter().position(|&name| name == "sleep_out").expect("깨어남");
+        let stretched = seen.iter().position(|&name| name == "stretch").expect("기지개");
+        assert!(woke < stretched, "{seen:?}");
+        // 걸터앉은 꽃핀은 일어선 뒤에 한다.
+        let mut sitter = Actor::stand(&motions, 1000.0, ON_LEDGE.floor, 1.0, 5);
+        sitter.start(Whim::Sit, &motions);
+        run(&mut sitter, &motions, &ON_LEDGE, 0.3);
+        assert_eq!(name(&sitter), "edge_loop");
+        assert!(sitter.join(Show::Yawn, &motions));
+        let seen = run(&mut sitter, &motions, &ON_LEDGE, 6.0);
+        assert!(names(&seen).contains(&"yawn"), "{seen:?}");
+        // 떨어지는 꽃핀은 내려선 뒤에 한다.
+        let mut faller = Actor::appear(&motions, 1000.0, 300.0, 1.0, 5);
+        run(&mut faller, &motions, &AROUND, 0.5);
+        assert!(faller.is_airborne());
+        assert!(faller.join(Show::Stretch, &motions));
+        let seen = run(&mut faller, &motions, &AROUND, 6.0);
+        assert!(names(&seen).contains(&"stretch"), "{seen:?}");
+        // 잡혀 있거나 돌아가는 중이면 하지 않는다.
+        let mut held = Actor::stand(&motions, 1000.0, AROUND.floor, 1.0, 5);
+        assert!(held.grab(&motions, (1000.0, 900.0)));
+        assert!(!held.join(Show::Stretch, &motions));
+        let mut leaving = Actor::stand(&motions, 1000.0, AROUND.floor, 1.0, 5);
+        leaving.leave(&motions);
+        assert!(!leaving.join(Show::Stretch, &motions));
     }
 }
