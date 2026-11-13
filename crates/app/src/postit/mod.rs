@@ -312,6 +312,8 @@ pub struct Postits {
     fan: Option<Fan>,
     /// 꽃핀 옆에 뜬 쉬는 시간 알림 판. 떠 있을 때만 있다.
     focus: Option<FocusPanel>,
+    /// 쉬는 시간 알림 판을 마지막으로 옮겨 둔 자리. 다시 열면 그 자리에 띄운다(앱이 켜져 있는 동안).
+    focus_spot: Option<(i32, i32)>,
     /// 움직이는 것이 있다. 있는 동안에는 짧은 간격으로 시간을 흘린다.
     awake: bool,
     last: Instant,
@@ -354,6 +356,7 @@ impl Postits {
             list_spot: None,
             fan: None,
             focus: None,
+            focus_spot: None,
             awake: false,
             last: Instant::now(),
             wall,

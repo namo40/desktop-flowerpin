@@ -3,11 +3,16 @@
 //! 포스트잇의 알림 판과 같은 방식으로 그리는 창이다. 지금 상태와 남은 시간을 보여 주고, 집중 시간과 쉬는 시간을
 //! 고르고, 시작하고 멈추고 그만둔다. 타이머는 앱이 들고 있다. 여기서는 앱이 알려 준 모습([`FocusModel`])을
 //! 그리고, 무엇을 눌렀는지([`FocusAct`])만 알린다. 판을 닫아도 타이머는 돈다.
+//!
+//! 단추가 아닌 곳(제목 줄, 빈 바탕)을 잡아 끌면 옮겨진다. 한 번 옮기면 앱이 켜져 있는 동안은 다시 열 때 그 자리에
+//! 뜬다. 제목 줄의 꽃 핀으로 판을 늘 다른 창 위에 둘지 켜고 끈다. 끄면 다른 창에 가려지고, 판을 누르면 앞으로
+//! 나온다.
 
 use super::panel::{Action, FocusModel, Kind, Panel, Surface};
 use super::window::{self, Cursor, Event};
 use super::{Outcome, Postits};
 use crate::geom::Rect;
+use crate::win;
 
 /// 쉬는 시간 알림 판에서 누른 것.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -30,6 +35,8 @@ pub enum FocusAct {
     Stop,
     /// 지금 하는 것을 끝내고 바로 다음으로 넘어간다(지금 쉬기, 바로 집중).
     Skip,
+    /// 판을 늘 다른 창 위에 둘지 바꾼다.
+    Pin,
 }
 
 pub struct FocusPanel {
@@ -37,6 +44,8 @@ pub struct FocusPanel {
     at: (i32, i32),
     scale: f32,
     model: FocusModel,
+    /// 끌고 있다. 누른 곳의 커서와 판 왼쪽 위의 차이(화면 px)다.
+    drag: Option<(i32, i32)>,
 }
 
 impl FocusPanel {
@@ -57,6 +66,7 @@ fn act(action: Action) -> Option<FocusAct> {
         Action::FocusGo(2) => FocusAct::Pause(false),
         Action::FocusGo(3) => FocusAct::Stop,
         Action::FocusGo(4) => FocusAct::Skip,
+        Action::FocusPin => FocusAct::Pin,
         _ => return None,
     })
 }
@@ -64,28 +74,32 @@ fn act(action: Action) -> Option<FocusAct> {
 impl Postits {
     /// 쉬는 시간 알림 판을 꽃핀 옆에 띄운다. `head`는 머리 꼭대기의 가운데(화면 좌표), `half_body`는 몸의
     /// 반폭, `dpi`는 그 모니터의 화면 배율이다. 오른쪽에 띄우고, 자리가 없으면 왼쪽에 띄운다.
-    /// 이미 떠 있으면 그 꽃핀 옆으로 옮겨 다시 띄운다.
+    /// 이미 떠 있으면 그 꽃핀 옆으로 옮겨 다시 띄운다. 판을 옮긴 적이 있으면(앱이 켜져 있는 동안) 그 자리에 띄운다.
     pub fn open_focus(&mut self, (head, half_body): ((i32, i32), i32), dpi: u32, model: FocusModel) {
         self.close_focus();
         window::start();
         let scale = dpi.max(96) as f32 / 96.0;
-        let mut panel = FocusPanel {
-            panel: Panel::new(std::ptr::null_mut(), Kind::Focus, std::ptr::null_mut()),
-            at: (0, 0),
-            scale,
-            model,
-        };
+        let blank = Panel::new(std::ptr::null_mut(), Kind::Focus, std::ptr::null_mut());
+        let mut panel = FocusPanel { panel: blank, at: (0, 0), scale, model, drag: None };
         let (wide, tall) = panel.size_px();
-        let gap = (12.0 * scale) as i32;
-        let work = window::work_area(head, true).unwrap_or((0, 0, 1920, 1040));
-        let mut x = head.0 + half_body + gap;
-        if x + wide > work.2 {
-            x = head.0 - half_body - gap - wide;
-        }
+        let kept = self.focus_spot.filter(|&spot| window::work_area(spot, false).is_some());
+        let near = kept.unwrap_or(head);
+        let work = window::work_area(near, true).unwrap_or((0, 0, 1920, 1040));
+        let (x, y) = match kept {
+            Some(spot) => spot,
+            None => {
+                let gap = (12.0 * scale) as i32;
+                let mut x = head.0 + half_body + gap;
+                if x + wide > work.2 {
+                    x = head.0 - half_body - gap - wide;
+                }
+                (x, head.1 - (30.0 * scale) as i32)
+            }
+        };
         let x = x.clamp(work.0, (work.2 - wide).max(work.0));
-        let y = (head.1 - (30.0 * scale) as i32).clamp(work.1, (work.3 - tall).max(work.1));
+        let y = y.clamp(work.1, (work.3 - tall).max(work.1));
         panel.at = (x, y);
-        panel.panel.hwnd = window::create(panel.at, (wide, tall), true);
+        panel.panel.hwnd = window::create(panel.at, (wide, tall), model.top);
         let hwnd = panel.panel.hwnd;
         self.focus = Some(panel);
         self.paint_focus();
@@ -104,12 +118,28 @@ impl Postits {
         self.focus.is_some()
     }
 
-    /// 판이 보여 줄 것이 바뀌었으면 다시 그린다.
+    /// 판이 보여 줄 것이 바뀌었으면 다시 그린다. 항상 위가 바뀌었으면 판이 놓이는 층도 바꾼다.
     pub fn set_focus(&mut self, model: FocusModel) {
         let Some(panel) = &mut self.focus else { return };
         if panel.model != model {
+            if panel.model.top != model.top {
+                window::set_layer(panel.panel.hwnd, model.top);
+            }
             panel.model = model;
             self.paint_focus();
+        }
+    }
+
+    /// 판을 화면의 `at`(왼쪽 위)으로 옮긴다. 판이 모니터 밖으로 나가지 않게 맞춘다.
+    fn move_focus(&mut self, at: (i32, i32)) {
+        let Some(panel) = &mut self.focus else { return };
+        let (wide, tall) = panel.size_px();
+        let work = window::work_area((at.0 + wide / 2, at.1 + 12), true).unwrap_or((0, 0, 1920, 1040));
+        let x = at.0.clamp(work.0, (work.2 - wide).max(work.0));
+        let y = at.1.clamp(work.1, (work.3 - tall).max(work.1));
+        if (x, y) != panel.at {
+            panel.at = (x, y);
+            window::move_to(panel.panel.hwnd, panel.at);
         }
     }
 
@@ -151,11 +181,30 @@ impl Postits {
         match event {
             // 화살표를 빨리 누르면 두 번째는 두 번 클릭으로 온다. 그것도 한 번 누른 것으로 친다.
             Event::Press { hwnd: on, x, y } | Event::Double { hwnd: on, x, y } if on == hwnd => {
-                window::stop_pressing();
-                let (u, v) = local(x, y);
-                if let Some(action) = panel.panel.hit(u, v) {
-                    self.focus_act(action);
+                // 늘 위에 두지 않는 판은 보통 창처럼, 누르면 다른 창들 앞으로 나온다.
+                if !panel.model.top && !self.quiet {
+                    window::raise(hwnd);
                 }
+                let (u, v) = local(x, y);
+                match panel.panel.hit(u, v) {
+                    Some(action) => {
+                        window::stop_pressing();
+                        self.focus_act(action);
+                    }
+                    // 단추가 아닌 곳을 누르면 끌기 시작한다. 뗄 때까지 움직임을 받는다.
+                    None => {
+                        let cursor = win::cursor_position();
+                        panel.drag = Some((cursor.0 - panel.at.0, cursor.1 - panel.at.1));
+                    }
+                }
+            }
+            Event::Move { hwnd: on, .. } if on == hwnd && panel.drag.is_some() => {
+                let (offset, cursor) = (panel.drag.unwrap_or_default(), win::cursor_position());
+                self.move_focus((cursor.0 - offset.0, cursor.1 - offset.1));
+            }
+            Event::Lift { hwnd: on } if on == hwnd && panel.drag.is_some() => {
+                panel.drag = None;
+                self.focus_spot = Some(panel.at);
             }
             Event::Move { hwnd: on, x, y } if on == hwnd => {
                 let (u, v) = local(x, y);
@@ -185,8 +234,16 @@ impl Postits {
     }
 
     /// 확인용: 판에서 그 이름의 것을 누른다. 이름은 `close`, `start`, `pause`, `resume`, `stop`, `skip`, `auto`,
-    /// `focus 분`, `rest 분`, `focus+`, `focus-`, `rest+`, `rest-`다. 판의 그림 위에서 그 자리를 찾아 누른다.
+    /// `pin`, `focus 분`, `rest 분`, `focus+`, `focus-`, `rest+`, `rest-`다. 판의 그림 위에서 그 자리를 찾아 누른다.
+    /// `drag 가로`면 판을 그만큼 오른쪽으로 끌어 옮긴 것으로 친다.
     pub fn focus_script(&mut self, word: &str, minutes: Option<u32>) {
+        if word == "drag" {
+            let Some(panel) = &self.focus else { return };
+            let at = panel.at;
+            self.move_focus((at.0 + minutes.unwrap_or(0) as i32, at.1));
+            self.focus_spot = self.focus.as_ref().map(|panel| panel.at);
+            return;
+        }
         let action = match (word, minutes) {
             ("close", _) => Action::Close,
             ("start", _) => Action::FocusGo(0),
@@ -195,6 +252,7 @@ impl Postits {
             ("stop", _) => Action::FocusGo(3),
             ("skip", _) => Action::FocusGo(4),
             ("auto", _) => Action::FocusAuto,
+            ("pin", _) => Action::FocusPin,
             ("focus", Some(minutes)) => Action::FocusPick(0, minutes),
             ("rest", Some(minutes)) => Action::FocusPick(1, minutes),
             ("focus+", _) => Action::FocusStep(0, 1),
@@ -209,6 +267,13 @@ impl Postits {
         let x = ((rect.0 + rect.2) / 2.0 * scale).round() as i32;
         let y = ((rect.1 + rect.3) / 2.0 * scale).round() as i32;
         self.focus_event(Event::Press { hwnd, x, y });
+    }
+
+    /// 확인용: 판이 어디에 떠 있고 늘 위에 있는지를 적은 한 줄. 떠 있지 않으면 `None`이다.
+    pub fn describe_focus(&self) -> Option<String> {
+        let panel = self.focus.as_ref()?;
+        let (wide, tall) = panel.size_px();
+        Some(format!("쉬는 시간 알림 판: 자리 {:?}, 크기 {wide}x{tall}, 항상 위 {}", panel.at, panel.model.top))
     }
 
     /// 확인용: 판의 그림과 자리. 꽃핀들의 그림 위에 얹어 보는 데 쓴다.

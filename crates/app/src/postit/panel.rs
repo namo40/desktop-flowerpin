@@ -59,6 +59,8 @@ pub enum Action {
     FocusAuto,
     /// 쉬는 시간 알림의 아래쪽 단추: 0 시작, 1 잠깐 멈추기, 2 다시, 3 그만하기, 4 지금 쉬기·바로 집중.
     FocusGo(u8),
+    /// 쉬는 시간 알림 판을 늘 다른 창 위에 둘지 켜고 끈다(제목 줄의 꽃 핀).
+    FocusPin,
 }
 
 /// 쉬는 시간 알림 판이 보여 줄 것.
@@ -76,6 +78,8 @@ pub struct FocusModel {
     pub focus: u32,
     pub rest: u32,
     pub auto: bool,
+    /// 판을 늘 다른 창 위에 둔다.
+    pub top: bool,
 }
 
 /// 판이 보여 줄 것.
@@ -403,6 +407,22 @@ impl Panel {
         let (x, y) = self.chrome(surface, "쉬는 시간 알림");
         let (left, right) = (x + 14.0, x + 250.0);
         let scale = surface.scale;
+
+        // 항상 위: 닫기 단추 왼쪽의 꽃 핀. 포스트잇의 꽃 핀처럼, 켜면 커지고 돌아가며 가운데가 금색이 된다.
+        let pin = (right - 50.0, y + 10.0, right - 26.0, y + 34.0);
+        let center = ((pin.0 + pin.2) / 2.0, (pin.1 + pin.3) / 2.0);
+        if self.hot == Some(Action::FocusPin) {
+            surface.disc(center, 12.0, HOT, 1.0);
+        }
+        let (size, turn) = if model.top { (0.74, 18.0f32.to_radians()) } else { (0.6, 0.0) };
+        for k in 0..5 {
+            let angle = (-90.0 + 72.0 * k as f32).to_radians() + turn;
+            let petal = (center.0 + 7.6 * size * angle.cos(), center.1 + 7.6 * size * angle.sin());
+            surface.disc(petal, 6.4 * size, PINK, 1.0);
+            surface.disc(petal, 5.4 * size, rgb(0xFF9DB5), 1.0);
+        }
+        surface.disc(center, 4.0 * size, if model.top { rgb(0xFFC93C) } else { rgb(0xFFE27A) }, 1.0);
+        self.spots.push((pin, Action::FocusPin));
 
         // 지금 상태와 남은 시간.
         let state = match model.phase {
@@ -764,7 +784,11 @@ impl Draft {
             Action::Day(day) => (self.mode, self.day) = (1, day),
             Action::Week(step) => self.week = (self.week + 7 * step as i64).max(now.0),
             Action::Close | Action::Swatch(_) | Action::Slide(_) => {}
-            Action::FocusPick(..) | Action::FocusStep(..) | Action::FocusAuto | Action::FocusGo(_) => {}
+            Action::FocusPick(..)
+            | Action::FocusStep(..)
+            | Action::FocusAuto
+            | Action::FocusGo(_)
+            | Action::FocusPin => {}
         }
     }
 }

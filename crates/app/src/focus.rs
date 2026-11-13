@@ -12,17 +12,19 @@ pub const REST_PICKS: [u32; 2] = [5, 10];
 const FOCUS_RANGE: (u32, u32, u32) = (5, 120, 5);
 const REST_RANGE: (u32, u32, u32) = (1, 30, 1);
 
-/// 판에서 고른 집중 시간과 쉬는 시간(분), 쉬는 시간이 끝나면 저절로 다시 집중할지. 기억해 둔다.
+/// 판에서 고른 집중 시간과 쉬는 시간(분), 쉬는 시간이 끝나면 저절로 다시 집중할지, 판을 늘 다른 창 위에 둘지.
+/// 기억해 둔다.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Plan {
     pub focus: u32,
     pub rest: u32,
     pub auto: bool,
+    pub top: bool,
 }
 
 impl Default for Plan {
     fn default() -> Plan {
-        Plan { focus: FOCUS_PICKS[0], rest: REST_PICKS[0], auto: false }
+        Plan { focus: FOCUS_PICKS[0], rest: REST_PICKS[0], auto: false, top: true }
     }
 }
 
@@ -32,7 +34,7 @@ impl Plan {
         Plan {
             focus: self.focus.clamp(FOCUS_RANGE.0, FOCUS_RANGE.1),
             rest: self.rest.clamp(REST_RANGE.0, REST_RANGE.1),
-            auto: self.auto,
+            ..self
         }
     }
 
@@ -227,7 +229,7 @@ mod tests {
     #[test]
     fn being_away_pauses_the_focus_but_not_the_break() {
         let start = Instant::now();
-        let mut focus = Focus::start(Plan { focus: 50, rest: 10, auto: false }, start);
+        let mut focus = Focus::start(Plan { focus: 50, rest: 10, ..Plan::default() }, start);
         focus.advance(start + 20 * MINUTE, false);
         // 10분 동안 자리를 비웠다. 집중 시간은 그대로다.
         assert_eq!(focus.advance(start + 30 * MINUTE, true), None);
@@ -305,6 +307,9 @@ mod tests {
         plan.focus = 27;
         plan.step(false, 1);
         assert_eq!(plan.focus, 30);
-        assert_eq!(Plan { focus: 500, rest: 0, auto: true }.fit(), Plan { focus: 120, rest: 1, auto: true });
+        assert_eq!(
+            Plan { focus: 500, rest: 0, auto: true, top: false }.fit(),
+            Plan { focus: 120, rest: 1, auto: true, top: false }
+        );
     }
 }

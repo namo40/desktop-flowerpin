@@ -85,9 +85,9 @@ impl State {
         if let Some(color) = self.studio_color {
             text.push_str(&format!(",\n  \"studio_color\": {color}"));
         }
-        if let Some(Plan { focus, rest, auto }) = self.focus_plan {
+        if let Some(Plan { focus, rest, auto, top }) = self.focus_plan {
             text.push_str(&format!(
-                ",\n  \"focus_plan\": {{ \"focus\": {focus}, \"rest\": {rest}, \"auto\": {auto} }}"
+                ",\n  \"focus_plan\": {{ \"focus\": {focus}, \"rest\": {rest}, \"auto\": {auto}, \"top\": {top} }}"
             ));
         }
         text.push_str("\n}\n");
@@ -120,8 +120,11 @@ impl State {
             focus_plan: {
                 let plan = object.get("focus_plan");
                 let minutes = |name: &str| plan?.get(name)?.as_u64().map(|value| value.min(1000) as u32);
-                let auto = plan.and_then(|plan| plan.get("auto")).and_then(Value::as_bool).unwrap_or(false);
-                minutes("focus").zip(minutes("rest")).map(|(focus, rest)| Plan { focus, rest, auto }.fit())
+                let flag = |name: &str, default: bool| {
+                    plan.and_then(|plan| plan.get(name)).and_then(Value::as_bool).unwrap_or(default)
+                };
+                let (auto, top) = (flag("auto", false), flag("top", true));
+                minutes("focus").zip(minutes("rest")).map(|(focus, rest)| Plan { focus, rest, auto, top }.fit())
             },
         })
     }
@@ -300,7 +303,7 @@ mod tests {
             studio_open: true,
             studio_place: Some((-1900, 500, 656, 399)),
             studio_color: Some(0xFF00FF),
-            focus_plan: Some(Plan { focus: 35, rest: 7, auto: true }),
+            focus_plan: Some(Plan { focus: 35, rest: 7, auto: true, top: false }),
         };
         assert_eq!(State::from_json(&state.to_json()), Some(state.clone()));
         // 방송 촬영용 창의 크기가 0이면 자리가 없는 것으로 친다.

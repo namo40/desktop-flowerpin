@@ -1274,6 +1274,7 @@ impl App {
             focus: plan.focus,
             rest: plan.rest,
             auto: plan.auto,
+            top: plan.top,
         }
     }
 
@@ -1309,6 +1310,7 @@ impl App {
                 }
             }
             FocusAct::Stop => self.stop_focus(now),
+            FocusAct::Pin => plan.top = !plan.top,
             FocusAct::Skip => {
                 if let Some(focus) = &mut self.focus {
                     focus.skip(now);
@@ -1326,7 +1328,10 @@ impl App {
             self.store.state_changed(now);
             self.note(
                 now,
-                format!("쉬는 시간 알림 판: {}분 집중, {}분 쉬기, 저절로 {}", plan.focus, plan.rest, plan.auto),
+                format!(
+                    "쉬는 시간 알림 판: {}분 집중, {}분 쉬기, 저절로 {}, 항상 위 {}",
+                    plan.focus, plan.rest, plan.auto, plan.top
+                ),
             );
         }
         let model = self.focus_model();
@@ -3312,6 +3317,9 @@ impl App {
                     format!("꽃핀 {}명(보이는 창 {seen}개), 앞에서부터 {}", self.characters.len(), names.join(" ")),
                 );
                 if let Some(line) = self.postits.describe_fan() {
+                    self.note(now, line);
+                }
+                if let Some(line) = self.postits.describe_focus() {
                     self.note(now, line);
                 }
                 self.dev.snaps += 1;
