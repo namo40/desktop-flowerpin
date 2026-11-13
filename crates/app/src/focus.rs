@@ -120,7 +120,9 @@ impl Focus {
         self.auto = auto;
     }
 
-    /// 잠깐 멈추거나(`pause`) 다시 흐르게 한다. 멈추기 전까지의 시간은 흘려 둔다.
+    /// 잠깐 멈추거나(`pause`) 다시 흐르게 한다. 멈추기 전까지의 시간은 흘려 둔다. 그사이에 시간이 다 됐으면
+    /// [`Focus::advance`]처럼 일어난 일을 돌려준다. 알리지 않고 버리면 그 일을 놓친다.
+    #[must_use]
     pub fn pause(&mut self, pause: bool, now: Instant, away: bool) -> Option<Turn> {
         let turn = self.advance(now, away);
         self.paused = pause;
@@ -261,19 +263,23 @@ mod tests {
         assert_eq!(focus.advance(start + 60 * MINUTE, false), None);
         assert_eq!(focus.due(false), None);
         assert_eq!(focus.label(), "집중하는 중 (19분 남음, 잠깐 멈춤)");
-        focus.pause(false, start + 60 * MINUTE, false);
+        assert_eq!(focus.pause(false, start + 60 * MINUTE, false), None);
         assert_eq!(focus.due(false), Some(start + 79 * MINUTE));
         // 지금 쉬기: 바로 쉬는 시간으로 넘어간다. 바로 집중: 다시 집중 시간으로.
         focus.skip(start + 61 * MINUTE);
         assert_eq!((focus.phase(), focus.left(), focus.total()), (Phase::Break, 5 * MINUTE, 5 * MINUTE));
-        focus.pause(true, start + 62 * MINUTE, false);
+        assert_eq!(focus.pause(true, start + 62 * MINUTE, false), None);
         focus.skip(start + 63 * MINUTE);
         assert_eq!((focus.phase(), focus.left(), focus.is_paused()), (Phase::Focus, 25 * MINUTE, false));
         // 쉬는 시간도 잠깐 멈추면 흐르지 않는다(자리를 비워도 흐르던 것과 다르다).
         focus.skip(start + 63 * MINUTE);
-        focus.pause(true, start + 64 * MINUTE, true);
+        assert_eq!(focus.pause(true, start + 64 * MINUTE, true), None);
         assert_eq!(focus.advance(start + 90 * MINUTE, true), None);
         assert_eq!(focus.left(), 4 * MINUTE);
+        // 시간이 다 된 바로 그때 멈추면, 멈추면서 그 일을 돌려준다(버리면 알림을 놓친다).
+        let mut ending = Focus::with((Duration::from_secs(10), Duration::from_secs(5)), false, start);
+        assert_eq!(ending.pause(true, start + Duration::from_secs(10), false), Some(Turn::BreakTime));
+        assert_eq!((ending.phase(), ending.is_paused()), (Phase::Break, true));
     }
 
     #[test]

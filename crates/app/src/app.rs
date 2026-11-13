@@ -1330,8 +1330,12 @@ impl App {
             FocusAct::Start => self.start_focus(Focus::start(plan, now), now),
             FocusAct::Pause(pause) => {
                 if let Some(focus) = &mut self.focus {
-                    focus.pause(pause, now, away);
+                    // 멈추기 전까지의 시간을 흘린다. 그사이에 때가 바뀌었으면(누른 바로 그때 끝났으면) 그것도 알린다.
+                    let turn = focus.pause(pause, now, away);
                     self.note(now, format!("쉬는 시간 알림: {}", if pause { "잠깐 멈춤" } else { "다시" }));
+                    if let Some(turn) = turn {
+                        self.announce_focus(turn, now);
+                    }
                 }
             }
             FocusAct::Stop => self.stop_focus(now),
@@ -1363,31 +1367,36 @@ impl App {
         self.postits.set_focus(model);
     }
 
-    /// 쉬는 시간 알림의 시간을 흘리고, 때가 되면 알린다.
+    /// 쉬는 시간 알림의 시간을 흘리고, 때가 되면 알린다([`App::announce_focus`]).
+    fn tend_focus(&mut self, now: Instant) {
+        let away = self.away;
+        if let Some(turn) = self.focus.as_mut().and_then(|focus| focus.advance(now, away)) {
+            self.announce_focus(turn, now);
+        }
+    }
+
+    /// 쉬는 시간 알림의 때가 바뀐 것을 알린다.
     ///
     /// 집중 시간이 끝나면 말풍선으로 쉬자고 하고, 나와 있는 꽃핀들이 다 같이 기지개를 켠다. 쉬는 시간이 끝나면
     /// 말풍선으로 알리고 타이머를 끝낸다. 그 말풍선을 누르면 같은 길이로 다시 시작한다. 전체 화면 프로그램을 쓰거나
     /// 꽃핀을 숨겨 둔 동안에는 말풍선이 그 뒤에 뜨므로, 메모 알림처럼 Windows 알림으로도 보낸다(설정을 따른다).
-    fn tend_focus(&mut self, now: Instant) {
-        let away = self.away;
-        let Some(focus) = &mut self.focus else { return };
-        let turn = focus.advance(now, away);
+    fn announce_focus(&mut self, turn: Turn, now: Instant) {
+        let Some(focus) = &self.focus else { return };
         let (rest, minutes) = (focus.rest().as_secs().div_ceil(60), focus.focus().as_secs().div_ceil(60));
         let (title, body, click, lasts) = match turn {
-            None => return,
-            Some(Turn::BreakTime) => {
+            Turn::BreakTime => {
                 let members = self.members();
                 let stretch = together::together(&members, Show::Stretch, &mut self.rng, now);
                 self.cues.extend(stretch);
                 ("쉬는 시간이에요!".to_string(), format!("{rest}분 쉬어요. 기지개 한번 켜요."), Click::Close, None)
             }
-            Some(Turn::BackToWork) => {
+            Turn::BackToWork => {
                 self.focus = None;
                 let minutes = self.focus_plan().focus;
                 ("쉬는 시간 끝!".to_string(), format!("누르면 다시 {minutes}분 집중을 시작해요."), Click::Focus, None)
             }
             // 저절로 이어 가면 누르지 않아도 말풍선이 닫힌다.
-            Some(Turn::Again) => {
+            Turn::Again => {
                 ("쉬는 시간 끝!".to_string(), format!("다시 {minutes}분 집중해요."), Click::Close, Some(HELD_LASTS))
             }
         };
