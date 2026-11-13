@@ -216,7 +216,10 @@ struct Dev {
 pub struct App {
     frames: Frames,
     motions: Motions,
+    /// 꽃핀들이 지내는 무대. 보통은 모니터들이고, 방송 촬영용 창이 열려 있으면 그 창 안쪽이다.
     stage: Stage,
+    /// 모니터들. 방송 촬영용 창이 열려 있어도 진짜 모니터들이다. 창, 말풍선, 단추를 띄울 범위로 쓴다.
+    screens: Stage,
     settings: Settings,
     state: State,
     store: Store,
@@ -293,6 +296,8 @@ pub struct App {
     focus: Option<Focus>,
     /// 열려 있는 방송 촬영용 창.
     studio: Option<Studio>,
+    /// 방송 촬영용 창이 열려 있는 동안 세워 둔 바탕화면 꽃핀들과 세운 시각. 창을 닫으면 그 자리에서 이어 간다.
+    parked: Option<(Vec<Character>, Instant)>,
     /// 방해하면 안 되는 동안 알릴 때가 된 메모들. 그때가 지나면 포스트잇을 울린다.
     rings_waiting: Vec<u64>,
     dev: Dev,
@@ -464,6 +469,7 @@ impl App {
         let mut app = App {
             frames,
             motions,
+            screens: stage.clone(),
             stage,
             settings,
             state,
@@ -517,6 +523,7 @@ impl App {
             rng: Rng::new(seed ^ 0x5EED),
             focus: None,
             studio: None,
+            parked: None,
             rings_waiting: Vec::new(),
             dev: Dev {
                 pace: dev::Pace::default(),
@@ -585,7 +592,7 @@ impl App {
     fn tell_postits_monitors(&mut self) {
         let forced = self.dev.options.dpi;
         let monitors: Vec<_> =
-            self.stage.monitors().iter().map(|monitor| (monitor.area, forced.unwrap_or(monitor.dpi))).collect();
+            self.screens.monitors().iter().map(|monitor| (monitor.area, forced.unwrap_or(monitor.dpi))).collect();
         self.postits.set_monitors(&monitors);
     }
 
@@ -672,9 +679,6 @@ impl App {
     fn apply_habits(&mut self) {
         let habits = self.habits();
         self.characters.iter_mut().for_each(|character| character.actor_mut().set_habits(habits));
-        if let Some(studio) = &mut self.studio {
-            studio.set_habits(habits);
-        }
         self.next_wave = together::next_wave(habits.whim_rate, &mut self.rng, Instant::now());
     }
 
@@ -774,6 +778,14 @@ impl App {
         }
         self.next_cursor_check = now + CURSOR_EVERY;
         let cursor = self.dev.cursor.unwrap_or_else(win::cursor_position);
+        // 방송 촬영용 창이 열려 있으면 커서가 그 창 안쪽에 있을 때만 본다. 진짜 커서면 그 자리에서 창이 다른 창에
+        // 가려져 있지 않아야 한다.
+        if let Some(studio) = &self.studio
+            && !studio.covers(cursor, self.dev.cursor.is_none())
+        {
+            self.dwell = None;
+            return;
+        }
         let still =
             self.dwell.is_some_and(|(at, _, _)| (at.0 - cursor.0).abs().max((at.1 - cursor.1).abs()) <= CURSOR_SLOP);
         if !still {
@@ -810,7 +822,41 @@ impl App {
         }
     }
 
+    /// 새로 만들거나 설정을 바꿀 꽃핀의 모습. 방송 촬영용 창 안의 꽃핀은 화면에 내보내지 않는 버퍼에 그린다.
+    fn character_look(&self) -> Look {
+        if self.studio.is_some() { Look { topmost: false, offscreen: true, ..self.look } } else { self.look }
+    }
+
+    /// 꽃핀의 머리 꼭대기와 몸의 반폭, 그 위에 띄우는 것(단추, 말풍선)이 벗어나면 안 되는 범위, 화면 배율.
+    /// 방송 촬영용 창 안의 꽃핀이면 범위는 창 안쪽이 아니라 그 창이 놓인 모니터다.
+    fn head_of(&self, character: &Character) -> ((i32, i32), i32, Rect, u32) {
+        let (head, half_body, bounds, dpi) = character.head(&self.stage);
+        let bounds = if self.studio.is_some() { self.screens.nearest(head.0, head.1).work } else { bounds };
+        (head, half_body, bounds, dpi)
+    }
+
+    /// 꽃핀들이 움직이지 않는 때인가. 숨겨 두었거나, 방송 촬영용 창을 최소화해 두었으면 그렇다.
+    fn frozen(&self) -> bool {
+        self.out_of_sight || self.studio.as_ref().is_some_and(Studio::is_minimized)
+    }
+
+    /// 꽃핀들의 무대를 옮기기 전에, 지금 꽃핀들에게 걸려 있던 것(머리 위 단추, 누르기, 줄줄이 올 꽃핀, 함께 하기)을
+    /// 거둔다.
+    fn leave_stage(&mut self, now: Instant) {
+        self.close_fan(now);
+        if !matches!(self.pointer, Pointer::Idle) {
+            self.pointer = Pointer::Idle;
+            character_window::stop_pressing();
+        }
+        (self.held, self.menu_target, self.hover, self.dwell) = (None, None, None, None);
+        self.calls.clear();
+        self.cues.clear();
+    }
+
     /// 방송 촬영용 창을 연다. 열려 있으면 앞으로 가져온다. `activate`가 아니면 쓰던 창의 포커스를 빼앗지 않는다.
+    ///
+    /// 창이 열려 있는 동안은 꽃핀들의 무대가 창 안으로 옮겨 간다. 바탕화면의 꽃핀들은 그 자리에 멈춰 숨고, 창
+    /// 안에는 처음 꽃핀 한 명이 위쪽 공중에 나타나 떨어진다.
     fn open_studio(&mut self, activate: bool, now: Instant) -> Result<(), PackError> {
         if let Some(studio) = &self.studio {
             if activate {
@@ -819,12 +865,12 @@ impl App {
             return Ok(());
         }
         let cursor = win::cursor_position();
-        let work = self.stage.nearest(cursor.0, cursor.1).work;
+        let work = self.screens.nearest(cursor.0, cursor.1).work;
         let center = (work.x + work.w / 2, work.y + work.h / 2);
         let place = self.state.studio_place.map(|(x, y, w, h)| Rect::new(x, y, w, h));
         // 기억해 둔 자리가 지금의 모니터들 밖이면 쓰지 않는다.
         let place = place.filter(|rect| {
-            let monitor = self.stage.nearest(rect.x + rect.w / 2, rect.y + 8).area;
+            let monitor = self.screens.nearest(rect.x + rect.w / 2, rect.y + 8).area;
             monitor.x <= rect.x + rect.w / 2 && rect.x + rect.w / 2 < monitor.right() && monitor.y <= rect.y + 8
         });
         let color = self.state.studio_color.unwrap_or(studio::COLORS[0].1);
@@ -836,18 +882,25 @@ impl App {
             return Ok(());
         };
         let icons = (tray::make_icon(&face, ABOUT_ICON), tray::make_icon(&small_face, small_size));
-        let seed = self.next_seed();
-        let beat = self.started;
-        let studio = Studio::open(
-            (&mut self.frames, &self.motions),
-            self.look,
-            (place, center),
-            (color, activate),
-            icons,
-            (now, beat, seed),
-        )?;
+        let studio = Studio::open((place, center), (color, activate), icons);
         self.note(now, studio.describe());
+        // 바탕화면 꽃핀들은 그 자리에 멈춰 숨는다.
+        self.leave_stage(now);
+        let mut parked = std::mem::take(&mut self.characters);
+        parked.iter_mut().for_each(|character| character.set_visible(false, now));
+        self.note(now, format!("바탕화면 꽃핀 {}명을 세워 둠", parked.len()));
+        self.parked = Some((parked, now));
+        self.stage = studio.stage().clone();
         self.studio = Some(studio);
+        // 창 안에는 처음 꽃핀 한 명이 위쪽 공중에 나타나 떨어진다.
+        let work = self.stage.primary().work;
+        let spot = ((work.x + work.w / 2) as f64, (work.y + work.h / 3) as f64);
+        let (seed, look) = (self.next_seed(), self.character_look());
+        let mut first =
+            Character::appear(&mut self.frames, &self.motions, &self.stage, look, spot, (now, self.started), seed)?;
+        first.actor_mut().set_away(self.away);
+        self.characters.push(first);
+        self.tiers = tiers(&self.carriers());
         self.apply_habits();
         if !self.state.studio_open {
             self.state.studio_open = true;
@@ -857,29 +910,156 @@ impl App {
     }
 
     /// 방송 촬영용 창을 닫는다. 다시 켤 때는 열지 않는다.
-    fn close_studio(&mut self, now: Instant) {
-        if self.studio.take().is_some() {
-            self.note(now, "방송 촬영용 창을 닫음".to_string());
+    ///
+    /// 창 안의 꽃핀들은 창과 함께 사라지고, 세워 두었던 바탕화면 꽃핀들이 그 자리에서 다시 움직인다. 세워 둔
+    /// 동안은 더 부른 꽃핀의 머무를 시간에 세지 않는다.
+    fn close_studio(&mut self, now: Instant) -> Result<(), PackError> {
+        if self.studio.is_some() {
+            self.leave_stage(now);
+            self.characters.clear();
+            self.studio = None;
+            self.stage = self.screens.clone();
+            if let Some((parked, since)) = self.parked.take() {
+                let gone = now.saturating_duration_since(since);
+                self.characters = parked;
+                let (look, hidden, away) = (self.look, self.out_of_sight, self.away);
+                for character in &mut self.characters {
+                    if let Stay::Guest(at) = character.stay() {
+                        character.set_guest(at + gone);
+                    }
+                    character.set_look(look, now);
+                    character.set_visible(!hidden, now);
+                    character.actor_mut().set_away(away);
+                    character.wake(now);
+                }
+            }
+            self.tiers = tiers(&self.carriers());
+            self.apply_habits();
+            // 세워 둔 동안 모니터가 바뀌었으면 화면 밖에 남은 꽃핀을 데려온다.
+            self.rescue_characters(now)?;
+            self.scanned = None;
+            self.restack();
+            self.note(now, format!("방송 촬영용 창을 닫음: 바탕화면 꽃핀 {}명이 이어 감", self.characters.len()));
         }
         if self.state.studio_open {
             self.state.studio_open = false;
             self.store.state_changed(now);
         }
+        Ok(())
     }
 
-    /// 방송 촬영용 창에서 일어난 일을 처리한다. 메뉴를 띄워야 하면 그것을 돌려준다.
-    fn studio_events(&mut self, now: Instant) -> Option<Flow> {
-        let mut flow = None;
+    /// 화면(무대) 밖에 남은 꽃핀을 무대 안 위쪽 공중에 다시 나타나게 한다. 더 부른 꽃핀이었으면 머무를 시간은
+    /// 그대로 이어진다.
+    fn rescue_characters(&mut self, now: Instant) -> Result<(), PackError> {
+        for i in 0..self.characters.len() {
+            let (x, y) = self.characters[i].actor().position();
+            if !self.stage.contains(x.round() as i32, y.round() as i32 - 1) {
+                let work = self.stage.primary().work;
+                let spot = ((work.x + work.w / 2) as f64, (work.y + work.h * 3 / 10) as f64);
+                let seed = self.next_seed();
+                let stay = self.characters[i].stay();
+                let look = self.character_look();
+                let mut character = Character::appear(
+                    &mut self.frames,
+                    &self.motions,
+                    &self.stage,
+                    look,
+                    spot,
+                    (now, self.started),
+                    seed,
+                )?;
+                if let Stay::Guest(since) = stay {
+                    character.set_guest(since);
+                }
+                self.characters[i] = character;
+                self.apply_habits();
+            }
+            self.characters[i].wake(now);
+        }
+        // 새로 만든 창은 보이는 채로 생긴다. 숨겨 둔 중이었으면 다시 숨긴다.
+        if self.out_of_sight {
+            self.characters.iter_mut().for_each(|character| character.set_visible(false, now));
+        }
+        Ok(())
+    }
+
+    /// 방송 촬영용 창에서 일어난 일을 처리한다.
+    ///
+    /// 누르기, 끌기, 문지르기, 꽃핀 위의 오른쪽 클릭은 그 자리의 꽃핀에게 일어난 일로 바꿔 돌려준다. 바탕화면
+    /// 꽃핀과 똑같이 다룬다. 빈 곳을 오른쪽 클릭했으면 메뉴를 띄우라고 돌려준다.
+    fn studio_events(&mut self, now: Instant) -> Result<(Vec<WindowEvent>, Option<Flow>), PackError> {
+        let (mut events, mut flow) = (Vec::new(), None);
         for event in studio::take_events() {
-            let Some(studio) = &mut self.studio else { continue };
-            match studio.handle(event, &self.motions, now) {
-                Some(StudioAsk::Menu(x, y)) => flow = Some(Flow::StudioMenu(x, y)),
-                Some(StudioAsk::Close) => self.close_studio(now),
-                Some(StudioAsk::Moved) => self.remember_studio(now),
-                None => {}
+            if self.studio.is_none() {
+                continue;
+            }
+            // 지금 누르고 있거나 잡고 있는 꽃핀.
+            let held = match self.pointer {
+                Pointer::Pressing { hwnd, .. } | Pointer::Dragging { hwnd } => Some(hwnd),
+                Pointer::Idle => None,
+            };
+            match event {
+                StudioEvent::Press(x, y) => match self.studio_hit((x, y)) {
+                    Some(hwnd) => events.push(WindowEvent::Press { hwnd, x, y }),
+                    None => {
+                        self.close_fan(now);
+                        character_window::stop_pressing();
+                    }
+                },
+                StudioEvent::Move(x, y) => events.extend(held.map(|hwnd| WindowEvent::Move { hwnd, x, y })),
+                StudioEvent::Lift => events.extend(held.map(|hwnd| WindowEvent::Lift { hwnd })),
+                StudioEvent::Hover(x, y) => match self.studio_hit((x, y)) {
+                    Some(hwnd) => events.push(WindowEvent::Hover { hwnd, x, y }),
+                    None => self.hover = None,
+                },
+                StudioEvent::Menu(x, y) if let Some(hwnd) = self.studio_hit((x, y)) => {
+                    events.push(WindowEvent::Menu { hwnd, x, y });
+                }
+                other => {
+                    let Some(studio) = &mut self.studio else { continue };
+                    match studio.handle(other) {
+                        Some(StudioAsk::Menu(x, y)) => {
+                            self.close_fan(now);
+                            flow = Some(Flow::StudioMenu(x, y));
+                        }
+                        Some(StudioAsk::Close) => self.close_studio(now)?,
+                        Some(StudioAsk::Moved) => self.studio_moved(now),
+                        None => {}
+                    }
+                }
             }
         }
-        flow
+        Ok((events, flow))
+    }
+
+    /// 방송 촬영용 창 안의 그 자리(화면 좌표)에 몸이 있는 꽃핀. 앞에 선 꽃핀부터 본다. 숨겨 둔 동안에는 없다.
+    fn studio_hit(&self, at: (i32, i32)) -> Option<HWND> {
+        if self.frozen() {
+            return None;
+        }
+        let order = self.stack_order();
+        let front_first = order.iter().rev().map(|&index| self.characters[index].window());
+        front_first.into_iter().find(|window| studio::touches(window, at)).map(CharacterWindow::hwnd)
+    }
+
+    /// 방송 촬영용 창의 자리나 크기가 바뀌었다. 꽃핀들의 무대를 다시 읽고, 창의 자리를 기억해 둔다.
+    fn studio_moved(&mut self, now: Instant) {
+        let Some(studio) = &self.studio else { return };
+        self.stage = studio.stage().clone();
+        self.characters.iter_mut().for_each(|character| character.wake(now));
+        self.remember_studio(now);
+    }
+
+    /// 방송 촬영용 창에 꽃핀들을 앞뒤 차례대로 그린다. `changed`가 아니면 통째로 다시 그려야 할 때만 그린다.
+    /// 숨겨 둔 동안에는 바탕색만 칠한다.
+    fn paint_studio(&mut self, changed: bool) {
+        if self.studio.is_none() {
+            return;
+        }
+        let order = if self.out_of_sight { Vec::new() } else { self.stack_order() };
+        let Some(studio) = &mut self.studio else { return };
+        let windows: Vec<&CharacterWindow> = order.iter().map(|&index| self.characters[index].window()).collect();
+        studio.compose(&windows, changed);
     }
 
     /// 방송 촬영용 창의 자리와 크기, 바탕색을 기억해 둔다.
@@ -899,64 +1079,90 @@ impl App {
     }
 
     /// 방송 촬영용 창의 메뉴에서 고른 것을 한다. `custom`은 색 고르기 창에서 고른 색이다.
-    pub fn studio_picked(&mut self, picked: Option<StudioPick>, custom: Option<u32>, now: Instant) {
+    pub fn studio_picked(
+        &mut self,
+        picked: Option<StudioPick>,
+        custom: Option<u32>,
+        now: Instant,
+    ) -> Result<(), PackError> {
         let color = match picked {
             Some(StudioPick::Color(index)) => Some(studio::COLORS[index].1),
             Some(StudioPick::Custom) => custom,
-            Some(StudioPick::Close) => {
-                self.close_studio(now);
-                return;
-            }
+            Some(StudioPick::Close) => return self.close_studio(now),
             None => None,
         };
         if let (Some(color), Some(studio)) = (color, &mut self.studio) {
             studio.set_color(color);
             self.note(now, format!("방송 촬영용 창의 바탕색 #{color:06X}"));
             self.remember_studio(now);
+            self.paint_studio(false);
         }
+        Ok(())
     }
 
-    /// 확인용 스크립트의 `studio` 명령.
+    /// 확인용 스크립트의 `studio` 명령. 누르기, 끌기, 문지르기는 창에서 그 일이 일어난 것으로 친다.
     fn studio_script(&mut self, word: &str, numbers: &[f64], now: Instant) -> Result<(), PackError> {
         let number = |i: usize| numbers.get(i).copied().unwrap_or(0.0);
         if word == "open" {
             return self.open_studio(false, now);
         }
         if word == "close" {
-            self.close_studio(now);
+            return self.close_studio(now);
+        }
+        if self.studio.is_none() {
             return Ok(());
         }
-        let Some(studio) = &mut self.studio else { return Ok(()) };
-        // 꽃핀을 누를 자리: 발바닥에서 몸 높이의 절반쯤 위.
-        let (fx, fy) = studio.character_spot();
-        let body = (fx, fy - 60);
-        let mut asks = Vec::new();
+        // 누를 꽃핀: `studio click 번호`처럼 번호를 주면 그 꽃핀, 없으면 첫 꽃핀. 발바닥에서 몸 높이의 절반쯤 위를
+        // 누른다.
+        let who = match word {
+            "click" | "drag" | "rub" | "menu" => {
+                (number(if word == "drag" { 2 } else { 1 }) as usize).min(self.characters.len().saturating_sub(1))
+            }
+            _ => 0,
+        };
+        let (body, head) = match self.characters.get(who) {
+            Some(character) => {
+                let (x, y) = character.actor().position();
+                let tall = character.height();
+                let x = x.round() as i32;
+                ((x, (y - tall * 0.45).round() as i32), (x, (y - tall * 0.85).round() as i32))
+            }
+            None => ((0, 0), (0, 0)),
+        };
         match word {
             "click" => {
-                asks.push(studio.script(StudioEvent::Press(body.0, body.1), &self.motions, now));
-                asks.push(studio.script(StudioEvent::Lift, &self.motions, now));
+                studio::inject(StudioEvent::Press(body.0, body.1));
+                studio::inject(StudioEvent::Lift);
             }
             "drag" => {
-                asks.push(studio.script(StudioEvent::Press(body.0, body.1), &self.motions, now));
-                let to = (body.0 + number(0) as i32, body.1 + number(1) as i32);
-                asks.push(studio.script(StudioEvent::Move(to.0, to.1), &self.motions, now));
+                studio::inject(StudioEvent::Press(body.0, body.1));
+                studio::inject(StudioEvent::Move(body.0 + number(0) as i32, body.1 + number(1) as i32));
             }
-            "lift" => asks.push(studio.script(StudioEvent::Lift, &self.motions, now)),
+            "lift" => studio::inject(StudioEvent::Lift),
             "rub" => {
                 let steps = (number(0) / 20.0).ceil().max(1.0) as i32;
-                let head = (fx, fy - 120);
                 for i in 0..=steps {
-                    let x = head.0 + if i % 2 == 0 { -10 } else { 10 };
-                    asks.push(studio.script(StudioEvent::Hover(x, head.1), &self.motions, now));
+                    studio::inject(StudioEvent::Hover(head.0 + if i % 2 == 0 { -10 } else { 10 }, head.1));
                 }
             }
+            // `studio menu 번호`: 그 꽃핀을 오른쪽 클릭한다(머리 위 단추가 뜬다).
+            "menu" => studio::inject(StudioEvent::Menu(body.0, body.1)),
             "color" => {
                 let index = (number(0) as usize).min(studio::COLORS.len() - 1);
-                studio.set_color(studio::COLORS[index].1);
+                if let Some(studio) = &mut self.studio {
+                    studio.set_color(studio::COLORS[index].1);
+                }
+                self.paint_studio(false);
             }
             "snap" => {
-                let line = studio.describe();
-                let (width, pixels) = studio.snapshot();
+                let order = if self.out_of_sight { Vec::new() } else { self.stack_order() };
+                let windows: Vec<&CharacterWindow> =
+                    order.iter().map(|&index| self.characters[index].window()).collect();
+                let Some(studio) = &mut self.studio else { return Ok(()) };
+                let (width, pixels) = studio.snapshot(&windows);
+                let modes: Vec<String> =
+                    self.characters.iter().map(|character| format!("{:?}", character.actor().mode())).collect();
+                let line = format!("{}, 꽃핀 {}명 [{}]", studio.describe(), self.characters.len(), modes.join(", "));
                 self.dev.snaps += 1;
                 if let Some(path) = &self.dev.options.settings_shot {
                     let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("shot");
@@ -966,9 +1172,6 @@ impl App {
                 self.note(now, line);
             }
             _ => {}
-        }
-        if asks.contains(&Some(StudioAsk::Close)) {
-            self.close_studio(now);
         }
         Ok(())
     }
@@ -1129,11 +1332,8 @@ impl App {
     fn apply_settings(&mut self, now: Instant) {
         self.look.size_percent = self.settings.size_percent();
         self.look.topmost = self.settings.is_on(Key::AlwaysOnTop);
-        let look = self.look;
+        let look = self.character_look();
         self.characters.iter_mut().for_each(|character| character.set_look(look, now));
-        if let Some(studio) = &mut self.studio {
-            studio.set_look(look, now);
-        }
         if let Some(bubble) = &self.bubble {
             bubble.window().set_topmost(look.topmost);
         }
@@ -1187,7 +1387,9 @@ impl App {
         }
         self.note(now, format!("꽃핀 {}명이 반짝임", self.characters.len()));
         self.characters.iter_mut().for_each(|character| character.blink(now));
-        if !self.look.topmost {
+        if let Some(studio) = &self.studio {
+            studio.bring_to_front();
+        } else if !self.look.topmost {
             // "항상 위"가 꺼져 있으면 다른 창 뒤에 있을 수 있다. 앞에 설 꽃핀을 올리고 나머지를 그 뒤에 세운다.
             if let Some(front) = self.home().or(self.characters.last()) {
                 front.window().raise();
@@ -1596,16 +1798,19 @@ impl App {
         {
             self.hide = Hide::Off;
         }
-        let hidden = self.hide != Hide::Off || self.is_quiet();
+        // 방송 촬영용 창 안의 꽃핀은 전체 화면 프로그램이 떠 있어도 숨지 않는다. 게임을 전체 화면으로 하며
+        // 방송할 수 있다.
+        let busy = if self.studio.is_some() { self.is_paused() } else { self.is_quiet() };
+        let hidden = self.hide != Hide::Off || busy;
         if hidden != self.out_of_sight {
             self.out_of_sight = hidden;
             if hidden {
                 let why = if self.is_paused() {
                     "화면을 쓰지 않음"
-                } else if self.is_quiet() {
-                    "전체 화면"
-                } else {
+                } else if self.hide != Hide::Off {
                     "잠깐 숨기기"
+                } else {
+                    "전체 화면"
                 };
                 self.note(now, format!("꽃핀을 숨김: {why}"));
                 self.close_fan(now);
@@ -1639,6 +1844,9 @@ impl App {
             }
             if !hidden {
                 self.restack();
+            }
+            if let Some(studio) = &mut self.studio {
+                studio.refresh();
             }
         }
         // 방해하면 안 되는 동안 미뤄 둔 알림을 울린다.
@@ -1740,7 +1948,8 @@ impl App {
         );
         let seed = self.next_seed();
         let beats = (now, self.started);
-        let mut guest = Character::appear(&mut self.frames, &self.motions, &self.stage, self.look, spot, beats, seed)?;
+        let look = self.character_look();
+        let mut guest = Character::appear(&mut self.frames, &self.motions, &self.stage, look, spot, beats, seed)?;
         guest.set_guest(now);
         guest.actor_mut().set_away(self.away);
         self.characters.push(guest);
@@ -1886,6 +2095,13 @@ impl App {
     /// 다 올릴 때까지 뒤에 있어야 할 꽃핀이 잠깐 앞에 나와, 겹친 꽃핀들이 깜빡여 보였다. 앞에서부터 세우면
     /// 자리를 잡은 꽃핀끼리는 옮기는 도중에도 앞뒤가 뒤집히지 않는다.
     fn restack(&mut self) {
+        // 방송 촬영용 창 안의 꽃핀은 창을 띄우지 않는다. 앞뒤 차례는 창이 그릴 때 따른다.
+        if self.studio.is_some() {
+            self.characters.iter_mut().for_each(|character| {
+                character.take_raised();
+            });
+            return;
+        }
         let order = self.stack_order();
         let Some((&front, behind)) = order.split_last() else { return };
         if let Some(watch) = &mut self.dev.stack {
@@ -1960,7 +2176,14 @@ impl App {
         let mut flow = Flow::Continue;
 
         // 1. 꽃핀 창에서 온 일: 누르기, 끌기, 떼기, 문지르기, 모니터가 바뀜.
-        for event in character_window::take_events() {
+        // 방송 촬영용 창 안에서 누르고 끈 것은 그 자리의 꽃핀 창에서 일어난 것으로 바꿔 함께 다룬다.
+        let (from_studio, studio_flow) = self.studio_events(now)?;
+        if let Some(next) = studio_flow {
+            flow = next;
+        }
+        let mut events = character_window::take_events();
+        events.extend(from_studio);
+        for event in events {
             match event {
                 WindowEvent::Press { hwnd, .. } if self.is_bubble(hwnd) => {
                     // 말풍선은 누르면 바로 클릭으로 친다. 끌 것이 없으므로 누르고 있기를 그만둔다.
@@ -2080,9 +2303,6 @@ impl App {
                 }
             }
         }
-        if let Some(next) = self.studio_events(now) {
-            flow = next;
-        }
         for event in watch::take_events() {
             match event {
                 WatchEvent::Foreground => self.foreground_changed(now),
@@ -2098,39 +2318,15 @@ impl App {
 
         // 3. 모니터가 바뀌었으면 무대를 다시 읽는다. 화면 밖에 남은 꽃핀은 주 모니터에 다시 나타난다.
         if stage_changed {
-            self.stage = Stage::read().pretend_dpi(&self.dev.options.monitor_dpi);
+            self.screens = Stage::read().pretend_dpi(&self.dev.options.monitor_dpi);
+            // 방송 촬영용 창이 열려 있으면 꽃핀들의 무대는 그대로 창 안이다.
+            if self.studio.is_none() {
+                self.stage = self.screens.clone();
+            }
             self.tell_postits_monitors();
             // 화면 밖에 남은 포스트잇도 가까운 화면 안으로 데려온다.
             self.postits.rescue();
-            for i in 0..self.characters.len() {
-                let (x, y) = self.characters[i].actor().position();
-                if !self.stage.contains(x.round() as i32, y.round() as i32 - 1) {
-                    let work = self.stage.primary().work;
-                    let spot = ((work.x + work.w / 2) as f64, (work.y + work.h * 3 / 10) as f64);
-                    let seed = self.next_seed();
-                    let stay = self.characters[i].stay();
-                    let mut character = Character::appear(
-                        &mut self.frames,
-                        &self.motions,
-                        &self.stage,
-                        self.look,
-                        spot,
-                        (now, self.started),
-                        seed,
-                    )?;
-                    // 더 부른 꽃핀이었으면 머무를 시간은 그대로 이어진다.
-                    if let Stay::Guest(since) = stay {
-                        character.set_guest(since);
-                    }
-                    self.characters[i] = character;
-                    self.apply_habits();
-                }
-                self.characters[i].wake(now);
-            }
-            // 새로 만든 창은 보이는 채로 생긴다. 숨겨 둔 중이었으면 다시 숨긴다.
-            if self.out_of_sight {
-                self.characters.iter_mut().for_each(|character| character.set_visible(false, now));
-            }
+            self.rescue_characters(now)?;
         }
 
         // 전체 화면 프로그램이 떠 있는지 가끔 본다. 떠 있으면 꽃핀을 숨기고 멈춘다. 화면이 잠겼을 때도 그렇다.
@@ -2214,7 +2410,11 @@ impl App {
         }
 
         // 10. 기본 꽃핀이 내려앉은 자리를 기억해 둔다. 다시 켜면 그 위에 나타난다.
-        let landed = self.home().map(Character::actor).filter(|home| home.mode() == Mode::Ground);
+        let landed = self
+            .home()
+            .filter(|_| self.studio.is_none())
+            .map(Character::actor)
+            .filter(|home| home.mode() == Mode::Ground);
         if let Some(spot) = landed.map(|home| (home.home().round() as i32, home.position().1.round() as i32))
             && self.state.character != Some(spot)
         {
@@ -2241,20 +2441,15 @@ impl App {
     ///
     /// 메뉴나 물음 창이 떠 있는 동안에도 이것만은 계속 불린다.
     pub fn tick_characters(&mut self, now: Instant) -> Result<bool, PackError> {
-        // 방송 촬영용 창의 꽃핀은 숨겨 둔 동안(전체 화면 게임을 방송하는 중일 수 있다)에도 움직인다.
-        // 화면이 잠기거나 꺼졌을 때만 쉰다.
-        let paused = self.is_paused();
-        if let (Some(studio), false) = (&mut self.studio, paused) {
-            studio.tick(&mut self.frames, &self.motions, now + character::LOOKAHEAD)?;
-        }
-        // 숨겨 둔 동안에는 꽃핀의 시간이 흐르지 않는다.
-        if self.out_of_sight {
+        // 숨겨 둔 동안과 방송 촬영용 창을 최소화해 둔 동안에는 꽃핀의 시간이 흐르지 않는다.
+        if self.frozen() {
+            self.paint_studio(false);
             return Ok(true);
         }
         // 깨어난 김에 곧 올 박자까지 함께 밟는다.
         let horizon = now + character::LOOKAHEAD;
         // 다음 장을 그리기 바로 전에, 앞 장이 화면에 제대로 나와 있는지 본다. 첫 꽃핀이 멈춰 있을 때만 본다.
-        if let (Some(check), Some(first)) = (&mut self.dev.screen_check, self.characters.first())
+        if let (Some(check), Some(first), None) = (&mut self.dev.screen_check, self.characters.first(), &self.studio)
             && horizon >= first.due()
             && !first.moved()
         {
@@ -2302,7 +2497,7 @@ impl App {
             self.dev.pace.frame_shown(now, started.elapsed());
             self.dev.trace.note((now - self.started).as_secs_f64(), first.actor(), &self.motions);
         }
-        if let Some(first) = self.characters.first()
+        if let (Some(first), None) = (self.characters.first(), &self.studio)
             && !self.dev.click_checked
             && first.actor().mode() == Mode::Ground
         {
@@ -2310,6 +2505,7 @@ impl App {
             self.dev.click_checked = true;
             self.dev.notes.push(dev::click_check(first.window()));
         }
+        self.paint_studio(shown);
         let before = self.characters.len();
         self.characters.retain(|character| !character.actor().is_gone());
         if self.postits.has_fan() && self.menu_target.is_none_or(|hwnd| self.find(hwnd).is_none()) {
@@ -2356,7 +2552,7 @@ impl App {
             self.bubble = None;
             return;
         };
-        let (head, half_body, bounds, dpi) = first.head(&self.stage);
+        let (head, half_body, bounds, dpi) = self.head_of(first);
         // 꽃핀이 떠 있거나 잡혀 있는 동안에는 띄우지 않고 기다린다. 끝내는 중에는 새로 띄우지 않는다.
         let ready = first.actor().can_speak() && self.quitting.is_none() && !self.out_of_sight;
         if self.bubble.is_none()
@@ -2539,7 +2735,7 @@ impl App {
         if !standing || self.quitting.is_some() || self.out_of_sight {
             return;
         }
-        let (head, _, bounds, dpi) = character.head(&self.stage);
+        let (head, _, bounds, dpi) = self.head_of(character);
         let hwnd = character.window().hwnd();
         let mut buttons = vec![(FanPick::Invite, self.can_call())];
         let many = self.staying() > 1;
@@ -2657,8 +2853,8 @@ impl App {
 
     /// 보이는 다른 창들을 때맞춰 다시 읽는다. 꽃핀이 올라서 있는 창은 걸음마다 다시 본다.
     fn read_desktop(&mut self, now: Instant) {
-        if !self.look.topmost {
-            // "항상 위"가 꺼져 있으면 창 위에 올라서지 않으므로 읽을 까닭이 없다.
+        // 방송 촬영용 창 안에는 올라설 창이 없다. "항상 위"가 꺼져 있으면 창 위에 올라서지 않으므로 읽을 까닭이 없다.
+        if !self.look.topmost || self.studio.is_some() {
             self.desktop.clear();
             self.scanned = None;
             return;
@@ -2687,7 +2883,7 @@ impl App {
         // 숨겨 둔 동안에는 꽃핀 때문에 깨어날 일이 없다. 머리 위에 단추들을 띄우고 멈춰 선 꽃핀도 그렇다.
         // 그 꽃핀은 시간이 흐르지 않아 깰 때가 지난 채로 있으므로, 세어 넣으면 쉬지 못하고 계속 돈다.
         let moving = self.characters.iter().filter(|character| Some(character.window().hwnd()) != self.held);
-        let mut wake = if self.out_of_sight { None } else { moving.map(Character::due).min() };
+        let mut wake = if self.frozen() { None } else { moving.map(Character::due).min() };
         let mut sooner = |limit: Option<Instant>| {
             if let Some(limit) = limit {
                 wake = Some(wake.map_or(limit, |wake| wake.min(limit)));
@@ -2720,7 +2916,6 @@ impl App {
         sooner(self.focus.and_then(|focus| focus.due(self.away)));
         // 쉬는 시간 알림 판이 떠 있으면 남은 시간이 바뀔 때마다 다시 그린다.
         sooner(self.focus.filter(|_| self.postits.has_focus()).and_then(|focus| focus.next_tick(self.away)));
-        sooner(self.studio.as_ref().filter(|_| !self.is_paused()).map(Studio::due));
         sooner(self.next_wave.filter(|_| !self.out_of_sight));
         sooner(self.dev.deadline);
         // 자원을 재기 시작할 때를 놓치지 않는다. 숨겨 둔 동안에는 달리 깨어날 일이 없다.
@@ -2878,7 +3073,7 @@ impl App {
         }
         // 마우스 커서가 있는 모니터의 가운데에 연다.
         let cursor = win::cursor_position();
-        let work = self.stage.nearest(cursor.0, cursor.1).work;
+        let work = self.screens.nearest(cursor.0, cursor.1).work;
         let center = (work.x + work.w / 2, work.y + work.h / 2);
         let first = self.motions.clip(self.motions.idle2).first_frame;
         let Ok(face) = self.frames.portrait(first, ABOUT_ICON as usize) else { return };
@@ -2982,7 +3177,7 @@ impl App {
             }
             dev::Command::Dpi(dpi) => {
                 self.look.dpi_override = Some(dpi);
-                let look = self.look;
+                let look = self.character_look();
                 self.characters.iter_mut().for_each(|character| character.set_look(look, now));
             }
             dev::Command::Click => self.clicked(who, now),
@@ -3143,7 +3338,12 @@ impl App {
     /// 끝낸다. 미뤄 둔 저장을 하고, 보고서에 적을 줄을 돌려준다.
     pub fn finish(mut self) -> Vec<String> {
         // 끌 때 꽃핀이 있던 자리를 기억한다. 공중에 있었으면 마지막으로 내려앉은 자리를 둔다.
-        if let Some(first) = self.home().map(Character::actor)
+        // 방송 촬영용 창이 열려 있으면 세워 둔 바탕화면 꽃핀의 자리를 기억한다.
+        let desktop_home = match &self.parked {
+            Some((parked, _)) => parked.first().filter(|character| character.stay() == Stay::Home),
+            None => self.home(),
+        };
+        if let Some(first) = desktop_home.map(Character::actor)
             && first.mode() == Mode::Ground
         {
             let (x, y) = first.position();

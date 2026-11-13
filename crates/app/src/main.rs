@@ -109,7 +109,7 @@ fn run(options: dev::Options) -> Result<Vec<String>, PackError> {
                     Some(studio::StudioPick::Custom) => app::run_modal(&mut app, || studio::choose_color(owner, color)),
                     _ => None,
                 };
-                app.studio_picked(picked, custom, Instant::now());
+                app.studio_picked(picked, custom, Instant::now())?;
             }
             Flow::MemoMenu(id, x, y) => {
                 // 포스트잇을 오른쪽 클릭했을 때의 메뉴.
