@@ -89,6 +89,8 @@ pub enum Outcome {
     FanClosed,
     /// 쉬는 시간 알림 판에서 무엇인가를 눌렀다.
     Focus(FocusAct),
+    /// 메모 목록 창의 "항상 위"를 바꿨다. 앱이 기억해 둔다.
+    ListTop(bool),
 }
 
 /// 목표로 다가가는 값. 용수철처럼 조금 지나쳤다가 돌아온다.
@@ -308,6 +310,8 @@ pub struct Postits {
     search: Option<Editor>,
     /// 메모 목록을 닫을 때 있던 자리. 다시 열면 그 자리에 띄운다.
     list_spot: Option<(i32, i32)>,
+    /// 메모 목록 창을 늘 다른 창 위에 둔다. 앱이 기억해 두었다가 알려 준다.
+    list_top: bool,
     /// 꽃핀 머리 위에 부채꼴로 뜬 단추들. 떠 있을 때만 있다.
     fan: Option<Fan>,
     /// 꽃핀 옆에 뜬 쉬는 시간 알림 판. 떠 있을 때만 있다.
@@ -354,6 +358,7 @@ impl Postits {
             list: None,
             search: None,
             list_spot: None,
+            list_top: false,
             fan: None,
             focus: None,
             focus_spot: None,

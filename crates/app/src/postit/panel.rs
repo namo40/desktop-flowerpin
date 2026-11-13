@@ -414,14 +414,7 @@ impl Panel {
         if self.hot == Some(Action::FocusPin) {
             surface.disc(center, 12.0, HOT, 1.0);
         }
-        let (size, turn) = if model.top { (0.74, 18.0f32.to_radians()) } else { (0.6, 0.0) };
-        for k in 0..5 {
-            let angle = (-90.0 + 72.0 * k as f32).to_radians() + turn;
-            let petal = (center.0 + 7.6 * size * angle.cos(), center.1 + 7.6 * size * angle.sin());
-            surface.disc(petal, 6.4 * size, PINK, 1.0);
-            surface.disc(petal, 5.4 * size, rgb(0xFF9DB5), 1.0);
-        }
-        surface.disc(center, 4.0 * size, if model.top { rgb(0xFFC93C) } else { rgb(0xFFE27A) }, 1.0);
+        flower_pin(surface, center, model.top);
         self.spots.push((pin, Action::FocusPin));
 
         // 지금 상태와 남은 시간.
@@ -714,6 +707,18 @@ impl Panel {
             self.write(surface, &line, 12.5, true, ((left + right) / 2.0, y + 236.0), ROSE, 1.0);
         }
     }
+}
+
+/// "항상 위"를 켜고 끄는 꽃 핀 단추의 그림. 포스트잇의 꽃 핀처럼, 켜면(`top`) 커지고 돌아가며 가운데가 금색이 된다.
+pub fn flower_pin(surface: &mut Surface, center: (f32, f32), top: bool) {
+    let (size, turn) = if top { (0.74, 18.0f32.to_radians()) } else { (0.6, 0.0) };
+    for k in 0..5 {
+        let angle = (-90.0 + 72.0 * k as f32).to_radians() + turn;
+        let petal = (center.0 + 7.6 * size * angle.cos(), center.1 + 7.6 * size * angle.sin());
+        surface.disc(petal, 6.4 * size, PINK, 1.0);
+        surface.disc(petal, 5.4 * size, rgb(0xFF9DB5), 1.0);
+    }
+    surface.disc(center, 4.0 * size, if top { rgb(0xFFC93C) } else { rgb(0xFFE27A) }, 1.0);
 }
 
 /// 판이 고쳐 가는 알림. 포스트잇의 알림을 읽어 채우고, 고친 것을 다시 알림으로 돌려준다.

@@ -54,6 +54,8 @@ pub struct State {
     pub studio_color: Option<u32>,
     /// 쉬는 시간 알림 판에서 고른 집중 시간과 쉬는 시간(분), 저절로 이어 가기. 고른 적이 없으면 없다.
     pub focus_plan: Option<Plan>,
+    /// 메모 목록 창을 늘 다른 창 위에 둔다.
+    pub list_top: bool,
 }
 
 impl State {
@@ -89,6 +91,9 @@ impl State {
             text.push_str(&format!(
                 ",\n  \"focus_plan\": {{ \"focus\": {focus}, \"rest\": {rest}, \"auto\": {auto}, \"top\": {top} }}"
             ));
+        }
+        if self.list_top {
+            text.push_str(",\n  \"list_top\": true");
         }
         text.push_str("\n}\n");
         text
@@ -126,6 +131,7 @@ impl State {
                 let (auto, top) = (flag("auto", false), flag("top", true));
                 minutes("focus").zip(minutes("rest")).map(|(focus, rest)| Plan { focus, rest, auto, top }.fit())
             },
+            list_top: object.get("list_top").and_then(Value::as_bool).unwrap_or(false),
         })
     }
 }
@@ -304,6 +310,7 @@ mod tests {
             studio_place: Some((-1900, 500, 656, 399)),
             studio_color: Some(0xFF00FF),
             focus_plan: Some(Plan { focus: 35, rest: 7, auto: true, top: false }),
+            list_top: true,
         };
         assert_eq!(State::from_json(&state.to_json()), Some(state.clone()));
         // 방송 촬영용 창의 크기가 0이면 자리가 없는 것으로 친다.

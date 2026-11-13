@@ -121,7 +121,7 @@ impl Options {
                 .map(|s| s.split(',').map(|name| name.trim().to_string()).collect())
                 .unwrap_or_default(),
             script: value("--script")
-                .map(|s| parse_script(&s).unwrap_or_else(|e| crate::win::fatal(&e)))
+                .map(|s| parse_script(&s).unwrap_or_else(|e| script_error(&e, value("--report"))))
                 .unwrap_or_default(),
             seed: value("--seed").and_then(|s| s.parse().ok()),
             still: args.iter().any(|a| a == "--still"),
@@ -322,7 +322,7 @@ pub enum ListStep {
     Find(String),
     /// `memo list select 번호`: 그 메모의 줄을 누른다.
     Select(u64),
-    /// `memo list press 무엇`: 단추를 누른다(find, top, hold, delete, yes, no, add, tidy, raise, search, clear, close).
+    /// `memo list press 무엇`: 단추를 누른다(find, top, hold, delete, yes, no, add, tidy, raise, search, clear, pin, close).
     Press(String),
     /// `memo list wheel 칸`: 휠을 굴린다. 양수면 아래로 넘긴다.
     Wheel(i32),
@@ -386,8 +386,27 @@ pub enum Dialog {
 }
 
 /// `memo list press`로 누를 수 있는 단추들.
-const LIST_BUTTONS: [&str; 12] =
-    ["find", "top", "hold", "delete", "yes", "no", "add", "tidy", "raise", "search", "clear", "close"];
+const LIST_BUTTONS: [&str; 13] =
+    ["find", "top", "hold", "delete", "yes", "no", "add", "tidy", "raise", "search", "clear", "pin", "close"];
+
+/// `--script`를 읽을 수 없어 끝낸다. 보고서를 쓰는 확인용 실행이면 물음 창을 띄우지 않고 보고서에 적는다.
+/// 사람이 보지 않는 실행이 화면에 창을 남기지 않게 한다.
+fn script_error(message: &str, report: Option<String>) -> ! {
+    match report {
+        Some(path) => {
+            let _ = std::fs::write(
+                path,
+                format!(
+                    "{message}
+"
+                ),
+            );
+            eprintln!("{message}");
+            std::process::exit(2);
+        }
+        None => crate::win::fatal(message),
+    }
+}
 
 /// `--script`의 한 줄. 시작하고 `at`이 지났을 때 `command`를 한다.
 #[derive(Clone, Debug, PartialEq)]
@@ -984,6 +1003,7 @@ mod tests {
 
     #[test]
     fn script_is_read_and_sorted_by_time() {
+        assert!(parse_script("1 memo list press pin").is_ok());
         let crowd = parse_script("1 menu 7; 2 target 2; 3 crowd").unwrap();
         let commands: Vec<Command> = crowd.iter().map(|step| step.command.clone()).collect();
         assert_eq!(commands, [Command::Menu(7), Command::Target(2), Command::Crowd]);

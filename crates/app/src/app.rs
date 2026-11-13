@@ -556,6 +556,7 @@ impl App {
             });
         }
         // 방송 촬영용 창을 열어 둔 채 껐으면 다시 연다.
+        app.postits.set_list_top(app.state.list_top);
         if app.state.studio_open {
             app.open_studio(false, started)?;
         }
@@ -2730,6 +2731,13 @@ impl App {
             Outcome::Create { x, y } => self.new_memo((x, y)),
             Outcome::Fan(pick) => self.fan_picked(pick, now)?,
             Outcome::Focus(act) => self.focus_acted(act, now),
+            Outcome::ListTop(top) => {
+                if self.state.list_top != top {
+                    self.state.list_top = top;
+                    self.store.state_changed(now);
+                }
+                self.note(now, format!("메모 목록 창의 항상 위: {top}"));
+            }
             Outcome::FanClosed => self.release_held(now),
         }
         Ok(None)
