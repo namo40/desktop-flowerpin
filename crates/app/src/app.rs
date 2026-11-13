@@ -288,9 +288,10 @@ pub struct App {
     dark: bool,
     /// 지금 꽃핀을 숨겨 두었는가.
     out_of_sight: bool,
-    /// 같이 하기: 때가 되면 꽃핀에게 시킬 행동들과, 다음에 저절로 파도를 탈 때.
+    /// 같이 하기: 때가 되면 꽃핀에게 시킬 행동들과, 다음에 저절로 파도를 탈 때, 그때를 잡은 빈도.
     cues: Vec<Cue>,
     next_wave: Option<Instant>,
+    wave_rate: Option<f64>,
     /// 같이 하기에서 누가 따라 할지, 언제 파도를 탈지 고르는 난수.
     rng: Rng,
     /// 돌고 있는 쉬는 시간 알림.
@@ -510,6 +511,7 @@ impl App {
             out_of_sight: false,
             cues: Vec::new(),
             next_wave: None,
+            wave_rate: None,
             rng: Rng::new(seed ^ 0x5EED),
             focus: None,
             studio: None,
@@ -667,11 +669,17 @@ impl App {
         if self.dev.options.still { Habits { roam: false, whim_rate: 0.0 } } else { self.settings.habits() }
     }
 
-    /// 설정의 버릇을 모든 꽃핀에게 알린다. 저절로 파도를 탈 때도 빈도에 맞춰 다시 잡는다.
+    /// 설정의 버릇을 모든 꽃핀에게 알린다. 가끔 하는 행동의 빈도가 바뀌었으면 저절로 파도를 탈 때도 다시 잡는다.
+    ///
+    /// 꽃핀이 올 때마다도 불린다. 그때마다 파도 탈 때를 다시 잡으면 꽃핀을 자주 부르는 동안 파도가 계속 미뤄지므로,
+    /// 빈도가 그대로면 잡아 둔 때를 건드리지 않는다.
     fn apply_habits(&mut self) {
         let habits = self.habits();
         self.characters.iter_mut().for_each(|character| character.actor_mut().set_habits(habits));
-        self.next_wave = together::next_wave(habits.whim_rate, &mut self.rng, Instant::now());
+        if self.wave_rate != Some(habits.whim_rate) {
+            self.wave_rate = Some(habits.whim_rate);
+            self.next_wave = together::next_wave(habits.whim_rate, &mut self.rng, Instant::now());
+        }
     }
 
     /// 같이 하기를 따져 볼 꽃핀들. 꽃핀 번호 차례다. `eager`면 메뉴나 단추로 시킨 것이라, 잡혀 있거나 돌아가는
@@ -725,9 +733,15 @@ impl App {
     }
 
     /// 때가 된 같이 하기를 시킨다. 그때 할 수 없는 꽃핀은 넘어간다. 저절로 파도를 탈 때가 됐으면 탄다.
+    ///
+    /// 꽃핀을 숨겨 두었거나 방송 촬영용 창을 최소화해 둔 동안에는 아무것도 시키지 않는다. 그동안 지나간 파도는
+    /// 타지 않고 다음 때를 새로 잡는다. 미뤄 두면 꽃핀들이 다시 보이는 바로 그때 한꺼번에 뛴다.
     fn play_cues(&mut self, now: Instant) {
-        if self.out_of_sight || self.quitting.is_some() {
+        if self.frozen() || self.quitting.is_some() {
             self.drop_cues();
+            if self.next_wave.is_some_and(|at| now >= at) {
+                self.next_wave = together::next_wave(self.habits().whim_rate, &mut self.rng, now);
+            }
             return;
         }
         self.tend_gathering(now);
@@ -3044,7 +3058,8 @@ impl App {
         sooner(self.focus.and_then(|focus| focus.due(self.away)));
         // 쉬는 시간 알림 판이 떠 있으면 남은 시간이 바뀔 때마다 다시 그린다.
         sooner(self.focus.filter(|_| self.postits.has_focus()).and_then(|focus| focus.next_tick(self.away)));
-        sooner(self.next_wave.filter(|_| !self.out_of_sight));
+        // 숨겨 둔 동안에도 파도 탈 때에는 깬다. 타지는 않고 다음 때를 새로 잡는다(몇 분에 한 번이다).
+        sooner(self.next_wave);
         sooner(self.dev.deadline);
         // 자원을 재기 시작할 때를 놓치지 않는다. 숨겨 둔 동안에는 달리 깨어날 일이 없다.
         sooner((self.dev.usage.is_none() && self.dev.options.report.is_some()).then_some(self.started + dev::WARM_UP));
