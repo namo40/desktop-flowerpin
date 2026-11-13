@@ -30,6 +30,9 @@
 //! - `--screen-check`: `--for`와 함께 쓸 때도 전체 화면 프로그램이 떠 있는지를 진짜로 본다.
 //! - `--settings-dump 파일`, `--settings-shot 파일`: 스크립트의 `settings snap`이 설정 창의 컨트롤 좌표와
 //!   그림(BMP)을 여기에 쓴다.
+//! - `--watch-stack`: 꽃핀 창의 앞뒤를 옮길 때마다와 그림을 넘길 때마다, 겹친 꽃핀끼리 앞뒤가 정한 차례와
+//!   거꾸로 된 것이 있는지 세어 보고서에 적는다([`StackWatch`]). 창들을 다 읽느라 무거워서, 자원을 잴 때는
+//!   함께 쓰지 않는다.
 //!
 //! 보고서에는 첫 꽃핀이 거친 상태와 동작이 시각과 함께 적힌다.
 //!
@@ -95,6 +98,7 @@ pub struct Options {
     /// `--monitor-dpi 번호=값,번호=값`: 그 번호의 모니터(보고서에 적히는 차례, 0부터)의 DPI를 이 값으로 친다.
     /// 화면 배율이 서로 다른 모니터가 없어도, 꽃핀이나 포스트잇을 배율이 다른 모니터로 옮기는 것을 확인할 수 있다.
     pub monitor_dpi: Vec<(usize, u32)>,
+    pub watch_stack: bool,
 }
 
 impl Options {
@@ -143,6 +147,7 @@ impl Options {
                     list.split(',').filter_map(pair).collect()
                 })
                 .unwrap_or_default(),
+            watch_stack: args.iter().any(|a| a == "--watch-stack"),
         }
     }
 }
@@ -181,6 +186,8 @@ pub enum Command {
     Dark(bool),
     /// `hello`: 앱을 한 번 더 켰거나 트레이 아이콘을 클릭한 것으로 친다. 꽃핀이 반짝인다.
     Hello,
+    /// `foreground`: 맨 앞 창이 바뀌었다는 알림을 받은 것으로 친다. 다른 창을 누를 때 하는 일을 확인한다.
+    Foreground,
     /// `hide 초`: 메뉴에서 "잠깐 숨기기"를 고른 것과 같다. 그 시간이 지나면 다시 보인다.
     Hide(f64),
     /// `menu 번호`: 메뉴에서 그 항목을 고른 것으로 친다. 번호는 [`crate::tray::MenuItem`]의 값이다.
@@ -407,6 +414,7 @@ pub fn parse_script(text: &str) -> Result<Vec<Step>, String> {
             (Some("lock"), 3) if words[2] == "on" || words[2] == "off" => Command::Lock(words[2] == "on"),
             (Some("display"), 3) if words[2] == "on" || words[2] == "off" => Command::Dark(words[2] == "off"),
             (Some("hello"), 2) => Command::Hello,
+            (Some("foreground"), 2) => Command::Foreground,
             (Some("hide"), 3) => Command::Hide(number(2)?),
             (Some("menu"), 3) => Command::Menu(number(2)? as u32),
             (Some("target"), 3) => Command::Target(number(2)? as usize),
@@ -580,6 +588,84 @@ pub fn stacking(windows: &[HWND]) -> Vec<usize> {
         hwnd = unsafe { GetWindow(hwnd, GW_HWNDNEXT) };
     }
     order
+}
+
+/// 겹친 꽃핀끼리 앞뒤가 정한 차례와 거꾸로 된 때를 센다(`--watch-stack`).
+///
+/// 화면은 창을 옮기는 도중에도 그려질 수 있다. 그래서 다 옮긴 뒤에 맞더라도, 옮기는 사이에 잠깐 거꾸로
+/// 되면 겹친 꽃핀이 깜빡여 보인다. 창의 앞뒤를 옮길 때마다와 그림을 넘길 때마다 실제 앞뒤를 읽어 본다.
+#[derive(Default)]
+pub struct StackWatch {
+    /// 읽어 본 횟수.
+    checks: u32,
+    /// 그 가운데 거꾸로 된 쌍이 하나라도 있었던 횟수.
+    flipped: u32,
+    /// 거꾸로 된 쌍을 모두 더한 수.
+    pairs: u32,
+    /// 앞뒤를 옮긴 횟수.
+    moves: u32,
+    /// 꽃핀끼리의 앞뒤를 맞춘 횟수.
+    restacks: u32,
+    /// 앞뒤를 맞출 때 바로 앞에 꽃핀이 아닌 다른 창이 끼어 있던 횟수.
+    strangers: u32,
+}
+
+impl StackWatch {
+    /// 꽃핀 창의 앞뒤를 한 번 옮겼다.
+    pub fn moved(&mut self) {
+        self.moves += 1;
+    }
+
+    /// 꽃핀끼리의 앞뒤를 맞추기 시작했다.
+    pub fn restacked(&mut self) {
+        self.restacks += 1;
+    }
+
+    /// 앞뒤를 맞출 때 바로 앞에 꽃핀이 아닌 다른 창이 끼어 있었다.
+    pub fn stranger(&mut self) {
+        self.strangers += 1;
+    }
+
+    /// 실제 앞뒤를 읽어 정한 차례와 견준다. `windows`는 꽃핀 번호 차례이고, `back_to_front`는 정한 차례다.
+    /// 보이는 창 가운데 범위가 겹치는 꽃핀끼리만 본다.
+    pub fn check(&mut self, windows: &[&CharacterWindow], back_to_front: &[usize]) {
+        let hwnds: Vec<HWND> = windows.iter().map(|window| window.hwnd()).collect();
+        let seen: Vec<bool> = windows.iter().map(|window| window.is_visible()).collect();
+        let mut actual = vec![usize::MAX; windows.len()];
+        for (rank, index) in stacking(&hwnds).into_iter().enumerate() {
+            actual[index] = rank;
+        }
+        let mut wanted = vec![0; windows.len()];
+        for (rank, &index) in back_to_front.iter().rev().enumerate() {
+            wanted[index] = rank;
+        }
+        let overlap = |a: Rect, b: Rect| a.x < b.right() && b.x < a.right() && a.y < b.bottom() && b.y < a.bottom();
+        let mut pairs = 0;
+        for a in 0..windows.len() {
+            for b in a + 1..windows.len() {
+                if seen[a]
+                    && seen[b]
+                    && overlap(windows[a].screen_rect(), windows[b].screen_rect())
+                    && (actual[a] < actual[b]) != (wanted[a] < wanted[b])
+                {
+                    pairs += 1;
+                }
+            }
+        }
+        self.checks += 1;
+        if pairs > 0 {
+            self.flipped += 1;
+            self.pairs += pairs;
+        }
+    }
+
+    pub fn summary(&self) -> String {
+        format!(
+            "꽃핀 앞뒤 읽기 {}번 가운데 겹친 꽃핀의 앞뒤가 거꾸로였던 때 {}번(거꾸로 된 쌍 모두 {}), 앞뒤 맞추기 {}번, \
+             앞뒤를 옮긴 횟수 {}, 바로 앞에 다른 창이 끼어 있던 때 {}번",
+            self.checks, self.flipped, self.pairs, self.restacks, self.moves, self.strangers
+        )
+    }
 }
 
 /// 꽃핀들의 창을 화면에 놓인 자리대로 겹쳐, 한 장의 그림(BMP)으로 저장한다. `windows`는 뒤에 있는 것부터다.
@@ -847,7 +933,8 @@ mod tests {
         let crowd = parse_script("1 menu 7; 2 target 2; 3 crowd").unwrap();
         let commands: Vec<Command> = crowd.iter().map(|step| step.command.clone()).collect();
         assert_eq!(commands, [Command::Menu(7), Command::Target(2), Command::Crowd]);
-        let dark = parse_script("1 display off; 2 display on").unwrap();
+        assert_eq!(parse_script("1 foreground").unwrap()[0].command, Command::Foreground);
+        let dark =parse_script("1 display off; 2 display on").unwrap();
         assert_eq!((&dark[0].command, &dark[1].command), (&Command::Dark(true), &Command::Dark(false)));
         let quiet = parse_script("1 fullscreen on; 2 fullscreen off; 3 lock on; 4 lock off; 5 hide 2.5").unwrap();
         let commands: Vec<Command> = quiet.iter().map(|step| step.command.clone()).collect();

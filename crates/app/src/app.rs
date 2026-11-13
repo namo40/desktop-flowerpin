@@ -22,7 +22,7 @@ use crate::actor::{Habits, Mode, Rng, Show};
 use crate::autostart;
 use crate::bubble::{Bubble, Speech};
 use crate::character::{self, Character, Look, Stay};
-use crate::character_window::{self, WindowEvent};
+use crate::character_window::{self, CharacterWindow, WindowEvent};
 use crate::checker::{self, Checker};
 use crate::clock::WakeTimer;
 use crate::desktop::Desktop;
@@ -186,6 +186,8 @@ struct Dev {
     scans: Vec<Duration>,
     /// 맨 앞 창이 바뀌었다는 알림을 받은 횟수.
     foregrounds: u32,
+    /// `--watch-stack`이면 꽃핀끼리의 앞뒤가 잠깐이라도 거꾸로 되는지 센다.
+    stack: Option<dev::StackWatch>,
     snaps: u32,
     deadline: Option<Instant>,
     /// 실행하면서 보고서에 적을 줄.
@@ -461,6 +463,7 @@ impl App {
                 hellos: 0,
                 scans: Vec::new(),
                 foregrounds: 0,
+                stack: options.watch_stack.then(dev::StackWatch::default),
                 snaps: 0,
                 deadline: options.run_for.map(|d| started + d),
                 notes,
@@ -1273,29 +1276,89 @@ impl App {
         }
     }
 
-    /// 꽃핀끼리의 앞뒤 차례를 맞춘다. 차례는 [`stack_order`]가 정한다.
-    fn restack(&mut self) {
+    /// 맨 앞에서 입력을 받는 창이 바뀌었다.
+    fn foreground_changed(&mut self, now: Instant) {
+        // 작업표시줄을 누르면 작업표시줄이 "항상 위" 창들 가운데 맨 앞으로 나온다. 그 뒤에 있으면
+        // 걸터앉은 다리가 가려지므로, 맨 앞 창이 바뀔 때마다 꽃핀을 다시 맨 앞으로 올린다.
+        self.dev.foregrounds += 1;
+        if self.dev.options.report.is_some() {
+            let at = now.saturating_duration_since(self.started).as_secs_f64();
+            self.dev.notes.push(format!("{at:.2}초 맨 앞 창이 바뀌었다는 알림"));
+        }
+        if self.look.topmost {
+            self.restack();
+        }
+        // 창들의 앞뒤가 바뀌었을 것이다. 다음 걸음에서 바로 다시 읽는다.
+        self.scanned = None;
+        // 전체 화면 프로그램으로 넘어갔거나 거기서 나왔을 수 있다. 바로 다시 본다.
+        self.next_screen_check = now;
+    }
+
+    /// 꽃핀들을 뒤에 설 것부터 앞에 설 것까지 늘어놓는다([`stack_order`]).
+    fn stack_order(&self) -> Vec<usize> {
         let dragged = match self.pointer {
             Pointer::Dragging { hwnd } => self.find(hwnd),
             _ => None,
         };
         let guests: Vec<bool> =
             self.characters.iter().map(|character| matches!(character.stay(), Stay::Guest(_))).collect();
-        let order = stack_order(&guests, dragged);
+        stack_order(&guests, dragged)
+    }
+
+    /// `--watch-stack`이면 꽃핀끼리의 실제 앞뒤를 읽어 정한 차례와 견준다. `moved`면 방금 앞뒤를 옮긴 것이다.
+    fn watch_stack(&mut self, moved: bool) {
+        if self.dev.stack.is_none() {
+            return;
+        }
+        let order = self.stack_order();
+        let windows: Vec<&CharacterWindow> = self.characters.iter().map(Character::window).collect();
+        if let Some(watch) = &mut self.dev.stack {
+            if moved {
+                watch.moved();
+            }
+            watch.check(&windows, &order);
+        }
+    }
+
+    /// 꽃핀끼리의 앞뒤 차례를 맞춘다. 차례는 [`stack_order`]가 정한다.
+    ///
+    /// 맨 앞에 설 꽃핀부터 자리를 잡고, 나머지는 바로 앞에 설 꽃핀의 뒤에 차례로 세운다. 이미 그 자리에 있는
+    /// 꽃핀은 옮기지 않는다. 화면은 창을 옮기는 도중에도 그려진다. 뒤에 설 꽃핀부터 하나씩 맨 앞으로 올리면
+    /// 다 올릴 때까지 뒤에 있어야 할 꽃핀이 잠깐 앞에 나와, 겹친 꽃핀들이 깜빡여 보였다. 앞에서부터 세우면
+    /// 자리를 잡은 꽃핀끼리는 옮기는 도중에도 앞뒤가 뒤집히지 않는다.
+    fn restack(&mut self) {
+        let order = self.stack_order();
+        let Some((&front, behind)) = order.split_last() else { return };
+        if let Some(watch) = &mut self.dev.stack {
+            watch.restacked();
+        }
         if self.look.topmost {
-            // 뒤에 설 꽃핀부터 차례로 맨 앞으로 올린다. 마지막에 올린 꽃핀이 맨 앞에 온다.
-            for &index in &order {
-                self.characters[index].keep_on_top();
+            // 작업표시줄 같은 다른 "항상 위" 창보다도 앞으로 올린다.
+            self.characters[front].keep_on_top();
+            self.watch_stack(true);
+        }
+        // "항상 위"가 꺼져 있으면 다른 창들 사이에서의 높이는 건드리지 않는다. 맨 앞에 설 꽃핀이 있는 높이를 따른다.
+        // 다른 프로그램의 창(작업표시줄 등)이 꽃핀들 사이에 끼어 있으면, 그 창보다 앞으로 옮긴다.
+        let mut ahead = self.characters[front].window().hwnd();
+        for &index in behind.iter().rev() {
+            let window = self.characters[index].window();
+            let just_ahead = window.just_ahead();
+            if just_ahead != ahead {
+                window.place_behind(ahead);
+                let stranger = self.find(just_ahead).is_none();
+                if let Some(watch) = &mut self.dev.stack
+                    && stranger
+                {
+                    watch.stranger();
+                }
+                self.watch_stack(true);
             }
-            if let Some(bubble) = &self.bubble {
-                bubble.window().set_topmost(true);
-            }
-        } else {
-            // 다른 창들 사이에서의 높이는 건드리지 않는다. 맨 앞에 설 꽃핀의 뒤로 나머지를 차례로 세운다.
-            for pair in order.windows(2).rev() {
-                let front = self.characters[pair[1]].window().hwnd();
-                self.characters[pair[0]].window().place_behind(front);
-            }
+            ahead = self.characters[index].window().hwnd();
+        }
+        if self.look.topmost
+            && let Some(bubble) = &self.bubble
+        {
+            bubble.window().set_topmost(true);
         }
         for character in &mut self.characters {
             character.take_raised();
@@ -1460,22 +1523,7 @@ impl App {
         }
         for event in watch::take_events() {
             match event {
-                WatchEvent::Foreground => {
-                    // 작업표시줄을 누르면 작업표시줄이 "항상 위" 창들 가운데 맨 앞으로 나온다. 그 뒤에 있으면
-                    // 걸터앉은 다리가 가려지므로, 맨 앞 창이 바뀔 때마다 꽃핀을 다시 맨 앞으로 올린다.
-                    self.dev.foregrounds += 1;
-                    if self.dev.options.report.is_some() {
-                        let at = now.saturating_duration_since(self.started).as_secs_f64();
-                        self.dev.notes.push(format!("{at:.2}초 맨 앞 창이 바뀌었다는 알림"));
-                    }
-                    if self.look.topmost {
-                        self.restack();
-                    }
-                    // 창들의 앞뒤가 바뀌었을 것이다. 다음 걸음에서 바로 다시 읽는다.
-                    self.scanned = None;
-                    // 전체 화면 프로그램으로 넘어갔거나 거기서 나왔을 수 있다. 바로 다시 본다.
-                    self.next_screen_check = now;
-                }
+                WatchEvent::Foreground => self.foreground_changed(now),
                 // 창의 자리가 달라졌다. 다음 걸음에서 바로 다시 읽는다.
                 WatchEvent::Moved => self.scanned = None,
             }
@@ -1638,6 +1686,10 @@ impl App {
             check.sample(first.window(), now);
         }
         self.read_desktop(now);
+        // 새로 만든 꽃핀 창은 다른 꽃핀들보다 앞에 놓인다. 처음 보이기 전에 제 차례로 옮겨 둔다.
+        if self.characters.iter_mut().fold(false, |any, character| character.take_raised() | any) {
+            self.restack();
+        }
         let started = Instant::now();
         let mut shown = false;
         let held = self.held;
@@ -1647,6 +1699,9 @@ impl App {
                 continue;
             }
             shown |= character.tick(&mut self.frames, &self.motions, &self.stage, &self.desktop, horizon)?;
+        }
+        if shown {
+            self.watch_stack(false);
         }
         if let (true, Some(first)) = (shown, self.characters.first()) {
             self.dev.pace.frame_shown(now, started.elapsed());
@@ -2310,6 +2365,7 @@ impl App {
             dev::Command::Lock(on) => self.locked = on,
             dev::Command::Dark(dark) => self.dark = dark,
             dev::Command::Hello => self.blink_all(now),
+            dev::Command::Foreground => self.foreground_changed(now),
             dev::Command::Hide(seconds) => {
                 self.hide = Hide::Until(now + Duration::from_secs_f64(seconds));
             }
@@ -2471,6 +2527,9 @@ impl App {
             lines.push(format!("실행 중에 앱을 한 번 더 켠 횟수 {}", self.dev.hellos));
         }
         lines.push(format!("맨 앞 창이 바뀌었다는 알림 {}번", self.dev.foregrounds));
+        if let Some(watch) = &self.dev.stack {
+            lines.push(watch.summary());
+        }
         lines.push(format!("풀어서 들고 있는 장 {:.2}MiB", self.frames.kept_bytes() as f64 / 1_048_576.0));
         if !self.dev.scans.is_empty() {
             let total: Duration = self.dev.scans.iter().sum();

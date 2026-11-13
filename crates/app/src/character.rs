@@ -469,8 +469,8 @@ impl Character {
         self.actor.update(dt, motions, &around);
         let sitting = self.actor.mode() == Mode::Sit;
         if sitting && !self.sitting {
-            // 다리가 단 아래로 내려온다. 단(작업표시줄)보다 앞에 있어야 보인다.
-            self.keep_on_top();
+            // 다리가 단 아래로 내려온다. 단(작업표시줄)보다 앞에 있어야 보인다. 이 꽃핀만 먼저 올리면 다른
+            // 꽃핀들의 앞으로 잠깐 나와 깜빡여 보이므로, 앱이 꽃핀들을 차례대로 함께 올리게 한다.
             self.raised = true;
         }
         self.sitting = sitting;
