@@ -1,4 +1,4 @@
-//! 포스트잇에 딸린 작은 판: 색 고르기와 알림 정하기.
+//! 포스트잇에 딸린 작은 판: 색 고르기와 알림 정하기. 꽃핀 옆에 뜨는 쉬는 시간 알림 판도 같은 방식으로 그린다.
 //!
 //! Windows의 기본 컨트롤을 쓰지 않는다. 단추, 고르는 칸, 미는 막대를 모두 직접 그리고, 마우스가 닿은 곳도
 //! 직접 가린다. 판은 포스트잇 옆에 뜨는 창 하나이고, 포스트잇처럼 픽셀마다 투명도가 있다.
@@ -12,6 +12,7 @@ use windows_sys::Win32::Foundation::HWND;
 use super::alarm::Alarm;
 use super::draw::{COLORS, CREAM, DEEP, HOT, INK, PINK, Pixel, ROSE, Rgb, WHITE, from_hsv, mix, rgb, round_box};
 use super::text::{self, Block};
+use crate::focus::{FOCUS_PICKS, REST_PICKS};
 use crate::when::{civil_from_days, clock_label as clock, weekday};
 
 /// 판 둘레에 그림자가 들어갈 여백.
@@ -27,6 +28,8 @@ const RIGHT: &str = "\u{E76C}";
 pub enum Kind {
     Color,
     Alarm,
+    /// 쉬는 시간 알림. 포스트잇에 딸리지 않는다.
+    Focus,
 }
 
 /// 판에서 누른 것.
@@ -48,6 +51,31 @@ pub enum Action {
     Day(i64),
     /// 날짜 줄을 한 주 앞뒤로 넘긴다.
     Week(i32),
+    /// 쉬는 시간 알림: 집중 시간(0)이나 쉬는 시간(1)을 그 분으로 고른다.
+    FocusPick(u8, u32),
+    /// 쉬는 시간 알림: 집중 시간(0)이나 쉬는 시간(1)을 화살표로 몇 칸 바꾼다.
+    FocusStep(u8, i32),
+    /// 쉬는 시간 알림: 저절로 이어 가기를 켜고 끈다.
+    FocusAuto,
+    /// 쉬는 시간 알림의 아래쪽 단추: 0 시작, 1 잠깐 멈추기, 2 다시, 3 그만하기, 4 지금 쉬기·바로 집중.
+    FocusGo(u8),
+}
+
+/// 쉬는 시간 알림 판이 보여 줄 것.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FocusModel {
+    /// 지금 하는 것. 돌고 있지 않으면 없고, 집중하는 중이면 `true`다.
+    pub phase: Option<bool>,
+    pub paused: bool,
+    /// 자리를 비워 집중 시간이 멈춰 있다.
+    pub away: bool,
+    /// 남은 초와, 지금 하는 것의 전체 초.
+    pub left: u64,
+    pub total: u64,
+    /// 판에서 고른 집중 시간과 쉬는 시간(분), 저절로 이어 가기.
+    pub focus: u32,
+    pub rest: u32,
+    pub auto: bool,
 }
 
 /// 판이 보여 줄 것.
@@ -230,8 +258,14 @@ impl Panel {
         let inner = match kind {
             Kind::Color => (236.0, 226.0),
             Kind::Alarm => (264.0, 254.0),
+            Kind::Focus => (264.0, 282.0),
         };
         (inner.0 + 2.0 * MARGIN, inner.1 + 2.0 * MARGIN + 6.0)
+    }
+
+    /// 마지막으로 그렸을 때 그것을 누를 수 있던 곳. 확인용 스크립트가 누를 자리를 찾는 데 쓴다.
+    pub fn spot(&self, action: Action) -> Option<(f32, f32, f32, f32)> {
+        self.spots.iter().find(|(_, other)| *other == action).map(|&(rect, _)| rect)
     }
 
     /// 판 안의 한 점에 있는, 누를 수 있는 것.
@@ -252,6 +286,7 @@ impl Panel {
             match action {
                 Action::Hour(1) => return Some(Action::Hour(step)),
                 Action::Minute(1) => return Some(Action::Minute(step)),
+                Action::FocusStep(which, 1) => return Some(Action::FocusStep(*which, step)),
                 _ => {}
             }
         }
@@ -334,6 +369,17 @@ impl Panel {
 
     /// 판을 그린다. 누를 수 있는 곳도 이때 다시 적는다.
     pub fn paint(&mut self, surface: &mut Surface, model: &Model) {
+        let title = if self.kind == Kind::Color { "색" } else { "알림" };
+        let (x, y) = self.chrome(surface, title);
+        match self.kind {
+            Kind::Color => self.paint_color(surface, model, (x, y)),
+            Kind::Alarm => self.paint_alarm(surface, model, (x, y)),
+            Kind::Focus => {}
+        }
+    }
+
+    /// 판의 바탕과 제목, 닫기 단추를 그린다. 판 안쪽의 왼쪽 위를 돌려준다.
+    fn chrome(&mut self, surface: &mut Surface, title: &str) -> (f32, f32) {
         self.spots.clear();
         surface.clear();
         let (width, height) = Panel::size(self.kind);
@@ -341,7 +387,6 @@ impl Panel {
         surface.shadow(body, 16.0);
         surface.frame(body, 16.0, PINK, CREAM, 2.0);
         let (x, y) = (body.0, body.1);
-        let title = if self.kind == Kind::Color { "색" } else { "알림" };
         self.write_left(surface, title, 14.0, true, x + 16.0, y + 22.0, ROSE, 1.0);
         // 닫기.
         let close = (body.2 - 36.0, y + 10.0, body.2 - 12.0, y + 34.0);
@@ -350,9 +395,106 @@ impl Panel {
         }
         self.write(surface, CLOSE, 11.0, false, ((close.0 + close.2) / 2.0, (close.1 + close.3) / 2.0), ROSE, 1.0);
         self.spots.push((close, Action::Close));
-        match self.kind {
-            Kind::Color => self.paint_color(surface, model, (x, y)),
-            Kind::Alarm => self.paint_alarm(surface, model, (x, y)),
+        (x, y)
+    }
+
+    /// 쉬는 시간 알림 판을 그린다. 지금 상태와 남은 시간, 고른 시간, 저절로 이어 가기, 아래쪽 단추들이다.
+    pub fn paint_focus(&mut self, surface: &mut Surface, model: &FocusModel) {
+        let (x, y) = self.chrome(surface, "쉬는 시간 알림");
+        let (left, right) = (x + 14.0, x + 250.0);
+        let scale = surface.scale;
+
+        // 지금 상태와 남은 시간.
+        let state = match model.phase {
+            None => "쉬고 있지 않아요",
+            Some(_) if model.paused => "잠깐 멈춤",
+            Some(true) if model.away => "자리 비움으로 멈춤",
+            Some(true) => "집중하는 중",
+            Some(false) => "쉬는 중",
+        };
+        let lively = model.phase.is_some() && !model.paused && !(model.away && model.phase == Some(true));
+        self.write_left(surface, state, 13.0, true, left + 2.0, y + 58.0, if lively { ROSE } else { INK }, 1.0);
+        let bar = (left, y + 76.0, right, y + 84.0);
+        surface.pill(bar, 4.0, PINK, 0.35);
+        if model.phase.is_some() {
+            let clock = format!("{}:{:02}", model.left / 60, model.left % 60);
+            let wide = self.label(&clock, 22.0, true, false, scale).w as f32 / scale;
+            self.write(surface, &clock, 22.0, true, (right - 2.0 - wide / 2.0, y + 57.0), INK, 1.0);
+            // 지난 만큼 채운다.
+            let done = 1.0 - model.left as f32 / model.total.max(1) as f32;
+            let reach = bar.0 + (bar.2 - bar.0) * done.clamp(0.0, 1.0);
+            if reach > bar.0 + 8.0 {
+                surface.pill((bar.0, bar.1, reach, bar.3), 4.0, ROSE, if lively { 1.0 } else { 0.5 });
+            }
+        } else {
+            let plan = format!("{}분 집중 + {}분 쉬기", model.focus, model.rest);
+            let wide = self.label(&plan, 12.5, false, false, scale).w as f32 / scale;
+            self.write(surface, &plan, 12.5, false, (right - 2.0 - wide / 2.0, y + 58.0), INK, 0.75);
+        }
+
+        // 집중 시간과 쉬는 시간: 빨리 고르는 단추 둘과, 화살표나 휠로 바꾸는 칸.
+        let rows = [("집중", model.focus, FOCUS_PICKS), ("쉬기", model.rest, REST_PICKS)];
+        for (row, (name, value, picks)) in rows.into_iter().enumerate() {
+            let top = y + 98.0 + 52.0 * row as f32;
+            self.write_left(surface, name, 12.5, true, left + 2.0, top + 22.0, DEEP, 1.0);
+            for (index, minutes) in picks.into_iter().enumerate() {
+                let from = left + 38.0 + 60.0 * index as f32;
+                let rect = (from, top + 8.0, from + 54.0, top + 36.0);
+                let label = format!("{minutes}분");
+                self.button(surface, rect, &label, 12.5, Action::FocusPick(row as u8, minutes), minutes == value);
+            }
+            let from = right - 68.0;
+            surface.frame((from, top, from + 68.0, top + 44.0), 10.0, PINK, WHITE, 1.5);
+            self.write(surface, &value.to_string(), 20.0, true, (from + 23.0, top + 22.0), INK, 1.0);
+            let arrows = [
+                (Action::FocusStep(row as u8, 1), UP, top + 2.0),
+                (Action::FocusStep(row as u8, -1), DOWN, top + 22.0),
+            ];
+            for (action, arrow, arrow_top) in arrows {
+                let spot = (from + 46.0, arrow_top, from + 66.0, arrow_top + 20.0);
+                if self.hot == Some(action) {
+                    surface.pill(spot, 6.0, HOT, 1.0);
+                }
+                self.write(surface, arrow, 12.0, false, ((spot.0 + spot.2) / 2.0, (spot.1 + spot.3) / 2.0), ROSE, 1.0);
+                self.spots.push((spot, action));
+            }
+        }
+
+        // 저절로 이어 가기. 작은 스위치와 이름이다.
+        let top = y + 204.0;
+        let switch = (left + 2.0, top + 2.0, left + 38.0, top + 22.0);
+        if model.auto {
+            surface.pill(switch, 10.0, ROSE, 1.0);
+        } else {
+            surface.frame(switch, 10.0, PINK, if self.hot == Some(Action::FocusAuto) { HOT } else { WHITE }, 1.5);
+        }
+        let knob = (if model.auto { switch.2 - 10.0 } else { switch.0 + 10.0 }, top + 12.0);
+        surface.disc(knob, 7.0, if model.auto { WHITE } else { PINK }, 1.0);
+        self.write_left(surface, "저절로 이어 가기", 12.5, false, left + 46.0, top + 12.0, INK, 0.9);
+        self.spots.push(((left, top, right, top + 24.0), Action::FocusAuto));
+
+        // 아래쪽 단추들.
+        let row = (y + 238.0, y + 266.0);
+        match model.phase {
+            None => self.button(surface, (left, row.0, right, row.1), "시작", 13.0, Action::FocusGo(0), true),
+            Some(focusing) => {
+                let third = (right - left - 12.0) / 3.0;
+                let (pause, pause_action) = if model.paused { ("다시", 2) } else { ("멈추기", 1) };
+                let skip = if focusing { "지금 쉬기" } else { "바로 집중" };
+                for (index, (name, action)) in
+                    [(pause, pause_action), (skip, 4), ("그만하기", 3)].into_iter().enumerate()
+                {
+                    let from = left + (third + 6.0) * index as f32;
+                    self.button(
+                        surface,
+                        (from, row.0, from + third, row.1),
+                        name,
+                        12.5,
+                        Action::FocusGo(action),
+                        false,
+                    );
+                }
+            }
         }
     }
 
@@ -622,6 +764,7 @@ impl Draft {
             Action::Day(day) => (self.mode, self.day) = (1, day),
             Action::Week(step) => self.week = (self.week + 7 * step as i64).max(now.0),
             Action::Close | Action::Swatch(_) | Action::Slide(_) => {}
+            Action::FocusPick(..) | Action::FocusStep(..) | Action::FocusAuto | Action::FocusGo(_) => {}
         }
     }
 }

@@ -194,6 +194,11 @@ pub enum Command {
     Studio(String, Vec<f64>),
     /// `focus 집중초 쉬는초`: 쉬는 시간 알림을 이 길이(초)로 시작한다. 짧게 돌려 확인한다.
     Focus(f64, f64),
+    /// `focus panel [번호]`: 그 꽃핀(0부터) 옆에 쉬는 시간 알림 판을 띄운다.
+    FocusPanel(usize),
+    /// `focus press 이름 [분]`: 쉬는 시간 알림 판에서 그것을 누른다(`start`, `pause`, `resume`, `stop`, `skip`,
+    /// `auto`, `close`, `focus 분`, `rest 분`, `focus+`, `focus-`, `rest+`, `rest-`).
+    FocusPress(String, Option<u32>),
     /// `cursor x y`: 마우스 커서가 화면의 그 자리에 있는 것으로 친다. `cursor off`면 다시 진짜 커서를 본다.
     /// 커서 따라오기를 진짜 마우스를 움직이지 않고 확인한다.
     Cursor(Option<(i32, i32)>),
@@ -424,6 +429,12 @@ pub fn parse_script(text: &str) -> Result<Vec<Step>, String> {
             (Some("display"), 3) if words[2] == "on" || words[2] == "off" => Command::Dark(words[2] == "off"),
             (Some("hello"), 2) => Command::Hello,
             (Some("foreground"), 2) => Command::Foreground,
+            (Some("focus"), 3) if words[2] == "panel" => Command::FocusPanel(0),
+            (Some("focus"), 4) if words[2] == "panel" => Command::FocusPanel(number(3)? as usize),
+            (Some("focus"), 4 | 5) if words[2] == "press" => {
+                let minutes = if words.len() == 5 { Some(number(4)? as u32) } else { None };
+                Command::FocusPress(words[3].to_string(), minutes)
+            }
             (Some("focus"), 4) => Command::Focus(number(2)?, number(3)?),
             (Some("studio"), 3..) => {
                 let numbers = (3..words.len()).map(number).collect::<Result<Vec<f64>, String>>()?;

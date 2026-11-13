@@ -17,6 +17,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
+use crate::focus::Plan;
 use crate::memos::Memos;
 use crate::settings::Settings;
 
@@ -51,6 +52,8 @@ pub struct State {
     /// 방송 촬영용 창의 자리와 크기(창 바깥 기준, x, y, 너비, 높이)와 바탕색(0xRRGGBB).
     pub studio_place: Option<(i32, i32, i32, i32)>,
     pub studio_color: Option<u32>,
+    /// 쉬는 시간 알림 판에서 고른 집중 시간과 쉬는 시간(분), 저절로 이어 가기. 고른 적이 없으면 없다.
+    pub focus_plan: Option<Plan>,
 }
 
 impl State {
@@ -82,6 +85,11 @@ impl State {
         if let Some(color) = self.studio_color {
             text.push_str(&format!(",\n  \"studio_color\": {color}"));
         }
+        if let Some(Plan { focus, rest, auto }) = self.focus_plan {
+            text.push_str(&format!(
+                ",\n  \"focus_plan\": {{ \"focus\": {focus}, \"rest\": {rest}, \"auto\": {auto} }}"
+            ));
+        }
         text.push_str("\n}\n");
         text
     }
@@ -109,6 +117,12 @@ impl State {
                 }
             },
             studio_color: object.get("studio_color").and_then(Value::as_u64).map(|c| (c & 0xFF_FFFF) as u32),
+            focus_plan: {
+                let plan = object.get("focus_plan");
+                let minutes = |name: &str| plan?.get(name)?.as_u64().map(|value| value.min(1000) as u32);
+                let auto = plan.and_then(|plan| plan.get("auto")).and_then(Value::as_bool).unwrap_or(false);
+                minutes("focus").zip(minutes("rest")).map(|(focus, rest)| Plan { focus, rest, auto }.fit())
+            },
         })
     }
 }
@@ -286,6 +300,7 @@ mod tests {
             studio_open: true,
             studio_place: Some((-1900, 500, 656, 399)),
             studio_color: Some(0xFF00FF),
+            focus_plan: Some(Plan { focus: 35, rest: 7, auto: true }),
         };
         assert_eq!(State::from_json(&state.to_json()), Some(state.clone()));
         // 방송 촬영용 창의 크기가 0이면 자리가 없는 것으로 친다.

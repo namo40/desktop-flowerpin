@@ -27,7 +27,7 @@ use crate::checker::{self, Checker};
 use crate::clock::WakeTimer;
 use crate::desktop::Desktop;
 use crate::dev;
-use crate::focus::{self, Focus, Turn};
+use crate::focus::{self, Focus, Phase, Plan, Turn};
 use crate::frames::Frames;
 use crate::geom::Rect;
 use crate::links::{self, LINKS};
@@ -35,7 +35,7 @@ use crate::live::{self, Event, Live, Reply, Tracker, View};
 use crate::memos::{COUNT_LIMIT, Memo, Memos, SNOOZE_MINUTES};
 use crate::motions::{MotionId, Motions};
 use crate::notices::{Click, Kind, Notice, Notices};
-use crate::postit::{FanPick, Outcome, Postits};
+use crate::postit::{FanPick, FocusAct, FocusModel, Outcome, Postits};
 use crate::settings::{CROWD_MAX, Key, Settings};
 use crate::settings_window::{self, DialogEvent, SettingsWindow, TAB_NAMES};
 use crate::stage::Stage;
@@ -973,7 +973,7 @@ impl App {
         Ok(())
     }
 
-    /// 쉬는 시간 알림을 [`focus::CHOICES`]의 `choice`번째로 시작한다. 떠 있던 쉬는 시간 말풍선은 치운다.
+    /// 쉬는 시간 알림을 시작한다. 떠 있던 쉬는 시간 말풍선은 치운다.
     fn start_focus(&mut self, focus: Focus, now: Instant) {
         if self.notices.cancel(FOCUS_TAG) {
             self.close_bubble(now);
@@ -996,6 +996,83 @@ impl App {
         self.focus.as_ref().map(Focus::label)
     }
 
+    /// 쉬는 시간 알림 판에서 고른 시간. 고른 적이 없으면 25분 집중, 5분 쉬기다.
+    fn focus_plan(&self) -> Plan {
+        self.state.focus_plan.unwrap_or_default()
+    }
+
+    /// 쉬는 시간 알림 판이 보여 줄 것.
+    fn focus_model(&self) -> FocusModel {
+        let plan = self.focus_plan();
+        let running = self.focus.as_ref();
+        FocusModel {
+            phase: running.map(|focus| focus.phase() == Phase::Focus),
+            paused: running.is_some_and(Focus::is_paused),
+            away: self.away,
+            left: running.map_or(0, Focus::left_secs),
+            total: running.map_or(0, |focus| focus.total().as_secs()),
+            focus: plan.focus,
+            rest: plan.rest,
+            auto: plan.auto,
+        }
+    }
+
+    /// 쉬는 시간 알림 판을 그 꽃핀 옆에 띄운다.
+    fn open_focus_panel(&mut self, index: usize) {
+        let Some(character) = self.characters.get(index) else { return };
+        let (head, half_body, _, dpi) = character.head(&self.stage);
+        let model = self.focus_model();
+        self.postits.open_focus((head, half_body), dpi, model);
+        self.note(Instant::now(), format!("쉬는 시간 알림 판을 띄움: {index}번 옆"));
+    }
+
+    /// 쉬는 시간 알림 판에서 누른 것을 한다.
+    fn focus_acted(&mut self, act: FocusAct, now: Instant) {
+        let mut plan = self.focus_plan();
+        let away = self.away;
+        match act {
+            FocusAct::Pick { rest: false, minutes } => plan.focus = minutes,
+            FocusAct::Pick { rest: true, minutes } => plan.rest = minutes,
+            FocusAct::Step { rest, steps } => plan.step(rest, steps),
+            FocusAct::Auto => {
+                plan.auto = !plan.auto;
+                // 도는 타이머에도 바로 쓴다. 이번 쉬는 시간이 끝날 때부터 달라진다.
+                if let Some(focus) = &mut self.focus {
+                    focus.set_auto(plan.auto);
+                }
+            }
+            FocusAct::Start => self.start_focus(Focus::start(plan, now), now),
+            FocusAct::Pause(pause) => {
+                if let Some(focus) = &mut self.focus {
+                    focus.pause(pause, now, away);
+                    self.note(now, format!("쉬는 시간 알림: {}", if pause { "잠깐 멈춤" } else { "다시" }));
+                }
+            }
+            FocusAct::Stop => self.stop_focus(now),
+            FocusAct::Skip => {
+                if let Some(focus) = &mut self.focus {
+                    focus.skip(now);
+                    let label = focus.label();
+                    if self.notices.cancel(FOCUS_TAG) {
+                        self.close_bubble(now);
+                    }
+                    self.note(now, format!("쉬는 시간 알림 넘김: {label}"));
+                }
+            }
+        }
+        let plan = plan.fit();
+        if plan != self.focus_plan() {
+            self.state.focus_plan = Some(plan);
+            self.store.state_changed(now);
+            self.note(
+                now,
+                format!("쉬는 시간 알림 판: {}분 집중, {}분 쉬기, 저절로 {}", plan.focus, plan.rest, plan.auto),
+            );
+        }
+        let model = self.focus_model();
+        self.postits.set_focus(model);
+    }
+
     /// 쉬는 시간 알림의 시간을 흘리고, 때가 되면 알린다.
     ///
     /// 집중 시간이 끝나면 말풍선으로 쉬자고 하고, 나와 있는 꽃핀들이 다 같이 기지개를 켠다. 쉬는 시간이 끝나면
@@ -1004,19 +1081,24 @@ impl App {
     fn tend_focus(&mut self, now: Instant) {
         let away = self.away;
         let Some(focus) = &mut self.focus else { return };
-        let (turn, choice, rest) = (focus.advance(now, away), focus.choice(), focus.rest().as_secs().div_ceil(60));
-        let (title, body, click) = match turn {
+        let turn = focus.advance(now, away);
+        let (rest, minutes) = (focus.rest().as_secs().div_ceil(60), focus.focus().as_secs().div_ceil(60));
+        let (title, body, click, lasts) = match turn {
             None => return,
             Some(Turn::BreakTime) => {
                 let members = self.members();
                 let stretch = together::together(&members, Show::Stretch, &mut self.rng, now);
                 self.cues.extend(stretch);
-                ("쉬는 시간이에요!".to_string(), format!("{rest}분 쉬어요. 기지개 한번 켜요."), Click::Close)
+                ("쉬는 시간이에요!".to_string(), format!("{rest}분 쉬어요. 기지개 한번 켜요."), Click::Close, None)
             }
             Some(Turn::BackToWork) => {
                 self.focus = None;
-                let minutes = focus::CHOICES[choice].0;
-                ("쉬는 시간 끝!".to_string(), format!("누르면 다시 {minutes}분 집중을 시작해요."), Click::Focus(choice))
+                let minutes = self.focus_plan().focus;
+                ("쉬는 시간 끝!".to_string(), format!("누르면 다시 {minutes}분 집중을 시작해요."), Click::Focus, None)
+            }
+            // 저절로 이어 가면 누르지 않아도 말풍선이 닫힌다.
+            Some(Turn::Again) => {
+                ("쉬는 시간 끝!".to_string(), format!("다시 {minutes}분 집중해요."), Click::Close, Some(HELD_LASTS))
             }
         };
         self.note(now, format!("쉬는 시간 알림: {title} {body}"));
@@ -1024,7 +1106,7 @@ impl App {
             self.close_bubble(now);
         }
         let speech = Speech { title: title.clone(), body: body.clone() };
-        self.notices.push(Notice { kind: Kind::Reminder, speech, lasts: None, click, tag: Some(FOCUS_TAG) });
+        self.notices.push(Notice { kind: Kind::Reminder, speech, lasts, click, tag: Some(FOCUS_TAG) });
         if (self.is_quiet() || self.out_of_sight) && self.settings.is_on(Key::ReminderToast) {
             self.toast(&title, &body, false, now);
         }
@@ -2121,6 +2203,10 @@ impl App {
 
         // 9. 같이 하기에서 때가 된 행동을 시키고, 때가 된 꽃핀의 시간을 흘리고 화면에 넘긴다. 한 명도 남지 않으면 끝낸다.
         self.tend_focus(now);
+        if self.postits.has_focus() {
+            let model = self.focus_model();
+            self.postits.set_focus(model);
+        }
         self.play_cues(now);
         self.watch_cursor(now);
         if !self.tick_characters(now)? {
@@ -2309,7 +2395,7 @@ impl App {
         match self.notices.dismiss().map(|notice| notice.click) {
             Some(Click::Open(target)) => self.open(&target),
             Some(Click::Memos) => self.postits.show_all(),
-            Some(Click::Focus(choice)) => self.start_focus(Focus::start(choice, now), now),
+            Some(Click::Focus) => self.start_focus(Focus::start(self.focus_plan(), now), now),
             Some(Click::Close) | None => {}
         }
     }
@@ -2437,6 +2523,7 @@ impl App {
             Outcome::Answered { id, snooze: false } => self.note(now, format!("알림을 확인함: 메모 {id}")),
             Outcome::Create { x, y } => self.new_memo((x, y)),
             Outcome::Fan(pick) => self.fan_picked(pick, now)?,
+            Outcome::Focus(act) => self.focus_acted(act, now),
             Outcome::FanClosed => self.release_held(now),
         }
         Ok(None)
@@ -2627,6 +2714,8 @@ impl App {
         sooner(self.cues.iter().map(|cue| cue.at).min());
         sooner(self.watches_cursor().then_some(self.next_cursor_check));
         sooner(self.focus.and_then(|focus| focus.due(self.away)));
+        // 쉬는 시간 알림 판이 떠 있으면 남은 시간이 바뀔 때마다 다시 그린다.
+        sooner(self.focus.filter(|_| self.postits.has_focus()).and_then(|focus| focus.next_tick(self.away)));
         sooner(self.studio.as_ref().filter(|_| !self.is_paused()).map(Studio::due));
         sooner(self.next_wave.filter(|_| !self.out_of_sight));
         sooner(self.dev.deadline);
@@ -2677,7 +2766,11 @@ impl App {
             Some(MenuItem::MemoList) => self.postits.open_list(win::cursor_position()),
             Some(MenuItem::Link(index)) => self.open(LINKS[index].url),
             Some(MenuItem::Together(index)) => self.play_together(index, now),
-            Some(MenuItem::Focus(choice)) => self.start_focus(Focus::start(choice, now), now),
+            Some(MenuItem::Focus(choice)) => {
+                let (focus, rest) = focus::CHOICES[choice.min(focus::CHOICES.len() - 1)];
+                let plan = Plan { focus: focus as u32, rest: rest as u32, ..self.focus_plan() };
+                self.start_focus(Focus::start(plan, now), now);
+            }
             Some(MenuItem::FocusStop) => self.stop_focus(now),
             Some(MenuItem::Studio) => self.open_studio(true, now)?,
             Some(MenuItem::Show(show)) => {
@@ -2911,8 +3004,10 @@ impl App {
             dev::Command::Studio(word, numbers) => self.studio_script(&word, &numbers, now)?,
             dev::Command::Focus(work, rest) => {
                 let lengths = (Duration::from_secs_f64(work), Duration::from_secs_f64(rest));
-                self.start_focus(Focus::with(0, lengths, now), now);
+                self.start_focus(Focus::with(lengths, self.focus_plan().auto, now), now);
             }
+            dev::Command::FocusPanel(index) => self.open_focus_panel(index),
+            dev::Command::FocusPress(word, minutes) => self.postits.focus_script(&word, minutes),
             dev::Command::Hide(seconds) => {
                 self.hide = Hide::Until(now + Duration::from_secs_f64(seconds));
             }
@@ -3006,8 +3101,8 @@ impl App {
                 if let Some(path) = &self.dev.options.settings_shot {
                     let back_first: Vec<_> =
                         front_first.iter().rev().map(|&index| self.characters[index].window()).collect();
-                    let fan = self.postits.fan_shot();
-                    dev::crowd_shot(&back_first, fan.as_ref(), &dev::numbered(path, self.dev.snaps));
+                    let over = self.postits.fan_shot().or_else(|| self.postits.focus_shot());
+                    dev::crowd_shot(&back_first, over.as_ref(), &dev::numbered(path, self.dev.snaps));
                 }
             }
             dev::Command::Settings(dialog) => {
