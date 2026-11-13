@@ -670,6 +670,9 @@ impl App {
     fn apply_habits(&mut self) {
         let habits = self.habits();
         self.characters.iter_mut().for_each(|character| character.actor_mut().set_habits(habits));
+        if let Some(studio) = &mut self.studio {
+            studio.set_habits(habits);
+        }
         self.next_wave = together::next_wave(habits.whim_rate, &mut self.rng, Instant::now());
     }
 
@@ -843,6 +846,7 @@ impl App {
         )?;
         self.note(now, studio.describe());
         self.studio = Some(studio);
+        self.apply_habits();
         if !self.state.studio_open {
             self.state.studio_open = true;
             self.store.state_changed(now);

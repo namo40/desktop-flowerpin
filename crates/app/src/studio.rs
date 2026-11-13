@@ -37,7 +37,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     WM_NULL, WM_PAINT, WM_RBUTTONUP, WM_SETICON, WM_SIZE, WNDCLASSEXW, WS_OVERLAPPEDWINDOW,
 };
 
-use crate::actor::Mode;
+use crate::actor::{Habits, Mode};
 use crate::character::{Character, Look};
 use crate::desktop::Desktop;
 use crate::frames::Frames;
@@ -302,6 +302,11 @@ impl Studio {
     /// 꽃핀의 크기 설정이 바뀌었다.
     pub fn set_look(&mut self, look: Look, now: Instant) {
         self.character.set_look(Look { topmost: false, offscreen: true, ..look }, now);
+    }
+
+    /// 꽃핀의 버릇(가끔 하는 행동의 빈도)을 설정에 맞춘다.
+    pub fn set_habits(&mut self, habits: Habits) {
+        self.character.actor_mut().set_habits(habits);
     }
 
     /// 다음에 깨어나야 할 시각.
