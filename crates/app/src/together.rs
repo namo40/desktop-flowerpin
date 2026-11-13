@@ -39,17 +39,15 @@ pub struct Member {
     pub x: f64,
     /// 있는 모니터. 같은 값이면 같은 모니터다.
     pub monitor: (i32, i32),
-    /// 지금 무엇이든 따라 할 수 있는가. 바닥이나 창 위에서 쉬거나 걷고 있고, 머리에 아무도 없을 때다.
+    /// 지금 무엇이든 따라 할 수 있는가. 바닥이나 창 위에서 쉬거나 걷고 있을 때다.
     pub free: bool,
-    /// 뛸 수 있는가. 다른 꽃핀의 머리 위에서는 뛰지 않는다.
-    pub can_jump: bool,
     /// 표시 배율. 거리 상수에 곱한다.
     pub scale: f64,
 }
 
 impl Member {
-    fn can(&self, show: Show) -> bool {
-        self.free && (show != Show::Jump || self.can_jump)
+    fn can(&self, _show: Show) -> bool {
+        self.free
     }
 }
 
@@ -126,7 +124,7 @@ mod tests {
     const MAIN: (i32, i32) = (0, 0);
 
     fn member(who: isize, x: f64, monitor: (i32, i32)) -> Member {
-        Member { who, x, monitor, free: true, can_jump: true, scale: 1.0 }
+        Member { who, x, monitor, free: true, scale: 1.0 }
     }
 
     #[test]
@@ -150,10 +148,6 @@ mod tests {
         // 너무 멀면 따라 하지 않는다.
         let far = [member(1, 1000.0, MAIN), member(2, 1300.0, MAIN)];
         assert_eq!(follow(&far, 0, Show::Yawn, 10.0, &mut rng, now), None);
-        // 머리 위에 있는 꽃핀은 점프를 따라 하지 않는다.
-        let on_head = [member(1, 1000.0, MAIN), Member { can_jump: false, ..member(2, 1100.0, MAIN) }];
-        assert_eq!(follow(&on_head, 0, Show::Jump, 10.0, &mut rng, now), None);
-        assert!(follow(&on_head, 0, Show::Stretch, 10.0, &mut rng, now).is_some());
     }
 
     #[test]
@@ -173,7 +167,7 @@ mod tests {
         let members = [
             member(1, 900.0, MAIN),
             member(2, 300.0, MAIN),
-            Member { can_jump: false, ..member(3, 500.0, MAIN) },
+            Member { free: false, ..member(3, 500.0, MAIN) },
             member(4, 600.0, MAIN),
             member(5, -1000.0, LEFT),
         ];

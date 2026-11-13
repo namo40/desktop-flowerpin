@@ -21,7 +21,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 use crate::actor::{Habits, Mode, Rng, Show};
 use crate::autostart;
 use crate::bubble::{Bubble, Speech};
-use crate::character::{self, Character, Head, Look, Stay};
+use crate::character::{self, Character, Look, Stay};
 use crate::character_window::{self, CharacterWindow, WindowEvent};
 use crate::checker::{self, Checker};
 use crate::clock::WakeTimer;
@@ -285,8 +285,6 @@ pub struct App {
     dark: bool,
     /// 지금 꽃핀을 숨겨 두었는가.
     out_of_sight: bool,
-    /// 꽃핀마다 몇 층에 서 있는지. 달라지면 꽃핀끼리의 앞뒤 차례를 다시 맞춘다.
-    tiers: Vec<u8>,
     /// 같이 하기: 때가 되면 꽃핀에게 시킬 행동들과, 다음에 저절로 파도를 탈 때.
     cues: Vec<Cue>,
     next_wave: Option<Instant>,
@@ -339,37 +337,12 @@ impl Calls {
     }
 }
 
-/// 다른 꽃핀의 머리 위에 몇 층까지 쌓일 수 있는지. 바닥이나 창 위에 선 꽃핀이 1층이다.
-const MAX_TIERS: u8 = 3;
-
-/// 꽃핀마다 딛고 선 꽃핀(`carriers`)을 따라가, 몇 층에 서 있는지 센다. 바닥이나 창 위에 서 있으면 1층이다.
-fn tiers(carriers: &[Option<usize>]) -> Vec<u8> {
-    let tier = |mut index: usize| {
-        let mut tier = 1u8;
-        // 서로를 딛고 선 것처럼 잘못 읽혀도 끝나도록 꽃핀 수만큼만 따라간다.
-        for _ in 0..carriers.len() {
-            match carriers[index] {
-                Some(below) => {
-                    tier = tier.saturating_add(1);
-                    index = below;
-                }
-                None => break,
-            }
-        }
-        tier
-    };
-    (0..carriers.len()).map(tier).collect()
-}
-
-/// 꽃핀들을 뒤에 설 것부터 앞에 설 것까지 차례로 늘어놓는다. `guests`는 꽃핀마다 더 부른 꽃핀인지이고,
-/// `tiers`는 꽃핀마다 몇 층에 서 있는지다([`tiers`]).
+/// 꽃핀들을 뒤에 설 것부터 앞에 설 것까지 차례로 늘어놓는다. `guests`는 꽃핀마다 더 부른 꽃핀인지다.
 ///
-/// 더 부른 꽃핀은 먼저 부른 것일수록 뒤에 서고, 기본 꽃핀은 그 앞에 선다. 다른 꽃핀의 머리 위에 선 꽃핀은
-/// 아래층의 꽃핀들보다 앞에 선다. 발이 머리 앞에 보여야 하기 때문이다. 잡고 있는 꽃핀은 맨 앞이다.
-fn stack_order(guests: &[bool], tiers: &[u8], dragged: Option<usize>) -> Vec<usize> {
+/// 더 부른 꽃핀은 먼저 부른 것일수록 뒤에 서고, 기본 꽃핀은 그 앞에 선다. 잡고 있는 꽃핀은 맨 앞이다.
+fn stack_order(guests: &[bool], dragged: Option<usize>) -> Vec<usize> {
     let mut order: Vec<usize> = (0..guests.len()).filter(|&index| guests[index]).collect();
     order.extend((0..guests.len()).rev().filter(|&index| !guests[index]));
-    order.sort_by_key(|&index| tiers.get(index).copied().unwrap_or(1));
     if let Some(dragged) = dragged.filter(|&dragged| dragged < guests.len()) {
         order.retain(|&index| index != dragged);
         order.push(dragged);
@@ -517,7 +490,6 @@ impl App {
             asleep: false,
             dark: false,
             out_of_sight: false,
-            tiers: Vec::new(),
             cues: Vec::new(),
             next_wave: None,
             rng: Rng::new(seed ^ 0x5EED),
@@ -684,28 +656,22 @@ impl App {
 
     /// 같이 하기를 따져 볼 꽃핀들. 꽃핀 번호 차례다.
     fn members(&self) -> Vec<Member> {
-        let carriers = self.carriers();
         let dragged = match self.pointer {
             Pointer::Dragging { hwnd } => Some(hwnd),
             _ => None,
         };
-        let member = |(index, character): (usize, &Character)| {
+        let member = |character: &Character| {
             let actor = character.actor();
             let hwnd = Some(character.window().hwnd());
             Member {
                 who: character.id(),
                 x: actor.position().0,
                 monitor: character.monitor_key(&self.stage),
-                free: actor.mode() == Mode::Ground
-                    && !actor.is_leaving()
-                    && !carriers.contains(&Some(index))
-                    && hwnd != self.held
-                    && hwnd != dragged,
-                can_jump: !actor.on_head(),
+                free: actor.mode() == Mode::Ground && !actor.is_leaving() && hwnd != self.held && hwnd != dragged,
                 scale: character.scale().factor(),
             }
         };
-        self.characters.iter().enumerate().map(member).collect()
+        self.characters.iter().map(member).collect()
     }
 
     /// 때가 된 같이 하기를 시킨다. 그때 할 수 없는 꽃핀은 넘어간다. 저절로 파도를 탈 때가 됐으면 탄다.
@@ -732,7 +698,7 @@ impl App {
         for cue in due {
             let Some(index) = members.iter().position(|member| member.who == cue.who) else { continue };
             let member = members[index];
-            if member.free && (cue.show != Show::Jump || member.can_jump) {
+            if member.free {
                 self.characters[index].show(cue.show, &self.motions, &self.stage, now);
             }
         }
@@ -804,11 +770,7 @@ impl App {
             let character = &self.characters[*index];
             let foot = character.actor().position().1;
             let member = &members[*index];
-            member.free
-                && member.can_jump
-                && member.monitor == monitor
-                && y <= foot
-                && y >= foot - CURSOR_BAND * character.height()
+            member.free && member.monitor == monitor && y <= foot && y >= foot - CURSOR_BAND * character.height()
         };
         let candidates = (0..self.characters.len()).filter(near);
         let nearest = candidates.min_by(|&a, &b| (members[a].x - x).abs().total_cmp(&(members[b].x - x).abs()));
@@ -900,7 +862,6 @@ impl App {
             Character::appear(&mut self.frames, &self.motions, &self.stage, look, spot, (now, self.started), seed)?;
         first.actor_mut().set_away(self.away);
         self.characters.push(first);
-        self.tiers = tiers(&self.carriers());
         self.apply_habits();
         if !self.state.studio_open {
             self.state.studio_open = true;
@@ -933,7 +894,6 @@ impl App {
                     character.wake(now);
                 }
             }
-            self.tiers = tiers(&self.carriers());
             self.apply_habits();
             // 세워 둔 동안 모니터가 바뀌었으면 화면 밖에 남은 꽃핀을 데려온다.
             self.rescue_characters(now)?;
@@ -1045,8 +1005,7 @@ impl App {
     /// 방송 촬영용 창의 자리나 크기가 바뀌었다. 꽃핀들의 무대를 다시 읽고, 창의 자리를 기억해 둔다.
     ///
     /// 크기가 바뀌었으면 꽃핀들이 하던 일을 멈추고, 창 너비에 대한 비율대로 가로 자리를 옮겨 새 바닥에 바로 선다.
-    /// 다른 꽃핀의 머리 위에 있던 꽃핀도 바닥에 내려선다. 옮기기만 했으면 꽃핀들도 같은 만큼 옮겨 가서 창 안의
-    /// 자리가 그대로이고, 하던 일을 이어 간다.
+    /// 옮기기만 했으면 꽃핀들도 같은 만큼 옮겨 가서 창 안의 자리가 그대로이고, 하던 일을 이어 간다.
     fn studio_moved(&mut self, now: Instant) {
         let Some(studio) = &self.studio else { return };
         let old = self.stage.primary().work;
@@ -1058,7 +1017,6 @@ impl App {
                 let ratio = ((character.actor().position().0 - old.x as f64) / old.w.max(1) as f64).clamp(0.0, 1.0);
                 character.settle_at(&self.motions, &self.stage, new.x as f64 + ratio * new.w as f64, now);
             }
-            self.tiers = tiers(&self.carriers());
             self.note(
                 now,
                 format!(
@@ -2108,35 +2066,7 @@ impl App {
         };
         let guests: Vec<bool> =
             self.characters.iter().map(|character| matches!(character.stay(), Stay::Guest(_))).collect();
-        stack_order(&guests, &tiers(&self.carriers()), dragged)
-    }
-
-    /// 꽃핀마다 딛고 선 꽃핀의 번호. 다른 꽃핀의 머리 위에 서 있지 않으면 `None`이다.
-    fn carriers(&self) -> Vec<Option<usize>> {
-        let ids: Vec<isize> = self.characters.iter().map(Character::id).collect();
-        let below = |character: &Character| {
-            let support = character.actor().support()?;
-            ids.iter().position(|&id| id == support)
-        };
-        self.characters.iter().map(below).collect()
-    }
-
-    /// 다른 꽃핀이 올라설 수 있는 머리들. 맨 위층의 꽃핀은 머리를 내주지 않는다.
-    fn heads(&self, carriers: &[Option<usize>], tiers: &[u8]) -> Vec<Head> {
-        let ids: Vec<isize> = self.characters.iter().map(Character::id).collect();
-        let mut heads = Vec::new();
-        for (index, character) in self.characters.iter().enumerate() {
-            let Some(perch) = character.head_perch().filter(|_| tiers[index] < MAX_TIERS) else { continue };
-            let mut under = [0; 2];
-            let mut below = carriers[index];
-            for slot in &mut under {
-                let Some(next) = below else { break };
-                *slot = ids[next];
-                below = carriers[next];
-            }
-            heads.push(Head { perch, under });
-        }
-        heads
+        stack_order(&guests, dragged)
     }
 
     /// `--watch-stack`이면 꽃핀끼리의 실제 앞뒤를 읽는다. `moved`면 방금 앞뒤를 옮긴 것이고, `settled`면 앞뒤를
@@ -2530,35 +2460,12 @@ impl App {
         let started = Instant::now();
         let mut shown = false;
         let held = self.held;
-        // 아래층의 꽃핀부터 걸음을 밟는다. 위층의 꽃핀은 아래 꽃핀이 움직인 뒤의 머리를 딛는다.
-        let carriers = self.carriers();
-        self.tiers = tiers(&carriers);
-        for (index, character) in self.characters.iter_mut().enumerate() {
-            character.actor_mut().set_carrying(carriers.contains(&Some(index)));
-        }
-        let mut order: Vec<usize> = (0..self.characters.len()).collect();
-        order.sort_by_key(|&index| self.tiers[index]);
-        let mut heads = Vec::new();
-        let mut heads_for = 0;
-        for index in order {
-            if self.tiers[index] != heads_for {
-                heads_for = self.tiers[index];
-                heads = self.heads(&self.carriers(), &self.tiers);
-            }
-            let character = &mut self.characters[index];
+        for character in &mut self.characters {
             // 메뉴에서 행동을 고르는 동안에는 그 꽃핀을 그대로 세워 둔다.
             if held == Some(character.window().hwnd()) {
                 continue;
             }
-            let before = character.actor().on_head();
-            let around = (&self.desktop, &heads[..]);
-            shown |= character.tick(&mut self.frames, &self.motions, &self.stage, around, horizon)?;
-            // 다른 꽃핀의 머리 위에 막 내려앉았으면 바로 그 꽃핀보다 앞으로 옮긴다. 다음 꽃핀들을 그리는 동안
-            // 발이 머리 뒤에 보이지 않게 한다.
-            if self.characters[index].actor().on_head() && !before {
-                self.tiers = tiers(&self.carriers());
-                self.restack();
-            }
+            shown |= character.tick(&mut self.frames, &self.motions, &self.stage, &self.desktop, horizon)?;
         }
         if let (true, Some(first)) = (shown, self.characters.first()) {
             self.dev.pace.frame_shown(now, started.elapsed());
@@ -2584,18 +2491,10 @@ impl App {
                 format!("꽃핀 {}명이 사라져 {}명 남음", before - self.characters.len(), self.characters.len()),
             );
         }
-        // 새로 나타났거나 걸터앉으려고 앞으로 나온 꽃핀이 있거나, 누가 다른 꽃핀의 머리 위에 올라서거나
-        // 내려왔으면 꽃핀끼리의 앞뒤 차례를 다시 맞춘다.
+        // 새로 나타났거나 걸터앉으려고 앞으로 나온 꽃핀이 있으면 꽃핀끼리의 앞뒤 차례를 다시 맞춘다.
         let raised = self.characters.iter_mut().fold(false, |any, character| character.take_raised() | any);
         self.follow_whims(now);
-        let now_tiers = tiers(&self.carriers());
-        if now_tiers != self.tiers {
-            let up = now_tiers.iter().filter(|&&tier| tier > 1).count();
-            let top = now_tiers.iter().copied().max().unwrap_or(1);
-            self.note(now, format!("다른 꽃핀의 머리 위에 선 꽃핀 {up}명, 가장 높이 {top}층"));
-        }
-        if raised || now_tiers != self.tiers {
-            self.tiers = now_tiers;
+        if raised {
             self.restack();
         }
         if shown {
@@ -3490,44 +3389,26 @@ mod tests {
         assert_eq!(calls, Calls::default());
     }
 
-    /// 모두 1층에 서 있을 때의 차례.
-    fn flat(guests: &[bool], dragged: Option<usize>) -> Vec<usize> {
-        stack_order(guests, &vec![1; guests.len()], dragged)
-    }
-
-    #[test]
-    fn whoever_stands_on_a_head_stands_in_front() {
-        // 2번이 0번의 머리 위에, 3번이 2번의 머리 위에 서 있다. 1번은 바닥에 있다.
-        let carriers = [None, None, Some(0), Some(2)];
-        assert_eq!(tiers(&carriers), [1, 1, 2, 3]);
-        let crowd = [false, true, true, true];
-        assert_eq!(stack_order(&crowd, &tiers(&carriers), None), [1, 0, 2, 3]);
-        // 잡고 있는 꽃핀은 그래도 맨 앞이다.
-        assert_eq!(stack_order(&crowd, &tiers(&carriers), Some(1)), [0, 2, 3, 1]);
-        // 서로를 딛고 선 것처럼 잘못 읽혀도 끝난다.
-        assert_eq!(tiers(&[Some(1), Some(0)]).len(), 2);
-    }
-
     #[test]
     fn the_home_character_stands_in_front_of_guests() {
         // 기본 꽃핀 하나와 더 부른 꽃핀 셋. 먼저 부른 꽃핀일수록 뒤에 서고, 기본 꽃핀이 맨 앞이다.
         let crowd = [false, true, true, true];
-        assert_eq!(flat(&crowd, None), [1, 2, 3, 0]);
+        assert_eq!(stack_order(&crowd, None), [1, 2, 3, 0]);
         // 잡고 있는 꽃핀은 누구든 맨 앞으로 나온다.
-        assert_eq!(flat(&crowd, Some(2)), [1, 3, 0, 2]);
-        assert_eq!(flat(&crowd, Some(0)), [1, 2, 3, 0]);
+        assert_eq!(stack_order(&crowd, Some(2)), [1, 3, 0, 2]);
+        assert_eq!(stack_order(&crowd, Some(0)), [1, 2, 3, 0]);
         // 없는 꽃핀을 잡고 있다고 해도 차례가 흐트러지지 않는다.
-        assert_eq!(flat(&crowd, Some(9)), [1, 2, 3, 0]);
-        assert_eq!(flat(&[false], None), [0]);
-        assert!(flat(&[], None).is_empty());
+        assert_eq!(stack_order(&crowd, Some(9)), [1, 2, 3, 0]);
+        assert_eq!(stack_order(&[false], None), [0]);
+        assert!(stack_order(&[], None).is_empty());
     }
 
     #[test]
     fn everyone_appears_once_in_the_order() {
         // 확인용으로 처음부터 여러 명을 띄우면 모두 기본 꽃핀이다. 첫 꽃핀이 맨 앞에 선다.
-        assert_eq!(flat(&[false, false, false], None), [2, 1, 0]);
+        assert_eq!(stack_order(&[false, false, false], None), [2, 1, 0]);
         for dragged in [None, Some(0), Some(1), Some(4)] {
-            let mut order = flat(&[false, true, false, true, true], dragged);
+            let mut order = stack_order(&[false, true, false, true, true], dragged);
             assert_eq!(order.last().copied(), dragged.or(Some(0)));
             order.sort_unstable();
             assert_eq!(order, [0, 1, 2, 3, 4]);
