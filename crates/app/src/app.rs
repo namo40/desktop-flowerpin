@@ -38,6 +38,7 @@ use crate::settings::{CROWD_MAX, Key, Settings};
 use crate::settings_window::{self, DialogEvent, SettingsWindow, TAB_NAMES};
 use crate::stage::Stage;
 use crate::store::{self, State, Store};
+use crate::together::{self, Cue, Member};
 use crate::tray::{self, MenuItem, Tray, TrayEvent};
 use crate::update;
 use crate::usage::{self, Meter};
@@ -262,6 +263,11 @@ pub struct App {
     out_of_sight: bool,
     /// 꽃핀마다 몇 층에 서 있는지. 달라지면 꽃핀끼리의 앞뒤 차례를 다시 맞춘다.
     tiers: Vec<u8>,
+    /// 같이 하기: 때가 되면 꽃핀에게 시킬 행동들과, 다음에 저절로 파도를 탈 때.
+    cues: Vec<Cue>,
+    next_wave: Option<Instant>,
+    /// 같이 하기에서 누가 따라 할지, 언제 파도를 탈지 고르는 난수.
+    rng: Rng,
     /// 방해하면 안 되는 동안 알릴 때가 된 메모들. 그때가 지나면 포스트잇을 울린다.
     rings_waiting: Vec<u64>,
     dev: Dev,
@@ -478,6 +484,9 @@ impl App {
             dark: false,
             out_of_sight: false,
             tiers: Vec::new(),
+            cues: Vec::new(),
+            next_wave: None,
+            rng: Rng::new(seed ^ 0x5EED),
             rings_waiting: Vec::new(),
             dev: Dev {
                 pace: dev::Pace::default(),
@@ -619,11 +628,105 @@ impl App {
         self.dev.notes.splice(0..0, lines);
     }
 
-    /// 설정의 버릇을 모든 꽃핀에게 알린다.
+    /// 꽃핀들의 버릇. 확인용으로 가만히 세워 두면 돌아다니지도 가끔 하는 행동을 하지도 않는다.
+    fn habits(&self) -> Habits {
+        if self.dev.options.still { Habits { roam: false, whim_rate: 0.0 } } else { self.settings.habits() }
+    }
+
+    /// 설정의 버릇을 모든 꽃핀에게 알린다. 저절로 파도를 탈 때도 빈도에 맞춰 다시 잡는다.
     fn apply_habits(&mut self) {
-        let habits =
-            if self.dev.options.still { Habits { roam: false, whim_rate: 0.0 } } else { self.settings.habits() };
+        let habits = self.habits();
         self.characters.iter_mut().for_each(|character| character.actor_mut().set_habits(habits));
+        self.next_wave = together::next_wave(habits.whim_rate, &mut self.rng, Instant::now());
+    }
+
+    /// 같이 하기를 따져 볼 꽃핀들. 꽃핀 번호 차례다.
+    fn members(&self) -> Vec<Member> {
+        let carriers = self.carriers();
+        let dragged = match self.pointer {
+            Pointer::Dragging { hwnd } => Some(hwnd),
+            _ => None,
+        };
+        let member = |(index, character): (usize, &Character)| {
+            let actor = character.actor();
+            let hwnd = Some(character.window().hwnd());
+            Member {
+                who: character.id(),
+                x: actor.position().0,
+                monitor: character.monitor_key(&self.stage),
+                free: actor.mode() == Mode::Ground
+                    && !actor.is_leaving()
+                    && !carriers.contains(&Some(index))
+                    && hwnd != self.held
+                    && hwnd != dragged,
+                can_jump: !actor.on_head(),
+                scale: character.scale().factor(),
+            }
+        };
+        self.characters.iter().enumerate().map(member).collect()
+    }
+
+    /// 때가 된 같이 하기를 시킨다. 그때 할 수 없는 꽃핀은 넘어간다. 저절로 파도를 탈 때가 됐으면 탄다.
+    fn play_cues(&mut self, now: Instant) {
+        if self.out_of_sight || self.quitting.is_some() {
+            self.cues.clear();
+            return;
+        }
+        if self.next_wave.is_some_and(|at| now >= at) {
+            self.next_wave = together::next_wave(self.habits().whim_rate, &mut self.rng, now);
+            let members = self.members();
+            if let Some(monitor) = together::crowded(&members) {
+                let wave = together::wave(&members, Some(monitor), now);
+                self.note(now, format!("저절로 파도 점프: {}명", wave.len()));
+                self.cues.extend(wave);
+            }
+        }
+        if !self.cues.iter().any(|cue| cue.at <= now) {
+            return;
+        }
+        let members = self.members();
+        let (due, later): (Vec<Cue>, Vec<Cue>) = self.cues.drain(..).partition(|cue| cue.at <= now);
+        self.cues = later;
+        for cue in due {
+            let Some(index) = members.iter().position(|member| member.who == cue.who) else { continue };
+            let member = members[index];
+            if member.free && (cue.show != Show::Jump || member.can_jump) {
+                self.characters[index].show(cue.show, &self.motions, &self.stage, now);
+            }
+        }
+    }
+
+    /// 혼자 가끔 하는 행동을 시작한 꽃핀이 있으면, 옆 꽃핀이 따라 하게 한다.
+    fn follow_whims(&mut self, now: Instant) {
+        let started: Vec<(usize, Show)> = (self.characters.iter_mut().enumerate())
+            .filter_map(|(index, character)| {
+                Some((index, together::followable(character.actor_mut().take_started()?)?))
+            })
+            .collect();
+        if started.is_empty() || self.out_of_sight {
+            return;
+        }
+        let members = self.members();
+        let rate = self.habits().whim_rate;
+        for (leader, show) in started {
+            if let Some(cue) = together::follow(&members, leader, show, rate, &mut self.rng, now) {
+                self.note(now, format!("따라 하기: {leader}번의 {}", show.label()));
+                self.cues.push(cue);
+            }
+        }
+    }
+
+    /// 메뉴의 "다 같이"에서 고른 것을 나와 있는 꽃핀들이 함께 한다.
+    fn play_together(&mut self, index: usize, now: Instant) {
+        let members = self.members();
+        let cues = match index {
+            0 => together::wave(&members, None, now),
+            1 => together::together(&members, Show::Stretch, &mut self.rng, now),
+            _ => together::together(&members, Show::Yawn, &mut self.rng, now),
+        };
+        self.note(now, format!("다 같이 {}: {}명", tray::TOGETHER[index], cues.len()));
+        self.cues.extend(cues);
+        self.play_cues(now);
     }
 
     /// 바뀐 설정을 화면의 꽃핀에게 바로 반영하고, 저장을 예약한다.
@@ -1696,7 +1799,8 @@ impl App {
             return Ok(Flow::Quit);
         }
 
-        // 9. 때가 된 꽃핀의 시간을 흘리고 화면에 넘긴다. 한 명도 남지 않으면 끝낸다.
+        // 9. 같이 하기에서 때가 된 행동을 시키고, 때가 된 꽃핀의 시간을 흘리고 화면에 넘긴다. 한 명도 남지 않으면 끝낸다.
+        self.play_cues(now);
         if !self.tick_characters(now)? {
             return Ok(Flow::Quit);
         }
@@ -1806,6 +1910,7 @@ impl App {
         // 새로 나타났거나 걸터앉으려고 앞으로 나온 꽃핀이 있거나, 누가 다른 꽃핀의 머리 위에 올라서거나
         // 내려왔으면 꽃핀끼리의 앞뒤 차례를 다시 맞춘다.
         let raised = self.characters.iter_mut().fold(false, |any, character| character.take_raised() | any);
+        self.follow_whims(now);
         let now_tiers = tiers(&self.carriers());
         if now_tiers != self.tiers {
             let up = now_tiers.iter().filter(|&&tier| tier > 1).count();
@@ -2181,6 +2286,8 @@ impl App {
         sooner(self.postits.due());
         sooner(self.guests_due());
         sooner(self.calls.next);
+        sooner(self.cues.iter().map(|cue| cue.at).min());
+        sooner(self.next_wave.filter(|_| !self.out_of_sight));
         sooner(self.dev.deadline);
         // 자원을 재기 시작할 때를 놓치지 않는다. 숨겨 둔 동안에는 달리 깨어날 일이 없다.
         sooner((self.dev.usage.is_none() && self.dev.options.report.is_some()).then_some(self.started + dev::WARM_UP));
@@ -2228,6 +2335,7 @@ impl App {
             Some(MenuItem::MemoTidy) => self.postits.tidy(),
             Some(MenuItem::MemoList) => self.postits.open_list(win::cursor_position()),
             Some(MenuItem::Link(index)) => self.open(LINKS[index].url),
+            Some(MenuItem::Together(index)) => self.play_together(index, now),
             Some(MenuItem::Show(show)) => {
                 let target = self.menu_character();
                 if let Some(character) = self.characters.get_mut(target) {

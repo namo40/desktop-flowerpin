@@ -290,6 +290,12 @@ impl Character {
         &self.window
     }
 
+    /// 있는 모니터를 가리키는 값(모니터의 왼쪽 위). 같은 값이면 같은 모니터다.
+    pub fn monitor_key(&self, stage: &Stage) -> (i32, i32) {
+        let area = self.monitor(stage).area;
+        (area.x, area.y)
+    }
+
     /// 이 꽃핀을 가리키는 값. 창 윗변처럼 이 꽃핀의 머리를 딛고 설 때 쓴다.
     pub fn id(&self) -> isize {
         self.window.hwnd() as isize

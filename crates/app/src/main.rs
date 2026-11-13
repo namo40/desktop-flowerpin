@@ -31,6 +31,7 @@ mod shadow;
 mod stage;
 mod store;
 mod text;
+mod together;
 mod tray;
 mod update;
 mod usage;

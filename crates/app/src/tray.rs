@@ -59,6 +59,9 @@ pub const HIDES: [(&str, Option<u64>); 3] = [("10분", Some(600)), ("1시간", S
 /// "여러 명 초대하기"에서 고를 수 있는 수.
 pub const CALLS: [usize; 3] = [3, 5, 10];
 
+/// "다 같이" 메뉴의 항목. 파도 점프는 왼쪽부터 차례로 뛴다.
+pub const TOGETHER: [&str; 3] = ["파도 점프", "기지개", "하품"];
+
 /// 메뉴에서 고를 수 있는 것.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MenuItem {
@@ -94,6 +97,8 @@ pub enum MenuItem {
     Link(usize),
     /// 꽃핀에게 시켜서 볼 행동. 메뉴에는 없고, 확인용 스크립트가 번호로 고른다.
     Show(Show),
+    /// 나와 있는 꽃핀이 다 같이 한다. [`TOGETHER`]의 몇 번째인지다.
+    Together(usize),
 }
 
 impl MenuItem {
@@ -115,6 +120,7 @@ impl MenuItem {
             MenuItem::Update => 15,
             MenuItem::CallMany(index) => 20 + index as u32,
             MenuItem::CallFill => 23,
+            MenuItem::Together(index) => 30 + index as u32,
             MenuItem::Link(index) => 100 + index as u32,
             MenuItem::Show(show) => 200 + Show::ALL.iter().position(|&other| other == show).unwrap_or(0) as u32,
         }
@@ -137,6 +143,7 @@ impl MenuItem {
             15 => Some(MenuItem::Update),
             20..=22 => Some(MenuItem::CallMany((id - 20) as usize)),
             23 => Some(MenuItem::CallFill),
+            30.. if ((id - 30) as usize) < TOGETHER.len() => Some(MenuItem::Together((id - 30) as usize)),
             100.. if ((id - 100) as usize) < LINKS.len() => Some(MenuItem::Link((id - 100) as usize)),
             200.. if ((id - 200) as usize) < Show::ALL.len() => Some(MenuItem::Show(Show::ALL[(id - 200) as usize])),
             _ => None,
@@ -256,7 +263,8 @@ fn build(state: &MenuState) -> Option<HMENU> {
         let links = CreatePopupMenu();
         let memos = CreatePopupMenu();
         let calls = CreatePopupMenu();
-        if menu.is_null() || links.is_null() || memos.is_null() || calls.is_null() {
+        let together = CreatePopupMenu();
+        if menu.is_null() || links.is_null() || memos.is_null() || calls.is_null() || together.is_null() {
             return None;
         }
         let add = |menu, item: MenuItem, label: &str| {
@@ -289,6 +297,12 @@ fn build(state: &MenuState) -> Option<HMENU> {
         let flags = if state.can_call { MF_POPUP } else { MF_POPUP | MF_GRAYED };
         AppendMenuW(menu, flags, calls as usize, wide("여러 명 초대하기").as_ptr());
         add_if(menu, state.can_send, MenuItem::SendAll, "모두 보내기");
+        // 다 같이 하기. 숨겨 둔 동안에는 줄이 통째로 흐리다.
+        for (index, name) in TOGETHER.iter().enumerate() {
+            add(together, MenuItem::Together(index), name);
+        }
+        let flags = if state.hidden { MF_POPUP | MF_GRAYED } else { MF_POPUP };
+        AppendMenuW(menu, flags, together as usize, wide("다 같이").as_ptr());
         AppendMenuW(menu, MF_SEPARATOR, 0, null());
         AppendMenuW(menu, MF_POPUP, memos as usize, wide("메모").as_ptr());
         AppendMenuW(menu, MF_SEPARATOR, 0, null());
@@ -795,6 +809,7 @@ mod tests {
                 "꽃핀 초대하기",
                 "여러 명 초대하기",
                 "(모두 보내기)",
+                "다 같이",
                 "-",
                 "메모",
                 "-",
@@ -805,9 +820,10 @@ mod tests {
                 "끝내기"
             ]
         );
-        // 숨겨 둔 동안에는 "잠깐 숨기기" 자리에 "다시 보이기"가 온다.
+        // 숨겨 둔 동안에는 "잠깐 숨기기" 자리에 "다시 보이기"가 오고, "다 같이"는 흐리다.
         let hidden = MenuState { hidden: true, ..state(false, false) };
-        assert_eq!(names(&hidden)[5..], ["-", "다시 보이기", "-", "바로 가기", "설정...", "끝내기"]);
+        assert_eq!(names(&hidden)[3], "(다 같이)");
+        assert_eq!(names(&hidden)[6..], ["-", "다시 보이기", "-", "바로 가기", "설정...", "끝내기"]);
         // 더 초대할 수 없으면 초대하는 두 줄이 흐리다.
         assert_eq!(names(&state(false, true))[..3], ["(꽃핀 초대하기)", "(여러 명 초대하기)", "모두 보내기"]);
         // 방송 중이면 방송 정보가 맨 위에 들어간다.
@@ -817,6 +833,20 @@ mod tests {
         // 더 새 버전이 나와 있으면 받는 길이 그보다도 위에 들어간다.
         let newer = MenuState { update: Some("0.2.0"), ..state(true, true) };
         assert_eq!(names(&newer)[..3], ["새 버전 받기 (0.2.0)", "-", "꽃핀 초대하기"]);
+    }
+
+    #[test]
+    fn everyone_can_do_something_together() {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{GetMenuItemID, GetSubMenu};
+        let state = MenuState { live: None, can_call: true, can_send: true, hidden: false, room: 3, update: None };
+        let menu = build(&state).expect("메뉴");
+        let together = unsafe { GetSubMenu(menu, 3) };
+        assert_eq!(marked(lines(together)), ["파도 점프", "기지개", "하품"]);
+        let ids: Vec<u32> = (0..3).map(|i| unsafe { GetMenuItemID(together, i) }).collect();
+        assert_eq!(ids, [30, 31, 32]);
+        unsafe { DestroyMenu(menu) };
+        assert_eq!(MenuItem::from_id(31), Some(MenuItem::Together(1)));
+        assert_eq!(MenuItem::from_id(33), None);
     }
 
     #[test]

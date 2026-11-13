@@ -328,7 +328,7 @@ impl Rng {
         low + (high - low) * self.unit()
     }
 
-    fn chance(&mut self, probability: f64) -> bool {
+    pub fn chance(&mut self, probability: f64) -> bool {
         self.unit() < probability
     }
 }
@@ -414,6 +414,8 @@ pub struct Actor {
     showcase: bool,
     /// 반복 동작을 몇 바퀴 더 돌지.
     loops_left: u32,
+    /// 혼자 시작한 가끔 하는 행동. 앱이 꺼내 가서 옆 꽃핀이 따라 하게 한다.
+    started: Option<Whim>,
     rng: Rng,
 }
 
@@ -464,6 +466,7 @@ impl Actor {
             pending: None,
             showcase: false,
             loops_left: 0,
+            started: None,
             rng,
         }
     }
@@ -723,8 +726,16 @@ impl Actor {
                 self.start_hop(motions, dir);
             }
             Whim::Climb | Whim::Hop => self.rest(motions, REST),
-            other => self.start(other, motions),
+            other => {
+                self.start(other, motions);
+                self.started = Some(other);
+            }
         }
+    }
+
+    /// 쉬다가 혼자 시작한 가끔 하는 행동이 있으면 꺼낸다. 사용자나 앱이 시킨 행동은 들어 있지 않다.
+    pub fn take_started(&mut self) -> Option<Whim> {
+        self.started.take()
     }
 
     /// 지금 이 행동을 골라서 볼 수 있는가.
