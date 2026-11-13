@@ -3138,8 +3138,9 @@ impl App {
 
     /// 끝내기를 고른 것으로 한다. 지금 바로 끝내야 하면 `true`를 돌려준다.
     fn ask_quit(&mut self, now: Instant) -> bool {
-        // 숨겨 둔 동안에는 인사할 꽃핀이 보이지 않는다. 바로 끝낸다.
-        if self.quitting.is_some() || self.out_of_sight {
+        // 숨겨 둔 동안에는 인사할 꽃핀이 보이지 않는다. 방송 촬영용 창을 최소화해 둔 동안에는 꽃핀의 시간이 흐르지
+        // 않아 인사를 마치지 못한다. 둘 다 바로 끝낸다.
+        if self.quitting.is_some() || self.frozen() {
             return true;
         }
         self.close_fan(now);
