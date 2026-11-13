@@ -110,7 +110,7 @@ dependencies = [
 
 [[package]]
 name = "desktop-flowerpin"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "dfp-pack",
  "embed-resource",
@@ -121,7 +121,7 @@ dependencies = [
 
 [[package]]
 name = "dfp-pack"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "chacha20poly1305",
  "dfp-pack",

@@ -17,8 +17,8 @@
 // 파일의 정보. 작업 관리자와 Windows 알림에 이 이름이 보인다. 판 번호는 Cargo.toml과 같아야 한다.
 //   0x40004 = VOS_NT_WINDOWS32, 0x1 = VFT_APP, 0412 = 한국어, 04B0 = 유니코드
 1 VERSIONINFO
-FILEVERSION 0, 1, 0, 0
-PRODUCTVERSION 0, 1, 0, 0
+FILEVERSION 0, 1, 1, 0
+PRODUCTVERSION 0, 1, 1, 0
 FILEOS 0x40004
 FILETYPE 0x1
 BEGIN
@@ -28,8 +28,8 @@ BEGIN
         BEGIN
             VALUE "FileDescription", "데스크탑 꽃핀"
             VALUE "ProductName", "데스크탑 꽃핀"
-            VALUE "FileVersion", "0.1.0"
-            VALUE "ProductVersion", "0.1.0"
+            VALUE "FileVersion", "0.1.1"
+            VALUE "ProductVersion", "0.1.1"
             VALUE "OriginalFilename", "DesktopFlowerpin.exe"
         END
     END
