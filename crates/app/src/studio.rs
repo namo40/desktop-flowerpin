@@ -207,8 +207,9 @@ pub struct Studio {
     origin: (i32, i32),
     color: u32,
     canvas: Canvas,
-    /// 지난번에 꽃핀들을 그린 범위(창 안쪽 좌표). 다음에는 여기와 새 범위만 다시 칠한다.
-    drawn: Rect,
+    /// 지난번에 그린 꽃핀들(창)과 그 범위(창 안쪽 좌표). 뒤에 선 꽃핀부터다. 꽃핀이 오가거나 앞뒤 차례가 바뀐
+    /// 것을 알아보고, 그때 있던 곳을 다시 칠하는 데 쓴다.
+    drawn: Vec<(HWND, Rect)>,
     /// 다음에 창 안쪽을 통째로 다시 그린다.
     full: bool,
     icons: (HICON, HICON),
@@ -258,16 +259,7 @@ impl Studio {
         }
         let (stage, origin) = read_stage(hwnd);
         let size = client_size(hwnd);
-        Studio {
-            hwnd,
-            stage,
-            origin,
-            color,
-            canvas: Canvas::new(size.0, size.1),
-            drawn: Rect::EMPTY,
-            full: true,
-            icons,
-        }
+        Studio { hwnd, stage, origin, color, canvas: Canvas::new(size.0, size.1), drawn: Vec::new(), full: true, icons }
     }
 
     pub fn hwnd(&self) -> HWND {
@@ -347,10 +339,17 @@ impl Studio {
         None
     }
 
-    /// 바탕색 위에 꽃핀들을 얹어 창에 그린다. `windows`는 뒤에 서는 꽃핀부터다. `changed`가 아니면(바뀐 꽃핀이
-    /// 없으면) 통째로 다시 그려야 할 때만 그린다. 지난번과 이번에 꽃핀들이 있던 곳만 다시 칠한다.
-    pub fn compose(&mut self, windows: &[&CharacterWindow], changed: bool) {
-        if self.is_minimized() || !(changed || self.full) {
+    /// 바탕색 위에 꽃핀들을 얹어 창에 그린다. `windows`는 뒤에 서는 꽃핀부터다.
+    ///
+    /// 바뀐 곳만 다시 칠한다. 꽃핀마다 그림이나 자리가 바뀐 범위([`CharacterWindow::take_changed`])와, 꽃핀이
+    /// 오거나 사라지거나 앞뒤 차례가 바뀌었으면 지난번과 이번에 꽃핀들이 있던 곳이다. 겹치는 범위는 하나로 합쳐
+    /// 칠한다. 꽃핀들이 창 안에 흩어져 있어도 그 사이의 빈 곳은 칠하지 않는다.
+    pub fn compose(&mut self, windows: &[&CharacterWindow]) {
+        let origin = self.origin;
+        let inside = |rect: Rect| Rect::new(rect.x - origin.0, rect.y - origin.1, rect.w, rect.h);
+        // 바뀐 범위는 그리지 않을 때도 꺼내 둔다. 최소화를 풀면 창을 통째로 다시 그린다.
+        let changed: Vec<Rect> = windows.iter().map(|window| inside(window.take_changed())).collect();
+        if self.is_minimized() {
             return;
         }
         let size = client_size(self.hwnd);
@@ -359,44 +358,52 @@ impl Studio {
             self.full = true;
         }
         let (width, height) = (self.canvas.width, self.canvas.height);
-        let rects: Vec<Rect> = windows
-            .iter()
-            .map(|window| {
-                let screen = window.screen_rect();
-                Rect::new(screen.x - self.origin.0, screen.y - self.origin.1, screen.w, screen.h)
-            })
-            .collect();
-        let now_rect = rects.iter().copied().fold(Rect::EMPTY, Rect::union);
-        let region = if self.full { Rect::new(0, 0, width, height) } else { self.drawn.union(now_rect) };
-        let region = region.clip(width, height);
-        (self.drawn, self.full) = (now_rect, false);
-        if region.is_empty() {
+        let now: Vec<(HWND, Rect)> =
+            windows.iter().map(|window| (window.hwnd(), inside(window.screen_rect()))).collect();
+        let regions = if self.full {
+            vec![Rect::new(0, 0, width, height)]
+        } else {
+            let same = self.drawn.len() == now.len() && self.drawn.iter().zip(&now).all(|(was, is)| was.0 == is.0);
+            let moved = (!same).then(|| self.drawn.iter().chain(&now).map(|&(_, rect)| rect)).into_iter().flatten();
+            merge(changed.into_iter().chain(moved).collect())
+        };
+        (self.drawn, self.full) = (now, false);
+        let regions: Vec<Rect> =
+            regions.into_iter().map(|region| region.clip(width, height)).filter(|region| !region.is_empty()).collect();
+        if regions.is_empty() {
             return;
         }
         let back = 0xFF00_0000 | self.color;
         let canvas = self.canvas.pixels();
-        for y in region.y..region.bottom() {
-            let row = (y * width) as usize;
-            canvas[row + region.x as usize..row + region.right() as usize].fill(back);
-        }
-        for (window, rect) in windows.iter().zip(&rects) {
-            let sprite = window.shown();
-            let (from, to) = (region.x.max(rect.x), region.right().min(rect.right()));
-            for y in region.y.max(rect.y)..region.bottom().min(rect.bottom()) {
-                let (row, line) = ((y * width) as usize, ((y - rect.y) * rect.w) as usize);
-                for x in from..to {
-                    let pixel = sprite[line + (x - rect.x) as usize];
-                    let alpha = pixel >> 24;
-                    if alpha != 0 {
-                        let under = &mut canvas[row + x as usize];
-                        *under = over(pixel, *under, alpha);
+        for region in &regions {
+            for y in region.y..region.bottom() {
+                let row = (y * width) as usize;
+                canvas[row + region.x as usize..row + region.right() as usize].fill(back);
+            }
+            for (window, &(_, rect)) in windows.iter().zip(&self.drawn) {
+                if !rect.overlaps(*region) {
+                    continue;
+                }
+                let sprite = window.shown();
+                let (from, to) = (region.x.max(rect.x), region.right().min(rect.right()));
+                for y in region.y.max(rect.y)..region.bottom().min(rect.bottom()) {
+                    let (row, line) = ((y * width) as usize, ((y - rect.y) * rect.w) as usize);
+                    for x in from..to {
+                        let pixel = sprite[line + (x - rect.x) as usize];
+                        let alpha = pixel >> 24;
+                        if alpha != 0 {
+                            let under = &mut canvas[row + x as usize];
+                            *under = over(pixel, *under, alpha);
+                        }
                     }
                 }
             }
         }
         unsafe {
             let dc = GetDC(self.hwnd);
-            BitBlt(dc, region.x, region.y, region.w, region.h, self.canvas.dc, region.x, region.y, SRCCOPY);
+            for region in &regions {
+                BitBlt(dc, region.x, region.y, region.w, region.h, self.canvas.dc, region.x, region.y, SRCCOPY);
+            }
             ReleaseDC(self.hwnd, dc);
         }
         BACKDROP.set((self.color, width, height));
@@ -405,7 +412,7 @@ impl Studio {
     /// 창 안쪽을 그림으로 받는다(확인용). 픽셀은 0xRRGGBB이다.
     pub fn snapshot(&mut self, windows: &[&CharacterWindow]) -> (usize, Vec<[u8; 3]>) {
         self.full = true;
-        self.compose(windows, true);
+        self.compose(windows);
         let width = self.canvas.width as usize;
         let pixels = self.canvas.pixels().iter().map(|&p| [(p >> 16) as u8, (p >> 8) as u8, p as u8]).collect();
         (width, pixels)
@@ -436,6 +443,21 @@ pub fn touches(window: &CharacterWindow, (x, y): (i32, i32)) -> bool {
         return false;
     }
     window.shown()[(cy * rect.w + cx) as usize] >> 24 != 0
+}
+
+/// 겹치는 범위들을 하나로 합친다. 합쳐서 커진 범위가 다른 범위와 겹치면 그것도 합친다. 빈 범위는 버린다.
+fn merge(mut rects: Vec<Rect>) -> Vec<Rect> {
+    let mut merged: Vec<Rect> = Vec::new();
+    while let Some(mut rect) = rects.pop() {
+        if rect.is_empty() {
+            continue;
+        }
+        while let Some(at) = merged.iter().position(|other| other.overlaps(rect)) {
+            rect = rect.union(merged.swap_remove(at));
+        }
+        merged.push(rect);
+    }
+    merged
 }
 
 /// 미리 곱한 알파의 `pixel`을 불투명한 `back` 위에 얹는다.
@@ -684,6 +706,38 @@ mod tests {
         assert_eq!(over(0xFFFF_0000, green, 0xFF), 0xFFFF_0000);
         assert_eq!(over(0x8080_0000, green, 0x80), 0xFF80_7F00);
         assert_eq!(COLORS[0].1, 0x00FF00);
+    }
+
+    #[test]
+    fn only_the_places_that_changed_are_painted_again() {
+        // 창 안의 양 끝에 있는 두 꽃핀과, 왼쪽 꽃핀에 겹친 한 꽃핀. 사이의 빈 곳은 합치지 않는다.
+        let left = Rect::new(10, 200, 100, 120);
+        let right = Rect::new(1700, 200, 100, 120);
+        let over_left = Rect::new(90, 250, 100, 120);
+        let mut merged = merge(vec![left, right, over_left, Rect::EMPTY]);
+        merged.sort_by_key(|rect| rect.x);
+        assert_eq!(merged, [left.union(over_left), right]);
+        // 합쳐서 커진 범위가 다른 범위와 겹치면 그것도 합친다.
+        let bridge = [Rect::new(0, 0, 10, 10), Rect::new(20, 0, 10, 10), Rect::new(5, 5, 20, 2)];
+        assert_eq!(merge(bridge.to_vec()), [Rect::new(0, 0, 30, 10)]);
+    }
+
+    #[test]
+    fn a_hidden_character_window_gathers_what_changed() {
+        let mut window = CharacterWindow::new(40, 50, 100, 200, false, true);
+        // 처음에는 창 전체가 바뀐 것이고, 꺼내면 비워진다.
+        window.present(Rect::EMPTY);
+        assert_eq!((window.take_changed(), window.take_changed()), (Rect::new(100, 200, 40, 50), Rect::EMPTY));
+        // 그림의 일부만 바뀌었으면 그곳만, 자리를 옮겼으면 옛 자리와 새 자리 전체다. 꺼내기 전까지는 모인다.
+        window.present(Rect::new(5, 6, 7, 8));
+        assert_eq!(window.take_changed(), Rect::new(105, 206, 7, 8));
+        window.move_to(110, 200);
+        window.present(Rect::EMPTY);
+        window.present(Rect::new(0, 0, 1, 1));
+        assert_eq!(window.take_changed(), Rect::new(100, 200, 50, 50));
+        // 화면에 띄우지 않으므로 보이지 않는다.
+        window.set_visible(true);
+        assert!(!window.is_visible());
     }
 
     #[test]

@@ -1091,16 +1091,16 @@ impl App {
         self.remember_studio(now);
     }
 
-    /// 방송 촬영용 창에 꽃핀들을 앞뒤 차례대로 그린다. `changed`가 아니면 통째로 다시 그려야 할 때만 그린다.
-    /// 숨겨 둔 동안에는 바탕색만 칠한다.
-    fn paint_studio(&mut self, changed: bool) {
+    /// 방송 촬영용 창에 꽃핀들을 앞뒤 차례대로 그린다. 바뀐 곳이 없으면 그리지 않는다. 숨겨 둔 동안에는 바탕색만
+    /// 칠한다.
+    fn paint_studio(&mut self) {
         if self.studio.is_none() {
             return;
         }
         let order = if self.out_of_sight { Vec::new() } else { self.stack_order() };
         let Some(studio) = &mut self.studio else { return };
         let windows: Vec<&CharacterWindow> = order.iter().map(|&index| self.characters[index].window()).collect();
-        studio.compose(&windows, changed);
+        studio.compose(&windows);
     }
 
     /// 방송 촬영용 창의 자리와 크기, 바탕색을 기억해 둔다.
@@ -1161,7 +1161,7 @@ impl App {
             studio.set_color(color);
             self.note(now, format!("방송 촬영용 창의 바탕색 #{color:06X}"));
             self.remember_studio(now);
-            self.paint_studio(false);
+            self.paint_studio();
         }
         Ok(())
     }
@@ -1234,7 +1234,7 @@ impl App {
                 if let Some(studio) = &mut self.studio {
                     studio.set_color(studio::COLORS[index].1);
                 }
-                self.paint_studio(false);
+                self.paint_studio();
             }
             "snap" => {
                 let order = if self.out_of_sight { Vec::new() } else { self.stack_order() };
@@ -2568,7 +2568,7 @@ impl App {
     pub fn tick_characters(&mut self, now: Instant) -> Result<bool, PackError> {
         // 숨겨 둔 동안과 방송 촬영용 창을 최소화해 둔 동안에는 꽃핀의 시간이 흐르지 않는다.
         if self.frozen() {
-            self.paint_studio(false);
+            self.paint_studio();
             return Ok(true);
         }
         // 깨어난 김에 곧 올 박자까지 함께 밟는다.
@@ -2607,7 +2607,7 @@ impl App {
             self.dev.click_checked = true;
             self.dev.notes.push(dev::click_check(first.window()));
         }
-        self.paint_studio(shown);
+        self.paint_studio();
         let before = self.characters.len();
         self.characters.retain(|character| !character.actor().is_gone());
         if self.postits.has_fan() && self.menu_target.is_none_or(|hwnd| self.find(hwnd).is_none()) {

@@ -7,7 +7,7 @@
 //! 창에서 일어난 일(누르기, 끌기, 모니터가 바뀜)은 창 메시지를 받는 자리에서 처리하지 않고
 //! [`WindowEvent`]로 적어 두기만 한다. 메인 루프가 [`take_events`]로 꺼내 처리한다.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
 use std::ptr::{null, null_mut};
 use std::sync::Once;
@@ -82,6 +82,9 @@ pub struct CharacterWindow {
     presented_pos: Option<(i32, i32)>,
     /// 화면에 내보내지 않는다. 그림 버퍼만 쓰고, 창은 늘 숨어 있다(방송 촬영용 창 안의 꽃핀).
     offscreen: bool,
+    /// 화면에 내보내지 않을 때, 그림이나 자리가 바뀐 범위(화면 좌표). 가져다 쓰는 창이 [`CharacterWindow::take_changed`]로
+    /// 꺼내 그곳만 다시 그린다.
+    changed: Cell<Rect>,
 }
 
 impl CharacterWindow {
@@ -139,6 +142,7 @@ impl CharacterWindow {
             pos: (x, y),
             presented_pos: None,
             offscreen,
+            changed: Cell::new(Rect::EMPTY),
         }
     }
 
@@ -222,6 +226,11 @@ impl CharacterWindow {
         unsafe { std::slice::from_raw_parts(self.bits, (self.width * self.height) as usize) }
     }
 
+    /// 화면에 내보내지 않는 창에서, 지난번에 꺼낸 뒤로 그림이나 자리가 바뀐 범위(화면 좌표)를 꺼낸다.
+    pub fn take_changed(&self) -> Rect {
+        self.changed.replace(Rect::EMPTY)
+    }
+
     /// 창 버퍼에서 `dirty` 범위를 화면에 넘기고, 자리가 바뀌었으면 함께 옮긴다.
     ///
     /// 화면에 넘기는 호출은 넘기는 픽셀 수보다 부를 때마다 드는 비용이 크다. 그래서 그림과 위치를
@@ -238,7 +247,14 @@ impl CharacterWindow {
             return;
         }
         if self.offscreen {
-            // 화면에 내보내지 않는다. 버퍼에 그려진 것을 다른 창이 가져다 쓴다.
+            // 화면에 내보내지 않는다. 버퍼에 그려진 것을 다른 창이 가져다 쓴다. 그 창이 바뀐 곳만 다시 그리도록
+            // 바뀐 범위를 화면 좌표로 모아 둔다. 자리를 옮겼으면 옛 자리와 새 자리 전체다.
+            let area = match self.presented_pos {
+                Some(old) if moved => self.screen_rect().union(Rect::new(old.0, old.1, self.width, self.height)),
+                Some(_) => Rect::new(self.pos.0 + dirty.x, self.pos.1 + dirty.y, dirty.w, dirty.h),
+                None => self.screen_rect(),
+            };
+            self.changed.set(self.changed.get().union(area));
             self.presented_pos = Some(self.pos);
             return;
         }

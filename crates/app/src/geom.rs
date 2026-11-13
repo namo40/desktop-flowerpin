@@ -28,6 +28,16 @@ impl Rect {
         self.y + self.h
     }
 
+    /// 두 범위가 겹치는가. 맞닿기만 한 것은 겹친 것이 아니다. 빈 범위는 아무것과도 겹치지 않는다.
+    pub fn overlaps(self, other: Rect) -> bool {
+        !self.is_empty()
+            && !other.is_empty()
+            && self.x < other.right()
+            && other.x < self.right()
+            && self.y < other.bottom()
+            && other.y < self.bottom()
+    }
+
     /// 두 범위를 모두 덮는 가장 작은 범위. 빈 범위는 없는 것으로 친다.
     pub fn union(self, other: Rect) -> Rect {
         if self.is_empty() {
@@ -66,6 +76,15 @@ mod tests {
         let a = Rect::new(10, 20, 30, 40);
         assert_eq!(a.union(Rect::EMPTY), a);
         assert_eq!(Rect::EMPTY.union(a), a);
+    }
+
+    #[test]
+    fn overlapping_needs_a_shared_pixel() {
+        let a = Rect::new(10, 20, 30, 40);
+        assert!(a.overlaps(Rect::new(39, 59, 5, 5)));
+        // 맞닿기만 한 것과 빈 범위는 겹치지 않는다.
+        assert!(!a.overlaps(Rect::new(40, 20, 5, 5)) && !a.overlaps(Rect::new(10, 60, 5, 5)));
+        assert!(!a.overlaps(Rect::new(15, 25, 0, 5)) && !Rect::EMPTY.overlaps(a));
     }
 
     #[test]
