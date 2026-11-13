@@ -111,6 +111,8 @@ const GUEST_DOWN: (f64, f64) = (0.2, 0.35);
 const CALL_GAP: Duration = Duration::from_millis(200);
 /// 화면을 전체 화면 프로그램이 쓰고 있는지 확인하는 간격.
 const SCREEN_CHECK: Duration = Duration::from_secs(5);
+/// 머리 위 "다 같이" 묶음 안의 단추들. 트레이 메뉴의 "다 같이"와 같은 차례다.
+const TOGETHER_PICKS: [FanPick; 3] = [FanPick::Wave, FanPick::Stretch, FanPick::Yawn];
 
 /// 사용자가 메뉴에서 고른 "잠깐 숨기기".
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2443,7 +2445,7 @@ impl App {
     /// 꽃핀의 머리 위에 단추들을 부채꼴로 띄운다. 그동안 그 꽃핀은 멈춰서 기다린다.
     ///
     /// 무엇인가를 딛고 서 있을 때만 띄운다. 떠 있거나 잡혀 있거나 돌아가는 중이면 띄우지 않는다.
-    /// 꽃핀이 혼자면 "보내기"는 넣지 않는다. 바로 가기는 묶음 안에 있다.
+    /// 꽃핀이 혼자면 "보내기"와 "다 같이"는 넣지 않는다. 다 같이와 바로 가기는 묶음 안에 있다.
     fn open_fan(&mut self, index: usize) {
         let character = &self.characters[index];
         let standing = character.actor().can_speak() && !character.actor().is_leaving();
@@ -2453,12 +2455,14 @@ impl App {
         let (head, _, bounds, dpi) = character.head(&self.stage);
         let hwnd = character.window().hwnd();
         let mut buttons = vec![(FanPick::Invite, self.can_call())];
-        if self.staying() > 1 {
-            buttons.push((FanPick::Send, true));
+        let many = self.staying() > 1;
+        if many {
+            buttons.extend([(FanPick::Send, true), (FanPick::Together, true)]);
         }
         buttons.extend([FanPick::Memos, FanPick::Links, FanPick::Settings].map(|pick| (pick, true)));
         let links = [FanPick::Chzzk, FanPick::Youtube, FanPick::Cafe].map(|pick| (pick, true)).to_vec();
-        self.postits.open_fan(head, bounds, dpi, &buttons, &[(FanPick::Links, links)]);
+        let together = TOGETHER_PICKS.map(|pick| (pick, true)).to_vec();
+        self.postits.open_fan(head, bounds, dpi, &buttons, &[(FanPick::Links, links), (FanPick::Together, together)]);
         (self.menu_target, self.held) = (Some(hwnd), Some(hwnd));
     }
 
@@ -2488,8 +2492,13 @@ impl App {
             FanPick::Youtube => self.open(LINKS[links::YOUTUBE].url),
             FanPick::Cafe => self.open(LINKS[links::CAFE].url),
             FanPick::Settings => self.open_settings(),
+            FanPick::Wave | FanPick::Stretch | FanPick::Yawn => {
+                if let Some(index) = TOGETHER_PICKS.iter().position(|&together| together == pick) {
+                    self.play_together(index, now);
+                }
+            }
             // 묶음을 열고 되돌아가는 것은 단추들이 알아서 한다.
-            FanPick::Links | FanPick::Back => {}
+            FanPick::Links | FanPick::Together | FanPick::Back => {}
         }
         Ok(())
     }

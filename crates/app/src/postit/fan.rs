@@ -79,17 +79,26 @@ pub enum Pick {
     Settings,
     /// 묶음: 바로 가기(치지직, 유튜브, 카페).
     Links,
+    /// 묶음: 다 같이(파도 점프, 기지개, 하품). 나와 있는 꽃핀들이 함께 한다.
+    Together,
+    Wave,
+    Stretch,
+    Yawn,
     /// 묶음 안의 맨 앞 단추. 처음 단추들로 돌아간다.
     Back,
 }
 
 impl Pick {
     /// 모든 단추.
-    pub const ALL: [Pick; 9] = [
+    pub const ALL: [Pick; 13] = [
         Pick::Invite,
         Pick::Send,
         Pick::Memos,
         Pick::Links,
+        Pick::Together,
+        Pick::Wave,
+        Pick::Stretch,
+        Pick::Yawn,
         Pick::Back,
         Pick::Chzzk,
         Pick::Youtube,
@@ -99,7 +108,7 @@ impl Pick {
 
     /// 누르면 안에 든 단추들이 나오는 묶음 단추인가.
     pub fn is_group(self) -> bool {
-        matches!(self, Pick::Links)
+        matches!(self, Pick::Links | Pick::Together)
     }
 
     /// 마우스를 올리면 뜨는 이름.
@@ -113,6 +122,10 @@ impl Pick {
             Pick::Cafe => "카페",
             Pick::Settings => "설정",
             Pick::Links => "바로 가기",
+            Pick::Together => "다 같이",
+            Pick::Wave => "파도 점프",
+            Pick::Stretch => "기지개",
+            Pick::Yawn => "하품",
             Pick::Back => "되돌아가기",
         }
     }
@@ -128,12 +141,16 @@ impl Pick {
             Pick::Cafe => "cafe",
             Pick::Settings => "settings",
             Pick::Links => "links",
+            Pick::Together => "together",
+            Pick::Wave => "wave",
+            Pick::Stretch => "stretch",
+            Pick::Yawn => "yawn",
             Pick::Back => "back",
         }
     }
 
     /// 아이콘 글꼴(Segoe MDL2 Assets)의 글자: 사람과 더하기, 문 밖으로 나가는 화살표, 줄 목록, 톱니바퀴,
-    /// 사슬 고리, 왼쪽 화살표.
+    /// 사슬 고리, 사람 여럿, 왼쪽 화살표.
     fn glyph(self) -> Option<&'static str> {
         match self {
             Pick::Invite => Some("\u{E8FA}"),
@@ -141,7 +158,9 @@ impl Pick {
             Pick::Memos => Some("\u{E8FD}"),
             Pick::Settings => Some("\u{E713}"),
             Pick::Links => Some("\u{E71B}"),
+            Pick::Together => Some("\u{E716}"),
             Pick::Back => Some("\u{E72B}"),
+            Pick::Wave | Pick::Stretch | Pick::Yawn => None,
             Pick::Chzzk | Pick::Youtube | Pick::Cafe => None,
         }
     }
@@ -152,7 +171,17 @@ impl Pick {
             Pick::Chzzk => Some(include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/res/icons/chzzk.png"))),
             Pick::Youtube => Some(include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/res/icons/youtube.png"))),
             Pick::Cafe => Some(include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/res/icons/naver_cafe.png"))),
-            Pick::Invite | Pick::Send | Pick::Memos | Pick::Settings | Pick::Links | Pick::Back => None,
+            _ => None,
+        }
+    }
+
+    /// 그림 대신 단추에 적는 짧은 글. 행동은 알맞은 아이콘이 없어 글로 적는다.
+    fn caption(self) -> Option<&'static str> {
+        match self {
+            Pick::Wave => Some("파도"),
+            Pick::Stretch => Some("기지개"),
+            Pick::Yawn => Some("하품"),
+            _ => None,
         }
     }
 }
@@ -479,6 +508,9 @@ impl Fan {
                 let side = ((PICTURE * scale).round() as usize).clamp(1, SOURCE);
                 let small = self.pictures.entry((pick, side)).or_insert_with(|| shrink(pixels, SOURCE, side));
                 surface.picture(small, side as i32, center, ink);
+            } else if let Some(caption) = pick.caption() {
+                let block = self.label(caption, 10.5, true, scale);
+                surface.stamp(block, center, ROSE, ink);
             }
             // 묶음 단추에는 안에 단추가 더 있다는 점 셋을 아래에 찍는다.
             if pick.is_group() {
@@ -774,9 +806,12 @@ mod tests {
         let [blue, green, red, alpha] = at(cafe, 40, 60);
         assert!(green > 150 && red < 60 && blue < 140 && alpha == 255, "{:?}", at(cafe, 40, 60));
         assert_eq!(at(cafe, 95, 95)[3], 0);
-        // 글자로 그리는 단추에는 그림이 없다. 단추마다 글자나 그림 가운데 하나가 있다.
+        // 글자로 그리는 단추에는 그림이 없다. 단추마다 아이콘 글자, 그림, 짧은 글 가운데 꼭 하나가 있다.
         assert!(source(Pick::Invite).is_none() && Pick::Invite.glyph().is_some());
-        assert!(Pick::ALL.iter().all(|pick| pick.glyph().is_some() != pick.picture().is_some()));
+        for pick in Pick::ALL {
+            let kinds = [pick.glyph().is_some(), pick.picture().is_some(), pick.caption().is_some()];
+            assert_eq!(kinds.iter().filter(|&&kind| kind).count(), 1, "{}", pick.name());
+        }
     }
 
     #[test]
