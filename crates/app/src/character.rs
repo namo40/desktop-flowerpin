@@ -290,6 +290,11 @@ impl Character {
         &self.window
     }
 
+    /// 발바닥에서 머리 꼭대기까지(화면 px). 서 있을 때의 키다.
+    pub fn height(&self) -> f64 {
+        self.layout.crown
+    }
+
     /// 있는 모니터를 가리키는 값(모니터의 왼쪽 위). 같은 값이면 같은 모니터다.
     pub fn monitor_key(&self, stage: &Stage) -> (i32, i32) {
         let area = self.monitor(stage).area;

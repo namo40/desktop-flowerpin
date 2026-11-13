@@ -188,6 +188,9 @@ pub enum Command {
     Hello,
     /// `foreground`: 맨 앞 창이 바뀌었다는 알림을 받은 것으로 친다. 다른 창을 누를 때 하는 일을 확인한다.
     Foreground,
+    /// `cursor x y`: 마우스 커서가 화면의 그 자리에 있는 것으로 친다. `cursor off`면 다시 진짜 커서를 본다.
+    /// 커서 따라오기를 진짜 마우스를 움직이지 않고 확인한다.
+    Cursor(Option<(i32, i32)>),
     /// `hide 초`: 메뉴에서 "잠깐 숨기기"를 고른 것과 같다. 그 시간이 지나면 다시 보인다.
     Hide(f64),
     /// `menu 번호`: 메뉴에서 그 항목을 고른 것으로 친다. 번호는 [`crate::tray::MenuItem`]의 값이다.
@@ -415,6 +418,8 @@ pub fn parse_script(text: &str) -> Result<Vec<Step>, String> {
             (Some("display"), 3) if words[2] == "on" || words[2] == "off" => Command::Dark(words[2] == "off"),
             (Some("hello"), 2) => Command::Hello,
             (Some("foreground"), 2) => Command::Foreground,
+            (Some("cursor"), 3) if words[2] == "off" => Command::Cursor(None),
+            (Some("cursor"), 4) => Command::Cursor(Some((number(2)? as i32, number(3)? as i32))),
             (Some("hide"), 3) => Command::Hide(number(2)?),
             (Some("menu"), 3) => Command::Menu(number(2)? as u32),
             (Some("target"), 3) => Command::Target(number(2)? as usize),
@@ -961,6 +966,11 @@ mod tests {
         let commands: Vec<Command> = crowd.iter().map(|step| step.command.clone()).collect();
         assert_eq!(commands, [Command::Menu(7), Command::Target(2), Command::Crowd]);
         assert_eq!(parse_script("1 foreground").unwrap()[0].command, Command::Foreground);
+        let cursor = parse_script("1 cursor -1200 1300; 2 cursor off").unwrap();
+        assert_eq!(
+            (&cursor[0].command, &cursor[1].command),
+            (&Command::Cursor(Some((-1200, 1300))), &Command::Cursor(None))
+        );
         let dark = parse_script("1 display off; 2 display on").unwrap();
         assert_eq!((&dark[0].command, &dark[1].command), (&Command::Dark(true), &Command::Dark(false)));
         let quiet = parse_script("1 fullscreen on; 2 fullscreen off; 3 lock on; 4 lock off; 5 hide 2.5").unwrap();

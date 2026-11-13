@@ -67,6 +67,13 @@ const QUIT_LIMIT: Duration = Duration::from_secs(8);
 const SCAN_IN_AIR: Duration = Duration::from_millis(100);
 const SCAN_ON_PERCH: Duration = Duration::from_millis(250);
 const SCAN_ON_FLOOR: Duration = Duration::from_millis(5000);
+/// 커서 따라오기: 커서를 보는 간격, 머물렀다고 칠 시간, 그동안 움직여도 되는 거리(px).
+const CURSOR_EVERY: Duration = Duration::from_millis(250);
+const CURSOR_DWELL: Duration = Duration::from_millis(1500);
+const CURSOR_SLOP: i32 = 24;
+/// 커서가 꽃핀 발밑에서 키의 이만큼 배 높이 안에 있어야 "바닥 가까이"로 친다.
+const CURSOR_BAND: f64 = 2.0;
+
 /// 설정 창의 "지금 쓰는 자원"을 고치는 간격.
 const USAGE_EVERY: Duration = Duration::from_secs(1);
 /// 설정 창 정보 탭에 보여 줄 그림의 한 변(px).
@@ -189,6 +196,8 @@ struct Dev {
     foregrounds: u32,
     /// `--watch-stack`이면 꽃핀끼리의 앞뒤가 잠깐이라도 거꾸로 되는지 센다.
     stack: Option<dev::StackWatch>,
+    /// 스크립트가 정한 커서 자리. 있으면 진짜 커서 대신 쓴다.
+    cursor: Option<(i32, i32)>,
     snaps: u32,
     deadline: Option<Instant>,
     /// 실행하면서 보고서에 적을 줄.
@@ -254,6 +263,9 @@ pub struct App {
     screen: Screen,
     screen_forced: bool,
     next_screen_check: Instant,
+    /// 커서 따라오기: 다음에 커서를 볼 때와, 커서가 머물기 시작한 자리·시각·그 자리로 꽃핀을 불렀는지.
+    next_cursor_check: Instant,
+    dwell: Option<((i32, i32), Instant, bool)>,
     /// 화면이 잠겨 있는가, PC가 절전에 들어갔는가.
     locked: bool,
     asleep: bool,
@@ -479,6 +491,8 @@ impl App {
             screen: Screen::Free,
             screen_forced: false,
             next_screen_check: started,
+            next_cursor_check: started,
+            dwell: None,
             locked: false,
             asleep: false,
             dark: false,
@@ -501,6 +515,7 @@ impl App {
                 scans: Vec::new(),
                 foregrounds: 0,
                 stack: options.watch_stack.then(dev::StackWatch::default),
+                cursor: None,
                 snaps: 0,
                 deadline: options.run_for.map(|d| started + d),
                 notes,
@@ -713,6 +728,62 @@ impl App {
                 self.note(now, format!("따라 하기: {leader}번의 {}", show.label()));
                 self.cues.push(cue);
             }
+        }
+    }
+
+    /// 커서 따라오기를 할 때인가. 설정에서 켰고, 꽃핀이 보이고, 방해하면 안 되는 때가 아닐 때다.
+    fn watches_cursor(&self) -> bool {
+        self.settings.is_on(Key::FollowCursor) && !self.out_of_sight && !self.is_paused() && self.quitting.is_none()
+    }
+
+    /// 커서가 바닥 가까이에 머물면, 가로로 가장 가까운 꽃핀이 그 아래로 걸어온다.
+    ///
+    /// 꽃핀이 선 곳(바닥이나 창 윗변)에서 키의 두 배 높이 안에 커서가 1.5초 머물러야 한다. 한 번 부르면 커서가
+    /// 다시 움직였다 머물 때까지 부르지 않는다. 쉬거나 걷는 꽃핀만 오고, 자거나 다른 행동을 하는 꽃핀은 오지 않는다.
+    /// 올 꽃핀이 없으면 커서가 머무는 동안 계속 살핀다. 하던 행동을 마친 꽃핀이 그때 온다.
+    fn watch_cursor(&mut self, now: Instant) {
+        if !self.watches_cursor() {
+            self.dwell = None;
+            return;
+        }
+        if now < self.next_cursor_check {
+            return;
+        }
+        self.next_cursor_check = now + CURSOR_EVERY;
+        let cursor = self.dev.cursor.unwrap_or_else(win::cursor_position);
+        let still =
+            self.dwell.is_some_and(|(at, _, _)| (at.0 - cursor.0).abs().max((at.1 - cursor.1).abs()) <= CURSOR_SLOP);
+        if !still {
+            self.dwell = Some((cursor, now, false));
+            return;
+        }
+        let Some((at, since, false)) = self.dwell else { return };
+        if now.saturating_duration_since(since) < CURSOR_DWELL {
+            return;
+        }
+        let monitor = self.stage.nearest(cursor.0, cursor.1);
+        let monitor = (monitor.area.x, monitor.area.y);
+        let members = self.members();
+        let (x, y) = (cursor.0 as f64, cursor.1 as f64);
+        let near = |index: &usize| {
+            let character = &self.characters[*index];
+            let foot = character.actor().position().1;
+            let member = &members[*index];
+            member.free
+                && member.can_jump
+                && member.monitor == monitor
+                && y <= foot
+                && y >= foot - CURSOR_BAND * character.height()
+        };
+        let candidates = (0..self.characters.len()).filter(near);
+        let nearest = candidates.min_by(|&a, &b| (members[a].x - x).abs().total_cmp(&(members[b].x - x).abs()));
+        if let Some(index) = nearest
+            && self.characters[index].actor_mut().come_to(x)
+        {
+            self.characters[index].wake(now);
+            self.note(now, format!("커서 따라오기: {index}번이 x {} 쪽으로", cursor.0));
+            // 한 번 불렀으면 커서가 움직였다 다시 머물 때까지 부르지 않는다.
+            self.dwell = Some((at, since, true));
         }
     }
 
@@ -1801,6 +1872,7 @@ impl App {
 
         // 9. 같이 하기에서 때가 된 행동을 시키고, 때가 된 꽃핀의 시간을 흘리고 화면에 넘긴다. 한 명도 남지 않으면 끝낸다.
         self.play_cues(now);
+        self.watch_cursor(now);
         if !self.tick_characters(now)? {
             return Ok(Flow::Quit);
         }
@@ -2287,6 +2359,7 @@ impl App {
         sooner(self.guests_due());
         sooner(self.calls.next);
         sooner(self.cues.iter().map(|cue| cue.at).min());
+        sooner(self.watches_cursor().then_some(self.next_cursor_check));
         sooner(self.next_wave.filter(|_| !self.out_of_sight));
         sooner(self.dev.deadline);
         // 자원을 재기 시작할 때를 놓치지 않는다. 숨겨 둔 동안에는 달리 깨어날 일이 없다.
@@ -2563,6 +2636,7 @@ impl App {
             dev::Command::Dark(dark) => self.dark = dark,
             dev::Command::Hello => self.blink_all(now),
             dev::Command::Foreground => self.foreground_changed(now),
+            dev::Command::Cursor(at) => self.dev.cursor = at,
             dev::Command::Hide(seconds) => {
                 self.hide = Hide::Until(now + Duration::from_secs_f64(seconds));
             }

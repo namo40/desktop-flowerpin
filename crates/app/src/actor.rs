@@ -96,6 +96,8 @@ const RIDE_SMOOTH: f64 = 0.3;
 const SHAKE_LEG: f64 = 24.0;
 const SHAKE_GAP: f64 = 0.6;
 const SHAKE_TURNS: u32 = 3;
+/// 커서 아래로 걸어갈 때, 그 자리에서 이만큼(px) 안에 오면 멈춘다.
+const ARRIVE: f64 = 24.0;
 /// 다른 꽃핀의 머리 위에서 쉬기를 마쳤을 때 뛰어내릴 확률.
 const HEAD_HOP_CHANCE: f64 = 0.25;
 /// 머리를 문지른 거리가 이만큼(px) 쌓이면 쓰다듬은 것으로 친다. 이 시간(초) 동안 문지르지 않으면 쌓인 거리를 버린다.
@@ -386,6 +388,8 @@ pub struct Actor {
     home: f64,
     /// 걷고 있는 방향.
     walk: Option<Dir>,
+    /// 걸어가서 멈출 자리(x). 커서 아래로 걸어갈 때만 있다.
+    goal: Option<f64>,
     /// idle로 잠깐 선 뒤에 걸을 방향.
     turn_to: Option<Dir>,
     /// 지금 하는 일(쉬기, 걷기, 잠깐 서기)을 마칠 때까지 남은 시간(초).
@@ -451,6 +455,7 @@ impl Actor {
             scale,
             home: x,
             walk: None,
+            goal: None,
             turn_to: None,
             wait,
             drag: (x, y),
@@ -496,6 +501,25 @@ impl Actor {
     /// 올라서 있는 창. 바닥에 있거나 떠 있으면 `None`이다.
     pub fn support(&self) -> Option<isize> {
         self.on.map(|(window, _)| window)
+    }
+
+    /// 가로 자리 `x`로 걸어가서 멈춘다. 바닥이나 창 위에서 쉬거나 걷고 있을 때만 하고, 그러면 `true`다.
+    /// 이미 그 자리 가까이에 있거나, 다른 꽃핀의 머리 위에 있거나, 할 일을 고른 뒤면 하지 않는다.
+    /// 디딘 곳의 끝까지 가도 닿지 않으면 끝에서 멈춘다.
+    pub fn come_to(&mut self, x: f64) -> bool {
+        let arrive = ARRIVE * self.scale;
+        if self.mode != Mode::Ground || self.leaving || self.on_head() || self.pending.is_some() {
+            return false;
+        }
+        if (x - self.x).abs() <= arrive {
+            return false;
+        }
+        self.goal = Some(x);
+        self.walk = Some(if x < self.x { Dir::West } else { Dir::East });
+        self.turn_to = None;
+        // 닿을 때까지 걷는다. 걷는 시간으로는 멈추지 않는다.
+        self.wait = f64::INFINITY;
+        true
     }
 
     /// 다른 꽃핀의 머리 위에 서 있는가.
@@ -1371,8 +1395,14 @@ impl Actor {
 
         self.wait -= dt;
         if let Some(dir) = self.walk {
-            if self.at_edge(dir, around) {
+            if self.goal.is_some_and(|goal| (goal - self.x) * dir.sign() <= ARRIVE * self.scale) {
+                // 가려던 자리에 왔다. 멈춰 쉰다.
                 self.walk = None;
+                self.goal = None;
+                self.wait = self.rng.range(REST);
+            } else if self.at_edge(dir, around) {
+                self.walk = None;
+                self.goal = None;
                 if self.on.is_some() && self.habits.whim_rate > 0.0 && self.rng.chance(HOP_AT_END) {
                     // 창 윗변의 끝이다. 돌아서지 않고 바깥쪽으로 뛰어내리기도 한다.
                     self.hop_dir = Some(dir);
@@ -1384,6 +1414,7 @@ impl Actor {
                 }
             } else if self.wait <= 0.0 {
                 self.walk = None;
+                self.goal = None;
                 if self.rng.chance(TURN_CHANCE) {
                     self.turn_to = Some(dir.opposite());
                     self.wait = self.rng.range(TURN_PAUSE);
@@ -2456,6 +2487,44 @@ mod tests {
             let seen = run(&mut actor, &motions, &among(&[WINDOW]), 30.0);
             assert!(names(&seen).iter().any(|name| !["idle", "idle2", "walk_w", "walk_e"].contains(name)), "{seen:?}");
         }
+    }
+
+    #[test]
+    fn walks_over_to_a_spot_and_stops_there() {
+        let motions = sample();
+        let mut actor = Actor::stand(&motions, 1000.0, AROUND.floor, 1.0, 5);
+        actor.set_habits(Habits { roam: false, whim_rate: 0.0 });
+        assert!(actor.come_to(1300.0));
+        let seen = run(&mut actor, &motions, &AROUND, 10.0);
+        assert_eq!(names(&seen)[..3], ["idle2", "walk_e", "idle2"]);
+        assert!((actor.position().0 - 1300.0).abs() <= ARRIVE + 2.0, "{:?}", actor.position());
+        // 이미 가까이에 있으면 가지 않는다.
+        assert!(!actor.come_to(actor.position().0 + 10.0));
+        // 왼쪽으로도 간다. 돌아다니는 꽃핀도 걷던 것을 그만두고 간다.
+        actor.set_habits(Habits::default());
+        assert!(actor.come_to(700.0));
+        run(&mut actor, &motions, &AROUND, 0.1);
+        assert_eq!(actor.motion(), motions.walk_w);
+        for _ in 0..(30.0 / STEP) as usize {
+            actor.update(STEP, &motions, &AROUND);
+            if actor.motion() != motions.walk_w {
+                break;
+            }
+        }
+        assert!((actor.position().0 - 700.0).abs() <= ARRIVE + 2.0, "{:?}", actor.position());
+        // 디딘 창의 끝까지 가도 닿지 않으면 끝에서 멈춘다. 머리 위에 있거나 다른 행동을 하면 가지 않는다.
+        let mut on_window = standing_on(&motions, WINDOW, 1000.0, 5);
+        on_window.set_habits(Habits { roam: false, whim_rate: 0.0 });
+        assert!(on_window.come_to(1500.0));
+        run(&mut on_window, &motions, &among(&[WINDOW]), 20.0);
+        assert_eq!(
+            (on_window.mode(), on_window.support(), on_window.position().0),
+            (Mode::Ground, Some(7), WINDOW.right)
+        );
+        assert!(!standing_on_head(&motions, 5).come_to(1500.0));
+        let mut busy = Actor::stand(&motions, 1000.0, AROUND.floor, 1.0, 5);
+        busy.start(Whim::Stretch, &motions);
+        assert!(!busy.come_to(1500.0));
     }
 
     #[test]
