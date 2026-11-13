@@ -104,6 +104,8 @@ pub enum MenuItem {
     Focus(usize),
     /// 쉬는 시간 알림을 그만둔다.
     FocusStop,
+    /// 방송 촬영용 창을 연다.
+    Studio,
 }
 
 impl MenuItem {
@@ -123,6 +125,7 @@ impl MenuItem {
             MenuItem::Unhide => 13,
             MenuItem::MemoList => 14,
             MenuItem::Update => 15,
+            MenuItem::Studio => 16,
             MenuItem::CallMany(index) => 20 + index as u32,
             MenuItem::CallFill => 23,
             MenuItem::Together(index) => 30 + index as u32,
@@ -148,6 +151,7 @@ impl MenuItem {
             13 => Some(MenuItem::Unhide),
             14 => Some(MenuItem::MemoList),
             15 => Some(MenuItem::Update),
+            16 => Some(MenuItem::Studio),
             20..=22 => Some(MenuItem::CallMany((id - 20) as usize)),
             23 => Some(MenuItem::CallFill),
             30.. if ((id - 30) as usize) < TOGETHER.len() => Some(MenuItem::Together((id - 30) as usize)),
@@ -350,6 +354,7 @@ fn build(state: &MenuState) -> Option<HMENU> {
         AppendMenuW(menu, MF_SEPARATOR, 0, null());
         AppendMenuW(menu, MF_POPUP, links as usize, wide("바로 가기").as_ptr());
         // 이름 끝의 "..."은 창이 열린다는 뜻이다.
+        add(menu, MenuItem::Studio, "방송 촬영용 창...");
         add(menu, MenuItem::Settings, "설정...");
         add(menu, MenuItem::Quit, "끝내기");
         Some(menu)
@@ -856,6 +861,7 @@ mod tests {
                 "잠깐 숨기기",
                 "-",
                 "바로 가기",
+                "방송 촬영용 창...",
                 "설정...",
                 "끝내기"
             ]
@@ -863,7 +869,10 @@ mod tests {
         // 숨겨 둔 동안에는 "잠깐 숨기기" 자리에 "다시 보이기"가 오고, "다 같이"는 흐리다.
         let hidden = MenuState { hidden: true, ..state(false, false) };
         assert_eq!(names(&hidden)[3], "(다 같이)");
-        assert_eq!(names(&hidden)[7..], ["-", "다시 보이기", "-", "바로 가기", "설정...", "끝내기"]);
+        assert_eq!(
+            names(&hidden)[7..],
+            ["-", "다시 보이기", "-", "바로 가기", "방송 촬영용 창...", "설정...", "끝내기"]
+        );
         // 쉬는 시간 알림이 돌고 있으면 줄의 이름이 지금의 상태다.
         let timing = MenuState { focus: Some("쉬는 중 (3분 남음)".to_string()), ..state(true, true) };
         assert_eq!(names(&timing)[5], "쉬는 중 (3분 남음)");
@@ -929,13 +938,16 @@ mod tests {
         items.extend((0..HIDES.len()).map(MenuItem::Hide));
         items.extend((0..LINKS.len()).map(MenuItem::Link));
         items.extend(Show::ALL.map(MenuItem::Show));
+        items.extend((0..TOGETHER.len()).map(MenuItem::Together));
+        items.extend((0..focus::CHOICES.len()).map(MenuItem::Focus));
+        items.extend([MenuItem::FocusStop, MenuItem::Studio]);
         for (n, item) in items.iter().enumerate() {
             // 0은 "아무것도 고르지 않음"이다.
             assert_ne!(item.id(), 0);
             assert_eq!(MenuItem::from_id(item.id()), Some(*item));
             assert!(items[..n].iter().all(|other| other.id() != item.id()), "{item:?}");
         }
-        for id in [0, 16, 19, 24, 99, 100 + LINKS.len() as u32, 199, 200 + Show::ALL.len() as u32] {
+        for id in [0, 17, 19, 24, 29, 33, 42, 48, 50, 99, 100 + LINKS.len() as u32, 199, 200 + Show::ALL.len() as u32] {
             assert_eq!(MenuItem::from_id(id), None, "{id}");
         }
     }

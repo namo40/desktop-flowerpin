@@ -46,6 +46,11 @@ pub struct State {
     pub update_latest: Option<String>,
     /// 말풍선으로 알린 새 버전. 같은 버전을 또 알리지 않는 데 쓴다.
     pub update_announced: Option<String>,
+    /// 방송 촬영용 창을 열어 두었는가. 열어 둔 채 끄면 다시 켤 때 연다.
+    pub studio_open: bool,
+    /// 방송 촬영용 창의 자리와 크기(창 바깥 기준, x, y, 너비, 높이)와 바탕색(0xRRGGBB).
+    pub studio_place: Option<(i32, i32, i32, i32)>,
+    pub studio_color: Option<u32>,
 }
 
 impl State {
@@ -68,6 +73,15 @@ impl State {
                 text.push_str(&format!(",\n  \"{name}\": {}", Value::String(version.clone())));
             }
         }
+        if self.studio_open {
+            text.push_str(",\n  \"studio_open\": true");
+        }
+        if let Some((x, y, w, h)) = self.studio_place {
+            text.push_str(&format!(",\n  \"studio_place\": {{ \"x\": {x}, \"y\": {y}, \"w\": {w}, \"h\": {h} }}"));
+        }
+        if let Some(color) = self.studio_color {
+            text.push_str(&format!(",\n  \"studio_color\": {color}"));
+        }
         text.push_str("\n}\n");
         text
     }
@@ -85,6 +99,16 @@ impl State {
             update_checked: object.get("update_checked").and_then(Value::as_i64),
             update_latest: object.get("update_latest").and_then(Value::as_str).map(str::to_string),
             update_announced: object.get("update_announced").and_then(Value::as_str).map(str::to_string),
+            studio_open: object.get("studio_open").and_then(Value::as_bool).unwrap_or(false),
+            studio_place: {
+                let side =
+                    |name: &str| object.get("studio_place")?.get(name)?.as_i64().and_then(|v| i32::try_from(v).ok());
+                match (side("x"), side("y"), side("w"), side("h")) {
+                    (Some(x), Some(y), Some(w), Some(h)) if w > 0 && h > 0 => Some((x, y, w, h)),
+                    _ => None,
+                }
+            },
+            studio_color: object.get("studio_color").and_then(Value::as_u64).map(|c| (c & 0xFF_FFFF) as u32),
         })
     }
 }
@@ -259,8 +283,14 @@ mod tests {
             update_checked: Some(1_794_000_000),
             update_latest: Some("0.2.0".to_string()),
             update_announced: Some("0.2.0".to_string()),
+            studio_open: true,
+            studio_place: Some((-1900, 500, 656, 399)),
+            studio_color: Some(0xFF00FF),
         };
         assert_eq!(State::from_json(&state.to_json()), Some(state.clone()));
+        // 방송 촬영용 창의 크기가 0이면 자리가 없는 것으로 친다.
+        let flat = state.to_json().replace("\"w\": 656", "\"w\": 0");
+        assert_eq!(State::from_json(&flat).map(|state| state.studio_place), Some(None));
         // 새 버전을 아직 알리지 않았으면 그 줄만 빠진다.
         let unannounced = State { update_announced: None, ..state };
         assert!(!unannounced.to_json().contains("update_announced"));

@@ -80,12 +80,14 @@ pub struct CharacterWindow {
     pos: (i32, i32),
     /// 마지막으로 화면에 넘긴 위치. 아직 한 번도 넘기지 않았으면 `None`.
     presented_pos: Option<(i32, i32)>,
+    /// 화면에 내보내지 않는다. 그림 버퍼만 쓰고, 창은 늘 숨어 있다(방송 촬영용 창 안의 꽃핀).
+    offscreen: bool,
 }
 
 impl CharacterWindow {
     /// 크기가 `width`×`height`이고 왼쪽 위가 화면 `(x, y)`에 오는 창을 만든다. 처음에는 보이지 않는다.
-    /// `topmost`면 다른 창들보다 늘 위에 있다.
-    pub fn new(width: i32, height: i32, x: i32, y: i32, topmost: bool) -> CharacterWindow {
+    /// `topmost`면 다른 창들보다 늘 위에 있다. `offscreen`이면 화면에 내보내지 않고 그림 버퍼에만 그린다.
+    pub fn new(width: i32, height: i32, x: i32, y: i32, topmost: bool, offscreen: bool) -> CharacterWindow {
         register_class();
         let class = wide(CLASS_NAME);
         // 작업표시줄과 Alt+Tab에 나오지 않고, 눌러도 다른 창의 포커스를 빼앗지 않는다.
@@ -136,6 +138,7 @@ impl CharacterWindow {
             height,
             pos: (x, y),
             presented_pos: None,
+            offscreen,
         }
     }
 
@@ -169,6 +172,9 @@ impl CharacterWindow {
 
     /// 창을 숨기거나 다시 보인다. 다시 보일 때도 다른 창의 포커스를 빼앗지 않는다.
     pub fn set_visible(&self, visible: bool) {
+        if self.offscreen {
+            return;
+        }
         unsafe { ShowWindow(self.hwnd, if visible { SW_SHOWNOACTIVATE } else { SW_HIDE }) };
     }
 
@@ -229,6 +235,11 @@ impl CharacterWindow {
         let moved = self.presented_pos != Some(self.pos);
         let dirty = if first { Rect::new(0, 0, self.width, self.height) } else { dirty.clip(self.width, self.height) };
         if !moved && dirty.is_empty() {
+            return;
+        }
+        if self.offscreen {
+            // 화면에 내보내지 않는다. 버퍼에 그려진 것을 다른 창이 가져다 쓴다.
+            self.presented_pos = Some(self.pos);
             return;
         }
 

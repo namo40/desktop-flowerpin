@@ -29,6 +29,7 @@ use crate::desktop::Desktop;
 use crate::dev;
 use crate::focus::{self, Focus, Turn};
 use crate::frames::Frames;
+use crate::geom::Rect;
 use crate::links::{self, LINKS};
 use crate::live::{self, Event, Live, Reply, Tracker, View};
 use crate::memos::{COUNT_LIMIT, Memo, Memos, SNOOZE_MINUTES};
@@ -39,6 +40,7 @@ use crate::settings::{CROWD_MAX, Key, Settings};
 use crate::settings_window::{self, DialogEvent, SettingsWindow, TAB_NAMES};
 use crate::stage::Stage;
 use crate::store::{self, State, Store};
+use crate::studio::{self, Studio, StudioAsk, StudioEvent, StudioPick};
 use crate::together::{self, Cue, Member};
 use crate::tray::{self, MenuItem, Tray, TrayEvent};
 use crate::update;
@@ -147,6 +149,8 @@ pub enum Flow {
     ConfirmDelete(u64),
     /// 이 메모의 포스트잇을 오른쪽 클릭했다. 화면의 이 자리에 메뉴를 띄운다.
     MemoMenu(u64, i32, i32),
+    /// 방송 촬영용 창을 오른쪽 클릭했다. 화면의 이 자리에 메뉴를 띄운다.
+    StudioMenu(i32, i32),
 }
 
 /// 새 버전 확인에 딸린 것들.
@@ -285,6 +289,8 @@ pub struct App {
     rng: Rng,
     /// 돌고 있는 쉬는 시간 알림.
     focus: Option<Focus>,
+    /// 열려 있는 방송 촬영용 창.
+    studio: Option<Studio>,
     /// 방해하면 안 되는 동안 알릴 때가 된 메모들. 그때가 지나면 포스트잇을 울린다.
     rings_waiting: Vec<u64>,
     dev: Dev,
@@ -411,6 +417,7 @@ impl App {
             size_percent: if options.size != 100 { options.size } else { settings.size_percent() },
             dpi_override: options.dpi,
             topmost: settings.is_on(Key::AlwaysOnTop),
+            offscreen: false,
         };
         let mut play = VecDeque::new();
         for name in &options.play {
@@ -507,6 +514,7 @@ impl App {
             next_wave: None,
             rng: Rng::new(seed ^ 0x5EED),
             focus: None,
+            studio: None,
             rings_waiting: Vec::new(),
             dev: Dev {
                 pace: dev::Pace::default(),
@@ -563,6 +571,10 @@ impl App {
                 click: Click::Close,
                 tag: None,
             });
+        }
+        // 방송 촬영용 창을 열어 둔 채 껐으면 다시 연다.
+        if app.state.studio_open {
+            app.open_studio(false, started)?;
         }
         Ok(app)
     }
@@ -793,6 +805,168 @@ impl App {
         }
     }
 
+    /// 방송 촬영용 창을 연다. 열려 있으면 앞으로 가져온다. `activate`가 아니면 쓰던 창의 포커스를 빼앗지 않는다.
+    fn open_studio(&mut self, activate: bool, now: Instant) -> Result<(), PackError> {
+        if let Some(studio) = &self.studio {
+            if activate {
+                studio.bring_to_front();
+            }
+            return Ok(());
+        }
+        let cursor = win::cursor_position();
+        let work = self.stage.nearest(cursor.0, cursor.1).work;
+        let center = (work.x + work.w / 2, work.y + work.h / 2);
+        let place = self.state.studio_place.map(|(x, y, w, h)| Rect::new(x, y, w, h));
+        // 기억해 둔 자리가 지금의 모니터들 밖이면 쓰지 않는다.
+        let place = place.filter(|rect| {
+            let monitor = self.stage.nearest(rect.x + rect.w / 2, rect.y + 8).area;
+            monitor.x <= rect.x + rect.w / 2 && rect.x + rect.w / 2 < monitor.right() && monitor.y <= rect.y + 8
+        });
+        let color = self.state.studio_color.unwrap_or(studio::COLORS[0].1);
+        let first = self.motions.clip(self.motions.idle2).first_frame;
+        let small_size = tray::icon_size();
+        let (Ok(face), Ok(small_face)) =
+            (self.frames.portrait(first, ABOUT_ICON as usize), self.frames.portrait(first, small_size as usize))
+        else {
+            return Ok(());
+        };
+        let icons = (tray::make_icon(&face, ABOUT_ICON), tray::make_icon(&small_face, small_size));
+        let seed = self.next_seed();
+        let beat = self.started;
+        let studio = Studio::open(
+            (&mut self.frames, &self.motions),
+            self.look,
+            (place, center),
+            (color, activate),
+            icons,
+            (now, beat, seed),
+        )?;
+        self.note(now, studio.describe());
+        self.studio = Some(studio);
+        if !self.state.studio_open {
+            self.state.studio_open = true;
+            self.store.state_changed(now);
+        }
+        Ok(())
+    }
+
+    /// 방송 촬영용 창을 닫는다. 다시 켤 때는 열지 않는다.
+    fn close_studio(&mut self, now: Instant) {
+        if self.studio.take().is_some() {
+            self.note(now, "방송 촬영용 창을 닫음".to_string());
+        }
+        if self.state.studio_open {
+            self.state.studio_open = false;
+            self.store.state_changed(now);
+        }
+    }
+
+    /// 방송 촬영용 창에서 일어난 일을 처리한다. 메뉴를 띄워야 하면 그것을 돌려준다.
+    fn studio_events(&mut self, now: Instant) -> Option<Flow> {
+        let mut flow = None;
+        for event in studio::take_events() {
+            let Some(studio) = &mut self.studio else { continue };
+            match studio.handle(event, &self.motions, now) {
+                Some(StudioAsk::Menu(x, y)) => flow = Some(Flow::StudioMenu(x, y)),
+                Some(StudioAsk::Close) => self.close_studio(now),
+                Some(StudioAsk::Moved) => self.remember_studio(now),
+                None => {}
+            }
+        }
+        flow
+    }
+
+    /// 방송 촬영용 창의 자리와 크기, 바탕색을 기억해 둔다.
+    fn remember_studio(&mut self, now: Instant) {
+        let Some(studio) = &self.studio else { return };
+        let place = studio.place().map(|rect| (rect.x, rect.y, rect.w, rect.h)).or(self.state.studio_place);
+        let color = Some(studio.color());
+        if (place, color) != (self.state.studio_place, self.state.studio_color) {
+            (self.state.studio_place, self.state.studio_color) = (place, color);
+            self.store.state_changed(now);
+        }
+    }
+
+    /// 방송 촬영용 창의 메뉴를 띄울 창과 지금의 바탕색.
+    pub fn studio_menu(&self) -> Option<(HWND, u32)> {
+        self.studio.as_ref().map(|studio| (studio.hwnd(), studio.color()))
+    }
+
+    /// 방송 촬영용 창의 메뉴에서 고른 것을 한다. `custom`은 색 고르기 창에서 고른 색이다.
+    pub fn studio_picked(&mut self, picked: Option<StudioPick>, custom: Option<u32>, now: Instant) {
+        let color = match picked {
+            Some(StudioPick::Color(index)) => Some(studio::COLORS[index].1),
+            Some(StudioPick::Custom) => custom,
+            Some(StudioPick::Close) => {
+                self.close_studio(now);
+                return;
+            }
+            None => None,
+        };
+        if let (Some(color), Some(studio)) = (color, &mut self.studio) {
+            studio.set_color(color);
+            self.note(now, format!("방송 촬영용 창의 바탕색 #{color:06X}"));
+            self.remember_studio(now);
+        }
+    }
+
+    /// 확인용 스크립트의 `studio` 명령.
+    fn studio_script(&mut self, word: &str, numbers: &[f64], now: Instant) -> Result<(), PackError> {
+        let number = |i: usize| numbers.get(i).copied().unwrap_or(0.0);
+        if word == "open" {
+            return self.open_studio(false, now);
+        }
+        if word == "close" {
+            self.close_studio(now);
+            return Ok(());
+        }
+        let Some(studio) = &mut self.studio else { return Ok(()) };
+        // 꽃핀을 누를 자리: 발바닥에서 몸 높이의 절반쯤 위.
+        let (fx, fy) = studio.character_spot();
+        let body = (fx, fy - 60);
+        let mut asks = Vec::new();
+        match word {
+            "click" => {
+                asks.push(studio.script(StudioEvent::Press(body.0, body.1), &self.motions, now));
+                asks.push(studio.script(StudioEvent::Lift, &self.motions, now));
+            }
+            "drag" => {
+                asks.push(studio.script(StudioEvent::Press(body.0, body.1), &self.motions, now));
+                let to = (body.0 + number(0) as i32, body.1 + number(1) as i32);
+                asks.push(studio.script(StudioEvent::Move(to.0, to.1), &self.motions, now));
+            }
+            "lift" => asks.push(studio.script(StudioEvent::Lift, &self.motions, now)),
+            "rub" => {
+                let steps = (number(0) / 20.0).ceil().max(1.0) as i32;
+                let head = (fx, fy - 120);
+                for i in 0..=steps {
+                    let x = head.0 + if i % 2 == 0 { -10 } else { 10 };
+                    asks.push(studio.script(StudioEvent::Hover(x, head.1), &self.motions, now));
+                }
+            }
+            "color" => {
+                let index = (number(0) as usize).min(studio::COLORS.len() - 1);
+                studio.set_color(studio::COLORS[index].1);
+            }
+            "snap" => {
+                let line = studio.describe();
+                let (width, pixels) = studio.snapshot();
+                self.dev.snaps += 1;
+                if let Some(path) = &self.dev.options.settings_shot {
+                    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("shot");
+                    let file = path.with_file_name(format!("{stem}_studio_{}.bmp", self.dev.snaps));
+                    dev::write_bmp(&file, width, &pixels);
+                }
+                self.note(now, line);
+            }
+            _ => {}
+        }
+        if asks.contains(&Some(StudioAsk::Close)) {
+            self.close_studio(now);
+        }
+        Ok(())
+    }
+
     /// 쉬는 시간 알림을 [`focus::CHOICES`]의 `choice`번째로 시작한다. 떠 있던 쉬는 시간 말풍선은 치운다.
     fn start_focus(&mut self, focus: Focus, now: Instant) {
         if self.notices.cancel(FOCUS_TAG) {
@@ -869,6 +1043,9 @@ impl App {
         self.look.topmost = self.settings.is_on(Key::AlwaysOnTop);
         let look = self.look;
         self.characters.iter_mut().for_each(|character| character.set_look(look, now));
+        if let Some(studio) = &mut self.studio {
+            studio.set_look(look, now);
+        }
         if let Some(bubble) = &self.bubble {
             bubble.window().set_topmost(look.topmost);
         }
@@ -1815,6 +1992,9 @@ impl App {
                 }
             }
         }
+        if let Some(next) = self.studio_events(now) {
+            flow = next;
+        }
         for event in watch::take_events() {
             match event {
                 WatchEvent::Foreground => self.foreground_changed(now),
@@ -1969,6 +2149,12 @@ impl App {
     ///
     /// 메뉴나 물음 창이 떠 있는 동안에도 이것만은 계속 불린다.
     pub fn tick_characters(&mut self, now: Instant) -> Result<bool, PackError> {
+        // 방송 촬영용 창의 꽃핀은 숨겨 둔 동안(전체 화면 게임을 방송하는 중일 수 있다)에도 움직인다.
+        // 화면이 잠기거나 꺼졌을 때만 쉰다.
+        let paused = self.is_paused();
+        if let (Some(studio), false) = (&mut self.studio, paused) {
+            studio.tick(&mut self.frames, &self.motions, now + character::LOOKAHEAD)?;
+        }
         // 숨겨 둔 동안에는 꽃핀의 시간이 흐르지 않는다.
         if self.out_of_sight {
             return Ok(true);
@@ -2426,6 +2612,7 @@ impl App {
         sooner(self.cues.iter().map(|cue| cue.at).min());
         sooner(self.watches_cursor().then_some(self.next_cursor_check));
         sooner(self.focus.and_then(|focus| focus.due(self.away)));
+        sooner(self.studio.as_ref().filter(|_| !self.is_paused()).map(Studio::due));
         sooner(self.next_wave.filter(|_| !self.out_of_sight));
         sooner(self.dev.deadline);
         // 자원을 재기 시작할 때를 놓치지 않는다. 숨겨 둔 동안에는 달리 깨어날 일이 없다.
@@ -2477,6 +2664,7 @@ impl App {
             Some(MenuItem::Together(index)) => self.play_together(index, now),
             Some(MenuItem::Focus(choice)) => self.start_focus(Focus::start(choice, now), now),
             Some(MenuItem::FocusStop) => self.stop_focus(now),
+            Some(MenuItem::Studio) => self.open_studio(true, now)?,
             Some(MenuItem::Show(show)) => {
                 let target = self.menu_character();
                 if let Some(character) = self.characters.get_mut(target) {
@@ -2705,6 +2893,7 @@ impl App {
             dev::Command::Hello => self.blink_all(now),
             dev::Command::Foreground => self.foreground_changed(now),
             dev::Command::Cursor(at) => self.dev.cursor = at,
+            dev::Command::Studio(word, numbers) => self.studio_script(&word, &numbers, now)?,
             dev::Command::Focus(work, rest) => {
                 let lengths = (Duration::from_secs_f64(work), Duration::from_secs_f64(rest));
                 self.start_focus(Focus::with(0, lengths, now), now);

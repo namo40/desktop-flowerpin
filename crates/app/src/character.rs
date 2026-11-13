@@ -111,6 +111,8 @@ pub struct Look {
     pub dpi_override: Option<u32>,
     /// 다른 창들보다 늘 위에 있는다.
     pub topmost: bool,
+    /// 화면에 내보내지 않고 그림 버퍼에만 그린다. 방송 촬영용 창 안의 꽃핀이다([`crate::studio`]).
+    pub offscreen: bool,
 }
 
 impl Look {
@@ -260,7 +262,7 @@ impl Character {
     ) -> Result<Character, PackError> {
         let layout = Layout::new(frames, scale);
         let (x, y) = layout.window_position(actor.foot(motions));
-        let window = CharacterWindow::new(layout.size.0, layout.size.1, x, y, look.topmost);
+        let window = CharacterWindow::new(layout.size.0, layout.size.1, x, y, look.topmost, look.offscreen);
         let mut character = Character {
             window,
             layout,
@@ -575,7 +577,8 @@ impl Character {
         self.layout = Layout::new(frames, scale);
         self.actor.set_scale(scale.factor());
         let (x, y) = self.layout.window_position(self.actor.foot(motions));
-        self.window = CharacterWindow::new(self.layout.size.0, self.layout.size.1, x, y, self.look.topmost);
+        self.window =
+            CharacterWindow::new(self.layout.size.0, self.layout.size.1, x, y, self.look.topmost, self.look.offscreen);
         self.shown = None;
         self.drawn = Rect::EMPTY;
         self.raised = true;
