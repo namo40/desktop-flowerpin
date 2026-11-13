@@ -21,7 +21,11 @@
 !/crates/app/res/icons/naver_cafe.png
 !/crates/app/res/icons/youtube.png
 
-# README에 쓰는 화면 그림 셋도 예외로 둔다. 실행 중인 프로그램의 화면을 찍은 것이고, 그림 팩의 원본이 아니다.
+# README에 쓰는 화면 그림도 예외로 둔다. 실행 중인 프로그램의 화면을 찍은 것이고, 그림 팩의 원본이 아니다.
+!/docs/images/buttons-group.png
 !/docs/images/buttons.png
 !/docs/images/desktop.png
+!/docs/images/focus.png
 !/docs/images/hello.png
+!/docs/images/studio.png
+!/docs/images/together.png

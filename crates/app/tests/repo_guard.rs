@@ -2,7 +2,7 @@
 //!
 //! 한 번이라도 커밋되면 지워도 git 기록에서 되살릴 수 있다. 그래서 지금 git이 따라가는 파일뿐 아니라
 //! 지난 커밋에 있던 파일 이름까지 본다. 예외는 셋뿐이다: 대체 그림 팩을 두는 `placeholder/` 폴더,
-//! 바로 가기 단추에 쓰는 아이콘 셋([`LINK_ICONS`]), README에 쓰는 화면 그림 셋([`README_IMAGES`]).
+//! 바로 가기 단추에 쓰는 아이콘 셋([`LINK_ICONS`]), README에 쓰는 화면 그림들([`README_IMAGES`]).
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -39,10 +39,14 @@ const LINK_ICON_SIDE: u32 = 96;
 
 /// README에 쓰는 화면 그림과 그 너비, 높이. 실행 중인 프로그램의 화면을 찍은 것이다. 꽃핀이 찍혀 있지만
 /// 그림 팩의 원본은 아니어서 저장소에 둔다. 이 이름의 파일만, 이 크기일 때만 받는다.
-const README_IMAGES: [(&str, u32, u32); 3] = [
+const README_IMAGES: [(&str, u32, u32); 7] = [
+    ("docs/images/buttons-group.png", 660, 390),
     ("docs/images/buttons.png", 660, 390),
     ("docs/images/desktop.png", 1020, 780),
+    ("docs/images/focus.png", 1020, 420),
     ("docs/images/hello.png", 960, 500),
+    ("docs/images/studio.png", 756, 499),
+    ("docs/images/together.png", 1020, 430),
 ];
 const README_IMAGE_LIMIT: usize = 1024 * 1024;
 
@@ -121,7 +125,7 @@ fn icon_folder_holds_only_the_link_icons() {
     }
 }
 
-/// 화면 그림 폴더에는 정해 둔 그림 셋만 있고, README가 그 셋을 모두 쓴다. 다른 그림을 이 폴더에 넣어 검사를
+/// 화면 그림 폴더에는 정해 둔 그림만 있고, README가 그것을 모두 쓴다. 다른 그림을 이 폴더에 넣어 검사를
 /// 비켜 가지 못하게 한다.
 #[test]
 fn image_folder_holds_only_the_readme_images() {
