@@ -889,11 +889,9 @@ impl App {
         let work = self.screens.nearest(cursor.0, cursor.1).work;
         let center = (work.x + work.w / 2, work.y + work.h / 2);
         let place = self.state.studio_place.map(|(x, y, w, h)| Rect::new(x, y, w, h));
-        // 기억해 둔 자리가 지금의 모니터들 밖이면 쓰지 않는다.
-        let place = place.filter(|rect| {
-            let monitor = self.screens.nearest(rect.x + rect.w / 2, rect.y + 8).area;
-            monitor.x <= rect.x + rect.w / 2 && rect.x + rect.w / 2 < monitor.right() && monitor.y <= rect.y + 8
-        });
+        // 기억해 둔 자리가 지금의 모니터들 밖이면 쓰지 않는다. 제목 줄의 가운데가 어느 모니터 안에 있어야 창을 잡아
+        // 옮길 수 있다(그 모니터를 떼어 냈으면 위, 아래, 옆 어느 쪽으로든 밖일 수 있다).
+        let place = place.filter(|rect| self.screens.contains(rect.x + rect.w / 2, rect.y + 8));
         let color = self.state.studio_color.unwrap_or(studio::COLORS[0].1);
         let first = self.motions.clip(self.motions.idle2).first_frame;
         let small_size = tray::icon_size();
