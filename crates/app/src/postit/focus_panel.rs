@@ -143,6 +143,28 @@ impl Postits {
         }
     }
 
+    /// 모니터가 바뀌었을 때 부른다. 판이 화면 밖에 남았으면 가까운 화면 안으로 데려오고, 놓인 모니터의 화면
+    /// 배율을 따르게 한다. 포스트잇과 메모 목록 창이 하는 것과 같다.
+    pub(super) fn settle_focus(&mut self) {
+        let Some(panel) = &self.focus else { return };
+        let (wide, tall) = panel.size_px();
+        let middle = (panel.at.0 + wide / 2, panel.at.1 + tall / 2);
+        let mut at = panel.at;
+        if window::work_area(middle, false).is_none()
+            && let Some(work) = window::work_area(middle, true)
+        {
+            at = (at.0.clamp(work.0, (work.2 - wide).max(work.0)), at.1.clamp(work.1, (work.3 - tall).max(work.1)));
+        }
+        let scale = self.scale_at(((at.0 + wide / 2) as f32, (at.1 + tall / 2) as f32));
+        if let Some(panel) = &mut self.focus
+            && (panel.at != at || panel.scale != scale)
+        {
+            (panel.at, panel.scale) = (at, scale);
+            // 그려 넘기면서 창의 자리와 크기도 함께 맞춘다.
+            self.paint_focus();
+        }
+    }
+
     /// 판을 공용 버퍼에 그린다. 그린 그림의 크기(px)를 돌려준다.
     fn draw_focus(&mut self) -> Option<(i32, i32)> {
         self.focus.as_ref()?;

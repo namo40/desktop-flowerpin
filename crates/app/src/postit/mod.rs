@@ -378,6 +378,7 @@ impl Postits {
             self.settle(index);
         }
         self.settle_list();
+        self.settle_focus();
     }
 
     /// 화면의 한 점이 놓인 모니터의 화면 배율. 어느 모니터에도 들지 않으면 가장 가까운 모니터의 것이다.
