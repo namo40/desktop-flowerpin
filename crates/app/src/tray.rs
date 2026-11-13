@@ -722,7 +722,7 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -782,7 +782,7 @@ mod tests {
     }
 
     /// 메뉴의 줄을 위에서부터 읽는다. 줄마다 이름과, 흐린지다. 나누는 줄은 이름이 "-"다.
-    fn lines(menu: HMENU) -> Vec<(String, bool)> {
+    pub(crate) fn lines(menu: HMENU) -> Vec<(String, bool)> {
         use windows_sys::Win32::UI::WindowsAndMessaging::{
             GetMenuItemCount, GetMenuState, GetMenuStringW, MF_BYPOSITION,
         };
@@ -805,7 +805,7 @@ mod tests {
     }
 
     /// 흐린 줄의 이름을 괄호로 싼다.
-    fn marked(lines: Vec<(String, bool)>) -> Vec<String> {
+    pub(crate) fn marked(lines: Vec<(String, bool)>) -> Vec<String> {
         lines.into_iter().map(|(name, grayed)| if grayed { format!("({name})") } else { name }).collect()
     }
 

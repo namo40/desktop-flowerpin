@@ -103,10 +103,12 @@ fn run(options: dev::Options) -> Result<Vec<String>, PackError> {
             }
             Flow::StudioMenu(x, y) => {
                 // 방송 촬영용 창을 오른쪽 클릭했을 때의 메뉴. 색을 직접 고르면 Windows의 색 고르기 창을 띄운다.
-                let Some((owner, color)) = app.studio_menu() else { continue };
-                let picked = app::run_modal(&mut app, || studio::pick(owner, (x, y), color));
+                let Some((owner, state)) = app.studio_menu() else { continue };
+                let picked = app::run_modal(&mut app, || studio::pick(owner, (x, y), &state));
                 let custom = match picked {
-                    Some(studio::StudioPick::Custom) => app::run_modal(&mut app, || studio::choose_color(owner, color)),
+                    Some(studio::StudioPick::Custom) => {
+                        app::run_modal(&mut app, || studio::choose_color(owner, state.color))
+                    }
                     _ => None,
                 };
                 app.studio_picked(picked, custom, Instant::now())?;

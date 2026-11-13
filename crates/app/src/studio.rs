@@ -9,7 +9,8 @@
 //! 이 창이 그것들을 앞뒤 차례대로 바탕색 위에 옮겨 그린다.
 //!
 //! 창에서 일어난 일은 창 메시지를 받는 자리에서 처리하지 않고 [`StudioEvent`]로 적어 두기만 한다. 누르기, 끌기,
-//! 문지르기는 앱이 그 자리의 꽃핀을 찾아 바탕화면 꽃핀과 똑같이 다룬다.
+//! 문지르기, 꽃핀 위의 오른쪽 클릭은 앱이 그 자리의 꽃핀을 찾아 바탕화면 꽃핀과 똑같이 다룬다. 빈 곳을 오른쪽
+//! 클릭하면 꽃핀을 초대하고 돌려보내고 다 같이 시키고 바탕색을 고르는 메뉴가 뜬다.
 //!
 //! [`Look::offscreen`]: crate::character::Look::offscreen
 
@@ -30,17 +31,18 @@ use windows_sys::Win32::UI::HiDpi::GetDpiForWindow;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetCapture, ReleaseCapture, SetCapture};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     AdjustWindowRectEx, AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyIcon, DestroyMenu,
-    DestroyWindow, GA_ROOT, GetAncestor, GetClientRect, GetWindowRect, HICON, IDC_ARROW, IsIconic, LoadCursorW,
-    MF_CHECKED, MF_POPUP, MF_SEPARATOR, MF_STRING, MINMAXINFO, PostMessageW, RegisterClassExW, SW_SHOWNOACTIVATE,
-    SW_SHOWNORMAL, SendMessageW, SetForegroundWindow, ShowWindow, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON,
-    TrackPopupMenuEx, WM_CAPTURECHANGED, WM_CLOSE, WM_ERASEBKGND, WM_GETMINMAXINFO, WM_LBUTTONDOWN, WM_LBUTTONUP,
-    WM_MOUSEMOVE, WM_MOVE, WM_NULL, WM_PAINT, WM_RBUTTONUP, WM_SETICON, WM_SIZE, WNDCLASSEXW, WS_OVERLAPPEDWINDOW,
-    WindowFromPoint,
+    DestroyWindow, GA_ROOT, GetAncestor, GetClientRect, GetWindowRect, HICON, HMENU, IDC_ARROW, IsIconic, LoadCursorW,
+    MF_CHECKED, MF_GRAYED, MF_POPUP, MF_SEPARATOR, MF_STRING, MINMAXINFO, PostMessageW, RegisterClassExW,
+    SW_SHOWNOACTIVATE, SW_SHOWNORMAL, SendMessageW, SetForegroundWindow, ShowWindow, TPM_NONOTIFY, TPM_RETURNCMD,
+    TPM_RIGHTBUTTON, TrackPopupMenuEx, WM_CAPTURECHANGED, WM_CLOSE, WM_ERASEBKGND, WM_GETMINMAXINFO, WM_LBUTTONDOWN,
+    WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOVE, WM_NULL, WM_PAINT, WM_RBUTTONUP, WM_SETICON, WM_SIZE, WNDCLASSEXW,
+    WS_OVERLAPPEDWINDOW, WindowFromPoint,
 };
 
 use crate::character_window::CharacterWindow;
 use crate::geom::Rect;
 use crate::stage::{Monitor, Stage};
+use crate::tray::{CALLS, TOGETHER};
 use crate::win::{fatal, system_library, wide};
 
 /// 창의 제목. 방송 프로그램에서 창을 고를 때 이 이름으로 보인다.
@@ -59,6 +61,11 @@ const FLOOR_GAP: i32 = 14;
 const MENU_COLOR: u32 = 1;
 const MENU_CUSTOM: u32 = 9;
 const MENU_CLOSE: u32 = 10;
+const MENU_CALL: u32 = 11;
+const MENU_SEND: u32 = 12;
+const MENU_MANY: u32 = 20;
+const MENU_FILL: u32 = 29;
+const MENU_TOGETHER: u32 = 30;
 
 /// 창에서 일어난 일. 좌표는 화면 기준이다.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -89,11 +96,35 @@ pub enum StudioAsk {
 /// 메뉴에서 고른 것.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StudioPick {
+    /// 꽃핀을 한 명 초대한다.
+    Call,
+    /// [`CALLS`]의 몇 번째 수만큼 초대한다.
+    CallMany(usize),
+    /// 남은 자리만큼 초대한다.
+    CallFill,
+    /// 처음 꽃핀 한 명만 남기고 돌려보낸다.
+    SendAll,
+    /// 나와 있는 꽃핀들이 다 같이 한다. [`TOGETHER`]의 몇 번째인지다.
+    Together(usize),
     /// [`COLORS`]의 몇 번째 색.
     Color(usize),
     /// 색을 직접 고른다.
     Custom,
     Close,
+}
+
+/// 빈 곳을 오른쪽 클릭했을 때의 메뉴가 보여 줄 것.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MenuState {
+    /// 지금의 바탕색.
+    pub color: u32,
+    /// 꽃핀을 더 부를 수 있는가와, 먼저 온 꽃핀을 돌려보내지 않고 더 부를 수 있는 수.
+    pub can_call: bool,
+    pub room: usize,
+    /// 돌려보낼 꽃핀이 있는가.
+    pub can_send: bool,
+    /// 꽃핀을 숨겨 둔 중이다. "다 같이"가 흐리다.
+    pub hidden: bool,
 }
 
 thread_local! {
@@ -430,36 +461,80 @@ fn read_stage(hwnd: HWND) -> (Stage, (i32, i32)) {
     (Stage::new(vec![Monitor { area, work: area, dpi, primary: true }]), (origin.x, origin.y))
 }
 
-/// 창의 오른쪽 클릭 메뉴를 화면의 `(x, y)`에 띄우고, 고른 것을 돌려준다. 메뉴가 닫힐 때까지 돌아오지 않는다.
-pub fn pick(owner: HWND, (x, y): (i32, i32), color: u32) -> Option<StudioPick> {
+/// 빈 곳을 오른쪽 클릭했을 때의 메뉴를 만든다. 다 쓰면 [`DestroyMenu`]로 거둔다.
+fn build(state: &MenuState) -> Option<HMENU> {
     unsafe {
-        let menu = CreatePopupMenu();
-        let colors = CreatePopupMenu();
-        if menu.is_null() || colors.is_null() {
+        let [menu, calls, together, colors] = [(); 4].map(|_| CreatePopupMenu());
+        if [menu, calls, together, colors].iter().any(|menu| menu.is_null()) {
             return None;
         }
+        let add = |menu: HMENU, possible: bool, id: u32, label: &str| {
+            let flags = if possible { MF_STRING } else { MF_STRING | MF_GRAYED };
+            AppendMenuW(menu, flags, id as usize, wide(label).as_ptr());
+        };
+        let popup = |menu: HMENU, possible: bool, sub: HMENU, label: &str| {
+            let flags = if possible { MF_POPUP } else { MF_POPUP | MF_GRAYED };
+            AppendMenuW(menu, flags, sub as usize, wide(label).as_ptr());
+        };
+        // 초대하기와 돌려보내기. 트레이 메뉴와 같은 수를 고른다.
+        add(menu, state.can_call, MENU_CALL, "꽃핀 초대하기");
+        for (index, count) in CALLS.iter().enumerate() {
+            add(calls, state.room > 0, MENU_MANY + index as u32, &format!("{count}명"));
+        }
+        let fill = if state.room > 0 {
+            format!("가득 채우기 ({}명)", state.room)
+        } else {
+            "가득 채우기".to_string()
+        };
+        add(calls, state.room > 0, MENU_FILL, &fill);
+        popup(menu, state.can_call, calls, "여러 명 초대하기");
+        add(menu, state.can_send, MENU_SEND, "1명만 남기고 보내기");
+        for (index, name) in TOGETHER.iter().enumerate() {
+            add(together, true, MENU_TOGETHER + index as u32, name);
+        }
+        popup(menu, !state.hidden, together, "다 같이");
+        AppendMenuW(menu, MF_SEPARATOR, 0, null());
+        // 바탕색.
         for (index, (name, value)) in COLORS.iter().enumerate() {
-            let flags = if *value == color { MF_STRING | MF_CHECKED } else { MF_STRING };
+            let flags = if *value == state.color { MF_STRING | MF_CHECKED } else { MF_STRING };
             AppendMenuW(colors, flags, (MENU_COLOR + index as u32) as usize, wide(name).as_ptr());
         }
-        let custom = COLORS.iter().all(|(_, value)| *value != color);
+        let custom = COLORS.iter().all(|(_, value)| *value != state.color);
         let flags = if custom { MF_STRING | MF_CHECKED } else { MF_STRING };
         AppendMenuW(colors, flags, MENU_CUSTOM as usize, wide("직접 고르기...").as_ptr());
         AppendMenuW(menu, MF_POPUP, colors as usize, wide("바탕색").as_ptr());
         AppendMenuW(menu, MF_SEPARATOR, 0, null());
         AppendMenuW(menu, MF_STRING, MENU_CLOSE as usize, wide("창 닫기").as_ptr());
+        Some(menu)
+    }
+}
+
+/// 메뉴 항목의 번호를 고른 것으로 바꾼다.
+fn picked(id: u32) -> Option<StudioPick> {
+    let within = |start: u32, count: usize| (start..start + count as u32).contains(&id).then(|| (id - start) as usize);
+    match id {
+        MENU_CALL => Some(StudioPick::Call),
+        MENU_SEND => Some(StudioPick::SendAll),
+        MENU_FILL => Some(StudioPick::CallFill),
+        MENU_CUSTOM => Some(StudioPick::Custom),
+        MENU_CLOSE => Some(StudioPick::Close),
+        _ => within(MENU_MANY, CALLS.len())
+            .map(StudioPick::CallMany)
+            .or_else(|| within(MENU_TOGETHER, TOGETHER.len()).map(StudioPick::Together))
+            .or_else(|| within(MENU_COLOR, COLORS.len()).map(StudioPick::Color)),
+    }
+}
+
+/// 창의 빈 곳을 오른쪽 클릭했을 때의 메뉴를 화면의 `(x, y)`에 띄우고, 고른 것을 돌려준다. 메뉴가 닫힐 때까지
+/// 돌아오지 않는다.
+pub fn pick(owner: HWND, (x, y): (i32, i32), state: &MenuState) -> Option<StudioPick> {
+    let menu = build(state)?;
+    unsafe {
         SetForegroundWindow(owner);
-        let picked = TrackPopupMenuEx(menu, TPM_RIGHTBUTTON | TPM_RETURNCMD | TPM_NONOTIFY, x, y, owner, null());
+        let id = TrackPopupMenuEx(menu, TPM_RIGHTBUTTON | TPM_RETURNCMD | TPM_NONOTIFY, x, y, owner, null());
         PostMessageW(owner, WM_NULL, 0, 0);
         DestroyMenu(menu);
-        match picked as u32 {
-            MENU_CUSTOM => Some(StudioPick::Custom),
-            MENU_CLOSE => Some(StudioPick::Close),
-            id if (MENU_COLOR..MENU_COLOR + COLORS.len() as u32).contains(&id) => {
-                Some(StudioPick::Color((id - MENU_COLOR) as usize))
-            }
-            _ => None,
-        }
+        picked(id as u32)
     }
 }
 
@@ -598,5 +673,51 @@ mod tests {
         let library = system_library("comdlg32.dll");
         assert!(!library.is_null());
         assert!(unsafe { GetProcAddress(library, c"ChooseColorW".as_ptr().cast()) }.is_some());
+    }
+
+    #[test]
+    fn the_menu_on_an_empty_spot_calls_sends_and_plays_together() {
+        use crate::tray::tests::{lines, marked};
+        let state = MenuState { color: 0x0000FF, can_call: true, room: 4, can_send: true, hidden: false };
+        let names = |state: &MenuState| {
+            let menu = build(state).expect("메뉴");
+            let read = marked(lines(menu));
+            unsafe { DestroyMenu(menu) };
+            read
+        };
+        assert_eq!(
+            names(&state),
+            ["꽃핀 초대하기", "여러 명 초대하기", "1명만 남기고 보내기", "다 같이", "-", "바탕색", "-", "창 닫기"]
+        );
+        // 혼자면 보낼 꽃핀이 없고, 더 부를 수 없으면 초대하는 두 줄이 흐리다. 숨겨 둔 동안에는 "다 같이"가 흐리다.
+        let stuck = MenuState { can_call: false, room: 0, can_send: false, hidden: true, ..state };
+        assert_eq!(names(&stuck)[..4], ["(꽃핀 초대하기)", "(여러 명 초대하기)", "(1명만 남기고 보내기)", "(다 같이)"]);
+        // 번호는 고른 것으로 돌아온다.
+        let all = [
+            StudioPick::Call,
+            StudioPick::SendAll,
+            StudioPick::CallFill,
+            StudioPick::Custom,
+            StudioPick::Close,
+            StudioPick::CallMany(2),
+            StudioPick::Together(1),
+            StudioPick::Color(2),
+        ];
+        let ids = [
+            MENU_CALL,
+            MENU_SEND,
+            MENU_FILL,
+            MENU_CUSTOM,
+            MENU_CLOSE,
+            MENU_MANY + 2,
+            MENU_TOGETHER + 1,
+            MENU_COLOR + 2,
+        ];
+        for (id, pick) in ids.into_iter().zip(all) {
+            assert_eq!(picked(id), Some(pick));
+        }
+        for id in [0, 4, 13, 23, 33] {
+            assert_eq!(picked(id), None, "{id}");
+        }
     }
 }

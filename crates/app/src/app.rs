@@ -1073,9 +1073,17 @@ impl App {
         }
     }
 
-    /// 방송 촬영용 창의 메뉴를 띄울 창과 지금의 바탕색.
-    pub fn studio_menu(&self) -> Option<(HWND, u32)> {
-        self.studio.as_ref().map(|studio| (studio.hwnd(), studio.color()))
+    /// 방송 촬영용 창의 메뉴를 띄울 창과, 메뉴가 보여 줄 것.
+    pub fn studio_menu(&self) -> Option<(HWND, studio::MenuState)> {
+        let studio = self.studio.as_ref()?;
+        let state = studio::MenuState {
+            color: studio.color(),
+            can_call: self.can_call(),
+            room: self.room(),
+            can_send: self.can_send(),
+            hidden: self.out_of_sight,
+        };
+        Some((studio.hwnd(), state))
     }
 
     /// 방송 촬영용 창의 메뉴에서 고른 것을 한다. `custom`은 색 고르기 창에서 고른 색이다.
@@ -1089,6 +1097,23 @@ impl App {
             Some(StudioPick::Color(index)) => Some(studio::COLORS[index].1),
             Some(StudioPick::Custom) => custom,
             Some(StudioPick::Close) => return self.close_studio(now),
+            Some(StudioPick::Call) => return self.call_guest(now),
+            Some(StudioPick::CallMany(index)) => {
+                self.call_many(tray::CALLS[index.min(tray::CALLS.len() - 1)], now);
+                None
+            }
+            Some(StudioPick::CallFill) => {
+                self.call_many(self.room(), now);
+                None
+            }
+            Some(StudioPick::SendAll) => {
+                self.send_all(now);
+                None
+            }
+            Some(StudioPick::Together(index)) => {
+                self.play_together(index, now);
+                None
+            }
             None => None,
         };
         if let (Some(color), Some(studio)) = (color, &mut self.studio) {
@@ -1115,11 +1140,12 @@ impl App {
         // 누를 꽃핀: `studio click 번호`처럼 번호를 주면 그 꽃핀, 없으면 첫 꽃핀. 발바닥에서 몸 높이의 절반쯤 위를
         // 누른다.
         let who = match word {
-            "click" | "drag" | "rub" | "menu" => {
-                (number(if word == "drag" { 2 } else { 1 }) as usize).min(self.characters.len().saturating_sub(1))
-            }
+            "click" | "menu" => number(0) as usize,
+            "rub" => number(1) as usize,
+            "drag" => number(2) as usize,
             _ => 0,
-        };
+        }
+        .min(self.characters.len().saturating_sub(1));
         let (body, head) = match self.characters.get(who) {
             Some(character) => {
                 let (x, y) = character.actor().position();
@@ -1147,6 +1173,21 @@ impl App {
             }
             // `studio menu 번호`: 그 꽃핀을 오른쪽 클릭한다(머리 위 단추가 뜬다).
             "menu" => studio::inject(StudioEvent::Menu(body.0, body.1)),
+            // `studio call|many 번호|fill|send|together 번호`: 빈 곳의 메뉴에서 그것을 고른 것으로 친다. 진짜 메뉴는
+            // 띄우지 않는다(띄우면 고를 때까지 기다린다).
+            "call" | "many" | "fill" | "send" | "together" => {
+                let index = number(0) as usize;
+                let pick = match word {
+                    "call" => StudioPick::Call,
+                    "many" => StudioPick::CallMany(index),
+                    "fill" => StudioPick::CallFill,
+                    "send" => StudioPick::SendAll,
+                    _ => StudioPick::Together(index.min(tray::TOGETHER.len() - 1)),
+                };
+                let state = self.studio_menu().map(|(_, state)| state);
+                self.note(now, format!("방송 촬영용 창의 메뉴: {state:?}에서 {pick:?}"));
+                self.studio_picked(Some(pick), None, now)?;
+            }
             "color" => {
                 let index = (number(0) as usize).min(studio::COLORS.len() - 1);
                 if let Some(studio) = &mut self.studio {
