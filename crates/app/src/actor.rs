@@ -889,13 +889,10 @@ impl Actor {
     }
 
     /// 무대가 통째로 옮겨 갔다(방송 촬영용 창을 옮김). 같은 만큼 함께 옮겨 가고, 하던 일은 그대로 이어 간다.
+    /// 그 창 안에는 올라설 다른 창이 없으므로, 딛고 선 창은 따지지 않는다.
     pub fn shift(&mut self, (dx, dy): (f64, f64)) {
         (self.x, self.y, self.home) = (self.x + dx, self.y + dy, self.home + dx);
         self.drag = (self.drag.0 + dx, self.drag.1 + dy);
-        // 딛고 있는 머리도 같이 옮겨 갔다. 머리가 움직인 것으로 보고 따라가지 않게 한다.
-        if let Some((_, left)) = &mut self.on {
-            *left += dx;
-        }
         if let Some(goal) = &mut self.goal {
             *goal += dx;
         }
