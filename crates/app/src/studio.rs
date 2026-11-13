@@ -483,7 +483,7 @@ fn build(state: &MenuState) -> Option<HMENU> {
         // 초대하기와 돌려보내기. 트레이 메뉴와 같은 수를 고른다.
         add(menu, state.can_call, MENU_CALL, "꽃핀 초대하기");
         for (index, count) in CALLS.iter().enumerate() {
-            add(calls, state.room > 0, MENU_MANY + index as u32, &format!("{count}명"));
+            add(calls, true, MENU_MANY + index as u32, &format!("{count}명"));
         }
         let fill = if state.room > 0 {
             format!("가득 채우기 ({}명)", state.room)

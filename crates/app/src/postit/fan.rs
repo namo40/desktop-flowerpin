@@ -52,6 +52,8 @@ const OPEN: f32 = 0.16;
 const STAGGER: f32 = 0.018;
 /// 단추 하나가 머리로 들어가는 데 걸리는 초. 묶음을 열거나 되돌아갈 때다.
 const RETRACT: f32 = 0.12;
+/// 단추 창의 가장 좁은 반폭. 단추가 적은 묶음에서도 이름표가 들어가게 한다.
+const NAME_REACH: f32 = 100.0;
 /// 한 단계에 늘어설 수 있는 단추의 가장 많은 수. 이보다 많으면 반원을 넘어 양 끝 단추가 머리 옆으로 내려온다.
 pub const MOST: usize = 7;
 /// 마우스가 벗어난 뒤 닫히기까지의 초. 한 번도 올라오지 않았으면 더 기다린다.
@@ -65,10 +67,20 @@ const SOURCE: usize = 96;
 /// 단추 하나. 눌렀을 때 무엇을 할지는 앱이 정한다.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Pick {
-    /// 꽃핀을 하나 더 초대한다.
+    /// 묶음: 초대하기(1명, 3명, 5명, 10명, 가득).
     Invite,
-    /// 이 꽃핀을 보낸다.
+    /// 묶음: 보내기(이 꽃핀, 다 보내기).
     Send,
+    /// 꽃핀을 1명, 3명, 5명, 10명 더 초대하거나, 남은 자리만큼 초대한다.
+    CallOne,
+    CallThree,
+    CallFive,
+    CallTen,
+    CallFill,
+    /// 이 꽃핀을 보낸다.
+    SendThis,
+    /// 처음 꽃핀 한 명만 남기고 모두 보낸다.
+    SendAll,
     /// 메모 목록 창을 연다.
     Memos,
     /// 쉬는 시간 알림 판을 연다.
@@ -92,9 +104,16 @@ pub enum Pick {
 
 impl Pick {
     /// 모든 단추.
-    pub const ALL: [Pick; 14] = [
+    pub const ALL: [Pick; 21] = [
         Pick::Invite,
         Pick::Send,
+        Pick::CallOne,
+        Pick::CallThree,
+        Pick::CallFive,
+        Pick::CallTen,
+        Pick::CallFill,
+        Pick::SendThis,
+        Pick::SendAll,
         Pick::Focus,
         Pick::Memos,
         Pick::Links,
@@ -111,7 +130,7 @@ impl Pick {
 
     /// 누르면 안에 든 단추들이 나오는 묶음 단추인가.
     pub fn is_group(self) -> bool {
-        matches!(self, Pick::Links | Pick::Together)
+        matches!(self, Pick::Invite | Pick::Send | Pick::Links | Pick::Together)
     }
 
     /// 마우스를 올리면 뜨는 이름.
@@ -119,6 +138,13 @@ impl Pick {
         match self {
             Pick::Invite => "초대하기",
             Pick::Send => "보내기",
+            Pick::CallOne => "1명 초대",
+            Pick::CallThree => "3명 초대",
+            Pick::CallFive => "5명 초대",
+            Pick::CallTen => "10명 초대",
+            Pick::CallFill => "가득 채우기",
+            Pick::SendThis => "이 꽃핀 보내기",
+            Pick::SendAll => "다 보내기 (1명만 남김)",
             Pick::Memos => "메모 목록",
             Pick::Focus => "쉬는 시간",
             Pick::Chzzk => "치지직 방송",
@@ -139,6 +165,13 @@ impl Pick {
         match self {
             Pick::Invite => "invite",
             Pick::Send => "send",
+            Pick::CallOne => "call1",
+            Pick::CallThree => "call3",
+            Pick::CallFive => "call5",
+            Pick::CallTen => "call10",
+            Pick::CallFill => "fill",
+            Pick::SendThis => "send1",
+            Pick::SendAll => "sendall",
             Pick::Memos => "memos",
             Pick::Focus => "focus",
             Pick::Chzzk => "chzzk",
@@ -159,7 +192,7 @@ impl Pick {
     fn glyph(self) -> Option<&'static str> {
         match self {
             Pick::Invite => Some("\u{E8FA}"),
-            Pick::Send => Some("\u{F3B1}"),
+            Pick::Send | Pick::SendThis => Some("\u{F3B1}"),
             Pick::Memos => Some("\u{E8FD}"),
             Pick::Settings => Some("\u{E713}"),
             Pick::Links => Some("\u{E71B}"),
@@ -167,6 +200,7 @@ impl Pick {
             Pick::Back => Some("\u{E72B}"),
             Pick::Focus => Some("\u{E916}"),
             Pick::Wave | Pick::Stretch | Pick::Yawn => None,
+            Pick::CallOne | Pick::CallThree | Pick::CallFive | Pick::CallTen | Pick::CallFill | Pick::SendAll => None,
             Pick::Chzzk | Pick::Youtube | Pick::Cafe => None,
         }
     }
@@ -184,6 +218,12 @@ impl Pick {
     /// 그림 대신 단추에 적는 짧은 글. 행동은 알맞은 아이콘이 없어 글로 적는다.
     fn caption(self) -> Option<&'static str> {
         match self {
+            Pick::CallOne => Some("1명"),
+            Pick::CallThree => Some("3명"),
+            Pick::CallFive => Some("5명"),
+            Pick::CallTen => Some("10명"),
+            Pick::CallFill => Some("가득"),
+            Pick::SendAll => Some("모두"),
             Pick::Wave => Some("파도"),
             Pick::Stretch => Some("기지개"),
             Pick::Yawn => Some("하품"),
@@ -229,7 +269,8 @@ pub struct Plan {
 pub fn plan(head: (i32, i32), bounds: Rect, scale: f32, count: usize) -> Plan {
     let spots = spread(count);
     let lowest = spots.iter().map(|spot| spot.1).fold(-RADIUS, f32::max);
-    let reach = spots.iter().map(|spot| spot.0.abs()).fold(0.0, f32::max) + BUTTON + EDGE;
+    // 단추가 적어도 이름표(예: "다 보내기 (1명만 남김)")가 잘리지 않을 만큼은 넓힌다.
+    let reach = (spots.iter().map(|spot| spot.0.abs()).fold(0.0, f32::max) + BUTTON + EDGE).max(NAME_REACH);
     // 창의 가장자리. 활의 중심에서 잰 것이다.
     let (left, top) = (-reach, -RADIUS - BUTTON - EDGE);
     // 이름표(높이 22)도 창 안에 들게 한다.
@@ -354,6 +395,8 @@ pub struct Fan {
     leaving: Option<(Option<Pick>, f32)>,
     /// 오른쪽 위에 작은 점을 찍어 둔 단추. 쉬는 시간 알림이 도는 중임을 알린다.
     marked: Option<Pick>,
+    /// 마우스를 올렸을 때 [`Pick::name`] 대신 띄울 이름. "가득 채우기 (12명)"처럼 그때그때 다른 것이다.
+    names: HashMap<Pick, String>,
     /// 마우스가 올라가 있는 단추.
     hot: Option<usize>,
     /// 마우스가 단추 위에 있다. 한 번이라도 올라왔으면 `seen`이다.
@@ -390,6 +433,7 @@ impl Fan {
             level: None,
             leaving: None,
             marked: None,
+            names: HashMap::new(),
             hot: None,
             inside: false,
             seen: false,
@@ -537,10 +581,11 @@ impl Fan {
         // 마우스를 올린 단추의 이름. 부채꼴 안쪽의 한가운데, 양 끝 단추와 같은 높이에 뜬다.
         if let Some((pick, _, _)) = self.hot.map(|at| self.buttons[at]) {
             let middle = self.name_spot();
-            let wide = self.label(pick.name(), 12.0, true, scale).w as f32 / scale + 18.0;
+            let name = self.names.get(&pick).cloned().unwrap_or_else(|| pick.name().to_string());
+            let wide = self.label(&name, 12.0, true, scale).w as f32 / scale + 18.0;
             let rect = (middle.0 - wide / 2.0, middle.1 - 11.0, middle.0 + wide / 2.0, middle.1 + 11.0);
             surface.frame(rect, 11.0, PINK, CREAM, 1.5);
-            let block = self.label(pick.name(), 12.0, true, scale);
+            let block = self.label(&name, 12.0, true, scale);
             surface.stamp(block, middle, DEEP, 1.0);
         }
     }
@@ -562,6 +607,13 @@ impl Postits {
         self.paint_fan();
         window::show(hwnd);
         self.wake();
+    }
+
+    /// 떠 있는 단추들 가운데 그 단추에 마우스를 올렸을 때의 이름을 바꾼다.
+    pub fn name_fan(&mut self, pick: Pick, name: String) {
+        if let Some(fan) = &mut self.fan {
+            fan.names.insert(pick, name);
+        }
     }
 
     /// 떠 있는 단추들 가운데 그 단추의 오른쪽 위에 작은 점을 찍는다.

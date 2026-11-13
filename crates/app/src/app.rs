@@ -306,6 +306,8 @@ pub struct App {
 struct Calls {
     /// 아직 오지 않은 꽃핀의 수.
     waiting: usize,
+    /// 이 꽃핀이 있는 모니터에 온다(머리 위 단추로 불렀을 때). 없거나 그 꽃핀이 없어졌으면 기본 꽃핀이 있는 모니터다.
+    near: Option<HWND>,
     /// 다음 꽃핀이 올 때. 올 꽃핀이 없으면 없다.
     next: Option<Instant>,
 }
@@ -1083,11 +1085,11 @@ impl App {
             Some(StudioPick::Close) => return self.close_studio(now),
             Some(StudioPick::Call) => return self.call_guest(now),
             Some(StudioPick::CallMany(index)) => {
-                self.call_many(tray::CALLS[index.min(tray::CALLS.len() - 1)], now);
+                self.call_many(tray::CALLS[index.min(tray::CALLS.len() - 1)], None, now);
                 None
             }
             Some(StudioPick::CallFill) => {
-                self.call_many(self.room(), now);
+                self.call_many(self.room(), None, now);
                 None
             }
             Some(StudioPick::SendAll) => {
@@ -1915,16 +1917,18 @@ impl App {
         self.crowd_limit().saturating_sub(self.staying() + self.calls.waiting)
     }
 
-    /// 꽃핀을 여러 명 초대한다. 한꺼번에 나타나지 않고 사이를 두고 줄줄이 온다. 기본 꽃핀이 있는 모니터에 온다.
+    /// 꽃핀을 여러 명 초대한다. 한꺼번에 나타나지 않고 사이를 두고 줄줄이 온다. `near` 꽃핀(없으면 기본 꽃핀)이
+    /// 있는 모니터에 온다.
     ///
     /// 자리보다 많이 부르면 한 명씩 올 때마다 가장 먼저 부른 꽃핀이 자리를 내준다. 더 부른 꽃핀이 앉을 수 있는
     /// 자리보다 많이 불러 봐야 방금 온 꽃핀이 바로 돌아가게 되므로, 그 수까지만 부른다.
-    fn call_many(&mut self, count: usize, now: Instant) {
+    fn call_many(&mut self, count: usize, near: Option<HWND>, now: Instant) {
         if count == 0 || !self.can_call() {
             return;
         }
         let seats = self.crowd_limit().saturating_sub(1);
         self.calls.add(count.min(seats), seats, now);
+        self.calls.near = near;
         self.note(now, format!("꽃핀 {count}명을 초대함: 줄줄이 올 꽃핀 {}명", self.calls.waiting));
     }
 
@@ -1935,7 +1939,8 @@ impl App {
         }
         if self.can_call() {
             self.calls.came(now);
-            self.call_guest_near(0, now)?;
+            let near = self.calls.near.and_then(|hwnd| self.find(hwnd)).unwrap_or(0);
+            self.call_guest_near(near, now)?;
         } else if !self.out_of_sight && self.crowd_limit() > 1 {
             // 돌아가는 중인 꽃핀이 많아 창을 더 만들 수 없다. 그 꽃핀들이 사라질 때까지 조금 기다린다.
             self.calls.put_off(now + CALL_GAP);
@@ -2703,15 +2708,26 @@ impl App {
         }
         let (head, _, bounds, dpi) = self.head_of(character);
         let hwnd = character.window().hwnd();
-        let mut buttons = vec![(FanPick::Invite, self.can_call())];
+        let (can_call, room) = (self.can_call(), self.room());
+        let mut buttons = vec![(FanPick::Invite, can_call)];
         let many = self.staying() > 1;
         if many {
             buttons.extend([(FanPick::Send, true), (FanPick::Together, true)]);
         }
         buttons.extend([FanPick::Focus, FanPick::Memos, FanPick::Links, FanPick::Settings].map(|pick| (pick, true)));
+        // 초대하기와 보내기도 묶음이다. 트레이 메뉴와 같이, 남은 자리가 없으면 "가득"만 흐리다.
+        let calls = [FanPick::CallOne, FanPick::CallThree, FanPick::CallFive, FanPick::CallTen];
+        let mut invite: Vec<_> = calls.map(|pick| (pick, can_call)).to_vec();
+        invite.push((FanPick::CallFill, room > 0));
+        let send = vec![(FanPick::SendThis, true), (FanPick::SendAll, self.can_send())];
         let links = [FanPick::Chzzk, FanPick::Youtube, FanPick::Cafe].map(|pick| (pick, true)).to_vec();
         let together = TOGETHER_PICKS.map(|pick| (pick, true)).to_vec();
-        self.postits.open_fan(head, bounds, dpi, &buttons, &[(FanPick::Links, links), (FanPick::Together, together)]);
+        let groups =
+            [(FanPick::Invite, invite), (FanPick::Send, send), (FanPick::Links, links), (FanPick::Together, together)];
+        self.postits.open_fan(head, bounds, dpi, &buttons, &groups);
+        if room > 0 {
+            self.postits.name_fan(FanPick::CallFill, format!("가득 채우기 ({room}명)"));
+        }
         if self.focus.is_some() {
             self.postits.mark_fan(FanPick::Focus);
         }
@@ -2730,9 +2746,15 @@ impl App {
     fn fan_picked(&mut self, pick: FanPick, now: Instant) -> Result<(), PackError> {
         let index = self.menu_character();
         self.release_held(now);
+        let near = self.characters.get(index).map(|character| character.window().hwnd());
         match pick {
-            FanPick::Invite => self.call_guest(now)?,
-            FanPick::Send => self.send_one(index, now),
+            FanPick::CallOne => self.call_guest(now)?,
+            FanPick::CallThree => self.call_many(3, near, now),
+            FanPick::CallFive => self.call_many(5, near, now),
+            FanPick::CallTen => self.call_many(10, near, now),
+            FanPick::CallFill => self.call_many(self.room(), near, now),
+            FanPick::SendThis => self.send_one(index, now),
+            FanPick::SendAll => self.send_all(now),
             FanPick::Memos => {
                 // 메모 목록은 그 꽃핀의 오른쪽 옆에 뜬다. 전에 띄웠던 자리가 있으면 그 자리에 뜬다.
                 if let Some(character) = self.characters.get(index) {
@@ -2751,7 +2773,7 @@ impl App {
                 }
             }
             // 묶음을 열고 되돌아가는 것은 단추들이 알아서 한다.
-            FanPick::Links | FanPick::Together | FanPick::Back => {}
+            FanPick::Invite | FanPick::Send | FanPick::Links | FanPick::Together | FanPick::Back => {}
         }
         Ok(())
     }
@@ -2906,8 +2928,8 @@ impl App {
         match item {
             Some(MenuItem::Quit) => return Ok(self.ask_quit(now)),
             Some(MenuItem::CallOne) => self.call_guest(now)?,
-            Some(MenuItem::CallMany(index)) => self.call_many(tray::CALLS[index], now),
-            Some(MenuItem::CallFill) => self.call_many(self.room(), now),
+            Some(MenuItem::CallMany(index)) => self.call_many(tray::CALLS[index], None, now),
+            Some(MenuItem::CallFill) => self.call_many(self.room(), None, now),
             Some(MenuItem::SendAll) => self.send_all(now),
             // 고르는 사이에 그 꽃핀이 돌아갔으면 아무 일도 하지 않는다.
             Some(MenuItem::SendThis) => self.send_one(self.menu_character(), now),
