@@ -188,6 +188,8 @@ pub enum Command {
     Hello,
     /// `foreground`: 맨 앞 창이 바뀌었다는 알림을 받은 것으로 친다. 다른 창을 누를 때 하는 일을 확인한다.
     Foreground,
+    /// `focus 집중초 쉬는초`: 쉬는 시간 알림을 이 길이(초)로 시작한다. 짧게 돌려 확인한다.
+    Focus(f64, f64),
     /// `cursor x y`: 마우스 커서가 화면의 그 자리에 있는 것으로 친다. `cursor off`면 다시 진짜 커서를 본다.
     /// 커서 따라오기를 진짜 마우스를 움직이지 않고 확인한다.
     Cursor(Option<(i32, i32)>),
@@ -418,6 +420,7 @@ pub fn parse_script(text: &str) -> Result<Vec<Step>, String> {
             (Some("display"), 3) if words[2] == "on" || words[2] == "off" => Command::Dark(words[2] == "off"),
             (Some("hello"), 2) => Command::Hello,
             (Some("foreground"), 2) => Command::Foreground,
+            (Some("focus"), 4) => Command::Focus(number(2)?, number(3)?),
             (Some("cursor"), 3) if words[2] == "off" => Command::Cursor(None),
             (Some("cursor"), 4) => Command::Cursor(Some((number(2)? as i32, number(3)? as i32))),
             (Some("hide"), 3) => Command::Hide(number(2)?),

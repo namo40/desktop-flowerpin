@@ -27,6 +27,7 @@ use crate::checker::{self, Checker};
 use crate::clock::WakeTimer;
 use crate::desktop::Desktop;
 use crate::dev;
+use crate::focus::{self, Focus, Turn};
 use crate::frames::Frames;
 use crate::links::{self, LINKS};
 use crate::live::{self, Event, Live, Reply, Tracker, View};
@@ -85,6 +86,8 @@ const HELD_TAG: &str = "held";
 const HELD_LASTS: Duration = Duration::from_secs(10);
 /// 방송 안내 말풍선의 이름. 방송이 끝나거나 새 방송이 시작되면 이 이름으로 버린다.
 const LIVE_TAG: &str = "live";
+/// 쉬는 시간 알림의 말풍선을 가리키는 이름.
+const FOCUS_TAG: &str = "focus";
 /// 새 버전이 나왔다는 안내의 이름.
 const UPDATE_TAG: &str = "update";
 /// 방송이 끝났다는 말풍선이 떠 있는 시간.
@@ -280,6 +283,8 @@ pub struct App {
     next_wave: Option<Instant>,
     /// 같이 하기에서 누가 따라 할지, 언제 파도를 탈지 고르는 난수.
     rng: Rng,
+    /// 돌고 있는 쉬는 시간 알림.
+    focus: Option<Focus>,
     /// 방해하면 안 되는 동안 알릴 때가 된 메모들. 그때가 지나면 포스트잇을 울린다.
     rings_waiting: Vec<u64>,
     dev: Dev,
@@ -501,6 +506,7 @@ impl App {
             cues: Vec::new(),
             next_wave: None,
             rng: Rng::new(seed ^ 0x5EED),
+            focus: None,
             rings_waiting: Vec::new(),
             dev: Dev {
                 pace: dev::Pace::default(),
@@ -784,6 +790,63 @@ impl App {
             self.note(now, format!("커서 따라오기: {index}번이 x {} 쪽으로", cursor.0));
             // 한 번 불렀으면 커서가 움직였다 다시 머물 때까지 부르지 않는다.
             self.dwell = Some((at, since, true));
+        }
+    }
+
+    /// 쉬는 시간 알림을 [`focus::CHOICES`]의 `choice`번째로 시작한다. 떠 있던 쉬는 시간 말풍선은 치운다.
+    fn start_focus(&mut self, focus: Focus, now: Instant) {
+        if self.notices.cancel(FOCUS_TAG) {
+            self.close_bubble(now);
+        }
+        self.note(now, format!("쉬는 시간 알림 시작: {}", focus.label()));
+        self.focus = Some(focus);
+    }
+
+    /// 쉬는 시간 알림을 그만둔다.
+    fn stop_focus(&mut self, now: Instant) {
+        self.focus = None;
+        if self.notices.cancel(FOCUS_TAG) {
+            self.close_bubble(now);
+        }
+        self.note(now, "쉬는 시간 알림 그만둠".to_string());
+    }
+
+    /// 트레이 메뉴에 보여 줄 쉬는 시간 알림의 상태. 돌고 있지 않으면 없다.
+    pub fn focus_menu(&self) -> Option<String> {
+        self.focus.as_ref().map(Focus::label)
+    }
+
+    /// 쉬는 시간 알림의 시간을 흘리고, 때가 되면 알린다.
+    ///
+    /// 집중 시간이 끝나면 말풍선으로 쉬자고 하고, 나와 있는 꽃핀들이 다 같이 기지개를 켠다. 쉬는 시간이 끝나면
+    /// 말풍선으로 알리고 타이머를 끝낸다. 그 말풍선을 누르면 같은 길이로 다시 시작한다. 전체 화면 프로그램을 쓰거나
+    /// 꽃핀을 숨겨 둔 동안에는 말풍선이 그 뒤에 뜨므로, 메모 알림처럼 Windows 알림으로도 보낸다(설정을 따른다).
+    fn tend_focus(&mut self, now: Instant) {
+        let away = self.away;
+        let Some(focus) = &mut self.focus else { return };
+        let (turn, choice, rest) = (focus.advance(now, away), focus.choice(), focus.rest().as_secs().div_ceil(60));
+        let (title, body, click) = match turn {
+            None => return,
+            Some(Turn::BreakTime) => {
+                let members = self.members();
+                let stretch = together::together(&members, Show::Stretch, &mut self.rng, now);
+                self.cues.extend(stretch);
+                ("쉬는 시간이에요!".to_string(), format!("{rest}분 쉬어요. 기지개 한번 켜요."), Click::Close)
+            }
+            Some(Turn::BackToWork) => {
+                self.focus = None;
+                let minutes = focus::CHOICES[choice].0;
+                ("쉬는 시간 끝!".to_string(), format!("누르면 다시 {minutes}분 집중을 시작해요."), Click::Focus(choice))
+            }
+        };
+        self.note(now, format!("쉬는 시간 알림: {title} {body}"));
+        if self.notices.cancel(FOCUS_TAG) {
+            self.close_bubble(now);
+        }
+        let speech = Speech { title: title.clone(), body: body.clone() };
+        self.notices.push(Notice { kind: Kind::Reminder, speech, lasts: None, click, tag: Some(FOCUS_TAG) });
+        if (self.is_quiet() || self.out_of_sight) && self.settings.is_on(Key::ReminderToast) {
+            self.toast(&title, &body, false, now);
         }
     }
 
@@ -1871,6 +1934,7 @@ impl App {
         }
 
         // 9. 같이 하기에서 때가 된 행동을 시키고, 때가 된 꽃핀의 시간을 흘리고 화면에 넘긴다. 한 명도 남지 않으면 끝낸다.
+        self.tend_focus(now);
         self.play_cues(now);
         self.watch_cursor(now);
         if !self.tick_characters(now)? {
@@ -2053,6 +2117,7 @@ impl App {
         match self.notices.dismiss().map(|notice| notice.click) {
             Some(Click::Open(target)) => self.open(&target),
             Some(Click::Memos) => self.postits.show_all(),
+            Some(Click::Focus(choice)) => self.start_focus(Focus::start(choice, now), now),
             Some(Click::Close) | None => {}
         }
     }
@@ -2360,6 +2425,7 @@ impl App {
         sooner(self.calls.next);
         sooner(self.cues.iter().map(|cue| cue.at).min());
         sooner(self.watches_cursor().then_some(self.next_cursor_check));
+        sooner(self.focus.and_then(|focus| focus.due(self.away)));
         sooner(self.next_wave.filter(|_| !self.out_of_sight));
         sooner(self.dev.deadline);
         // 자원을 재기 시작할 때를 놓치지 않는다. 숨겨 둔 동안에는 달리 깨어날 일이 없다.
@@ -2409,6 +2475,8 @@ impl App {
             Some(MenuItem::MemoList) => self.postits.open_list(win::cursor_position()),
             Some(MenuItem::Link(index)) => self.open(LINKS[index].url),
             Some(MenuItem::Together(index)) => self.play_together(index, now),
+            Some(MenuItem::Focus(choice)) => self.start_focus(Focus::start(choice, now), now),
+            Some(MenuItem::FocusStop) => self.stop_focus(now),
             Some(MenuItem::Show(show)) => {
                 let target = self.menu_character();
                 if let Some(character) = self.characters.get_mut(target) {
@@ -2637,6 +2705,10 @@ impl App {
             dev::Command::Hello => self.blink_all(now),
             dev::Command::Foreground => self.foreground_changed(now),
             dev::Command::Cursor(at) => self.dev.cursor = at,
+            dev::Command::Focus(work, rest) => {
+                let lengths = (Duration::from_secs_f64(work), Duration::from_secs_f64(rest));
+                self.start_focus(Focus::with(0, lengths, now), now);
+            }
             dev::Command::Hide(seconds) => {
                 self.hide = Hide::Until(now + Duration::from_secs_f64(seconds));
             }

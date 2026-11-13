@@ -30,6 +30,8 @@ pub enum Click {
     Open(String),
     /// 포스트잇을 모두 다른 창들 앞으로 가져온다.
     Memos,
+    /// 쉬는 시간 알림을 다시 시작한다. [`crate::focus::CHOICES`]의 몇 번째인지다.
+    Focus(usize),
 }
 
 /// 알릴 것 하나.

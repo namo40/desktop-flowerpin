@@ -14,6 +14,7 @@ mod clock;
 mod desktop;
 mod dev;
 mod dialog;
+mod focus;
 mod frames;
 mod geom;
 mod key;
@@ -92,6 +93,7 @@ fn run(options: dev::Options) -> Result<Vec<String>, PackError> {
                     update: update.as_deref(),
                     can_send: app.can_send(),
                     hidden: app.is_tucked(),
+                    focus: app.focus_menu(),
                 };
                 let item = app::run_modal(&mut app, || tray::pick(owner, x, y, &state));
                 if app.picked(item, Instant::now())? {
