@@ -321,33 +321,40 @@ struct Gathering {
 /// 줄줄이 오기로 한 꽃핀들. 여러 명을 한꺼번에 초대하면 한 명씩 [`CALL_GAP`]만큼 사이를 두고 나타난다.
 #[derive(Debug, Default, PartialEq)]
 struct Calls {
-    /// 아직 오지 않은 꽃핀의 수.
-    waiting: usize,
-    /// 이 꽃핀이 있는 모니터에 온다(머리 위 단추로 불렀을 때). 없거나 그 꽃핀이 없어졌으면 기본 꽃핀이 있는 모니터다.
-    near: Option<HWND>,
+    /// 아직 오지 않은 꽃핀들. 앞에서부터 온다. 꽃핀마다, 어느 꽃핀이 있는 모니터에 올지를 적어 둔다(머리 위 단추로
+    /// 불렀을 때 그 꽃핀). 없거나 그 꽃핀이 없어졌으면 기본 꽃핀이 있는 모니터에 온다. 부를 때마다 따로 적어 두므로,
+    /// 나중에 다른 곳에서 더 불러도 먼저 부른 꽃핀들이 올 자리는 바뀌지 않는다.
+    queue: VecDeque<Option<HWND>>,
     /// 다음 꽃핀이 올 때. 올 꽃핀이 없으면 없다.
     next: Option<Instant>,
 }
 
 impl Calls {
-    /// `count`명을 더 부른다. 오고 있는 꽃핀이 없었으면 첫 꽃핀은 바로 온다. 기다리는 꽃핀은 `most`명을
-    /// 넘지 않는다.
-    fn add(&mut self, count: usize, most: usize, now: Instant) {
-        self.waiting = (self.waiting + count).min(most);
-        if self.waiting > 0 && self.next.is_none() {
+    /// 아직 오지 않은 꽃핀의 수.
+    fn waiting(&self) -> usize {
+        self.queue.len()
+    }
+
+    /// `count`명을 더 부른다. `near` 꽃핀(없으면 기본 꽃핀)이 있는 모니터에 온다. 오고 있는 꽃핀이 없었으면 첫
+    /// 꽃핀은 바로 온다. 기다리는 꽃핀은 `most`명을 넘지 않는다.
+    fn add(&mut self, count: usize, most: usize, near: Option<HWND>, now: Instant) {
+        let room = most.saturating_sub(self.queue.len());
+        self.queue.extend(std::iter::repeat_n(near, count.min(room)));
+        if !self.queue.is_empty() && self.next.is_none() {
             self.next = Some(now);
         }
     }
 
-    /// 한 명이 왔다. 올 꽃핀이 남았으면 다음 때를 잡는다.
-    fn came(&mut self, now: Instant) {
-        self.waiting = self.waiting.saturating_sub(1);
-        self.next = (self.waiting > 0).then(|| now + CALL_GAP);
+    /// 한 명이 왔다. 그 꽃핀이 어느 꽃핀 곁으로 오기로 했는지 돌려준다. 올 꽃핀이 남았으면 다음 때를 잡는다.
+    fn came(&mut self, now: Instant) -> Option<HWND> {
+        let near = self.queue.pop_front().flatten();
+        self.next = (!self.queue.is_empty()).then(|| now + CALL_GAP);
+        near
     }
 
     /// 지금은 올 수 없다. `until`에 다시 본다.
     fn put_off(&mut self, until: Instant) {
-        self.next = (self.waiting > 0).then_some(until);
+        self.next = (!self.queue.is_empty()).then_some(until);
     }
 
     /// 오기로 한 꽃핀들이 오지 않게 한다.
@@ -2060,7 +2067,7 @@ impl App {
         if !self.can_call() {
             return 0;
         }
-        self.crowd_limit().saturating_sub(self.staying() + self.calls.waiting)
+        self.crowd_limit().saturating_sub(self.staying() + self.calls.waiting())
     }
 
     /// 꽃핀을 여러 명 초대한다. 한꺼번에 나타나지 않고 사이를 두고 줄줄이 온다. `near` 꽃핀(없으면 기본 꽃핀)이
@@ -2073,9 +2080,8 @@ impl App {
             return;
         }
         let seats = self.crowd_limit().saturating_sub(1);
-        self.calls.add(count.min(seats), seats, now);
-        self.calls.near = near;
-        self.note(now, format!("꽃핀 {count}명을 초대함: 줄줄이 올 꽃핀 {}명", self.calls.waiting));
+        self.calls.add(count.min(seats), seats, near, now);
+        self.note(now, format!("꽃핀 {count}명을 초대함: 줄줄이 올 꽃핀 {}명", self.calls.waiting()));
     }
 
     /// 줄줄이 오기로 한 꽃핀 가운데 올 때가 된 한 명을 나타나게 한다.
@@ -2084,8 +2090,7 @@ impl App {
             return Ok(());
         }
         if self.can_call() {
-            self.calls.came(now);
-            let near = self.calls.near.and_then(|hwnd| self.find(hwnd)).unwrap_or(0);
+            let near = self.calls.came(now).and_then(|hwnd| self.find(hwnd)).unwrap_or(0);
             self.call_guest_near(near, now)?;
         } else if !self.out_of_sight && self.crowd_limit() > 1 {
             // 돌아가는 중인 꽃핀이 많아 창을 더 만들 수 없다. 그 꽃핀들이 사라질 때까지 조금 기다린다.
@@ -3545,28 +3550,37 @@ mod tests {
         let start = Instant::now();
         let mut calls = Calls::default();
         // 세 명을 부르면 첫 꽃핀은 바로 오고, 나머지는 사이를 두고 온다.
-        calls.add(3, 39, start);
-        assert_eq!((calls.waiting, calls.next), (3, Some(start)));
-        calls.came(start);
-        assert_eq!((calls.waiting, calls.next), (2, Some(start + CALL_GAP)));
+        calls.add(3, 39, None, start);
+        assert_eq!((calls.waiting(), calls.next), (3, Some(start)));
+        assert_eq!(calls.came(start), None);
+        assert_eq!((calls.waiting(), calls.next), (2, Some(start + CALL_GAP)));
         // 오는 중에 더 부르면 줄 뒤에 선다. 다음 꽃핀이 올 때는 그대로다.
-        calls.add(2, 39, start + CALL_GAP / 2);
-        assert_eq!((calls.waiting, calls.next), (4, Some(start + CALL_GAP)));
+        calls.add(2, 39, None, start + CALL_GAP / 2);
+        assert_eq!((calls.waiting(), calls.next), (4, Some(start + CALL_GAP)));
         // 지금 올 수 없으면 조금 뒤에 다시 본다. 수는 줄지 않는다.
         calls.put_off(start + CALL_GAP * 2);
-        assert_eq!((calls.waiting, calls.next), (4, Some(start + CALL_GAP * 2)));
+        assert_eq!((calls.waiting(), calls.next), (4, Some(start + CALL_GAP * 2)));
         // 마지막 꽃핀이 오면 더 깨어날 일이 없다.
         for _ in 0..4 {
             calls.came(start + CALL_GAP * 2);
         }
         assert_eq!(calls, Calls::default());
         // 앉을 자리보다 많이는 기다리지 않는다. 아무도 부르지 않았으면 깨어나지 않는다.
-        calls.add(10, 4, start);
-        calls.add(10, 4, start);
-        assert_eq!(calls.waiting, 4);
+        calls.add(10, 4, None, start);
+        calls.add(10, 4, None, start);
+        assert_eq!(calls.waiting(), 4);
         calls.clear();
-        calls.add(0, 4, start);
+        calls.add(0, 4, None, start);
         calls.put_off(start);
+        assert_eq!(calls, Calls::default());
+        // 어느 꽃핀 곁으로 올지는 부를 때마다 따로 기억한다. 나중에 다른 곳에서 더 불러도 먼저 부른 꽃핀들이 올
+        // 자리는 그대로다.
+        let (left, right) = (0x10 as HWND, 0x20 as HWND);
+        calls.add(2, 39, Some(left), start);
+        calls.add(1, 39, None, start);
+        calls.add(1, 39, Some(right), start);
+        let came: Vec<Option<HWND>> = (0..4).map(|_| calls.came(start)).collect();
+        assert_eq!(came, [Some(left), Some(left), None, Some(right)]);
         assert_eq!(calls, Calls::default());
     }
 
