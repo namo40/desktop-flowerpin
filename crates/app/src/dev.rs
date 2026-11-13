@@ -934,7 +934,7 @@ mod tests {
         let commands: Vec<Command> = crowd.iter().map(|step| step.command.clone()).collect();
         assert_eq!(commands, [Command::Menu(7), Command::Target(2), Command::Crowd]);
         assert_eq!(parse_script("1 foreground").unwrap()[0].command, Command::Foreground);
-        let dark =parse_script("1 display off; 2 display on").unwrap();
+        let dark = parse_script("1 display off; 2 display on").unwrap();
         assert_eq!((&dark[0].command, &dark[1].command), (&Command::Dark(true), &Command::Dark(false)));
         let quiet = parse_script("1 fullscreen on; 2 fullscreen off; 3 lock on; 4 lock off; 5 hide 2.5").unwrap();
         let commands: Vec<Command> = quiet.iter().map(|step| step.command.clone()).collect();

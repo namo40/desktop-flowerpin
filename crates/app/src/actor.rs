@@ -88,6 +88,11 @@ const HOP_SPEED: f64 = 110.0;
 const PERCH_SNAP: f64 = 24.0;
 /// 올라선 창이 움직이면 이만큼(초) 동안 자리를 자주 고친다. 창을 끌고 다닐 때 뒤처져 보이지 않게 한다.
 const RIDE_SMOOTH: f64 = 0.3;
+/// 올라선 창을 흔들면 떨어진다. 창이 한 방향으로 이만큼(px) 넘게 움직였다가 방향을 바꾸는 것을, 바꿀 때마다
+/// 이만큼(초) 안에 이어서 이만큼(번) 하면 흔든 것으로 친다. 창을 끌어 옮기다 조금 되돌리는 정도로는 떨어지지 않는다.
+const SHAKE_LEG: f64 = 24.0;
+const SHAKE_GAP: f64 = 0.6;
+const SHAKE_TURNS: u32 = 3;
 /// 머리를 문지른 거리가 이만큼(px) 쌓이면 쓰다듬은 것으로 친다. 이 시간(초) 동안 문지르지 않으면 쌓인 거리를 버린다.
 const PAT_DISTANCE: f64 = 200.0;
 const PAT_KEEP: f64 = 0.7;
@@ -222,6 +227,43 @@ struct Leap {
     t: f64,
 }
 
+/// 올라선 창을 흔드는지 알아본다. 창이 움직인 만큼을 걸음마다 받는다.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct Shake {
+    /// 가로와 세로마다, 지금 움직이는 방향(-1, 0, 1)과 그 방향으로 움직인 거리(px).
+    axes: [(f64, f64); 2],
+    /// 이어서 방향을 바꾼 횟수와, 마지막으로 바꾼 뒤 흐른 시간(초).
+    turns: u32,
+    quiet: f64,
+}
+
+impl Shake {
+    /// 창이 `dt`초 동안 `moved`만큼 움직였다. `leg`는 방향을 바꾼 것으로 치려면 그 전에 움직였어야 하는 거리다.
+    /// 흔든 것으로 치면 `true`를 돌려준다.
+    fn feed(&mut self, dt: f64, moved: (f64, f64), leg: f64) -> bool {
+        self.quiet += dt;
+        if self.quiet > SHAKE_GAP {
+            self.turns = 0;
+        }
+        for (axis, d) in self.axes.iter_mut().zip([moved.0, moved.1]) {
+            if d.abs() < 0.01 {
+                continue;
+            }
+            let dir = d.signum();
+            if dir == axis.0 {
+                axis.1 += d.abs();
+                continue;
+            }
+            if axis.0 != 0.0 && axis.1 >= leg {
+                self.turns += 1;
+                self.quiet = 0.0;
+            }
+            *axis = (dir, d.abs());
+        }
+        self.turns >= SHAKE_TURNS
+    }
+}
+
 /// 꽃핀의 버릇.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Habits {
@@ -327,6 +369,8 @@ pub struct Actor {
     hop_dir: Option<Dir>,
     /// 올라선 창이 방금 움직였다. 이 시간(초) 동안 자리를 자주 고친다.
     riding: f64,
+    /// 올라선 창을 흔드는지 본다.
+    shake: Shake,
     /// 표시 배율. 길이와 빠르기 상수에 곱한다.
     scale: f64,
     /// 마지막으로 내려앉은 곳.
@@ -390,6 +434,7 @@ impl Actor {
             leap: None,
             hop_dir: None,
             riding: 0.0,
+            shake: Shake::default(),
             scale,
             home: x,
             walk: None,
@@ -823,7 +868,7 @@ impl Actor {
             return;
         }
         // 창 위에 서 있으면 그 윗변이 바닥이고 양 끝이 벽이다.
-        let here = self.footing(motions, around);
+        let here = self.footing(dt, motions, around);
         match self.mode {
             Mode::Ground => self.ground_step(dt, motions, &here),
             _ => self.air_step(dt, motions, &here),
@@ -846,9 +891,12 @@ impl Actor {
     /// 딛고 있는 곳의 상황을 돌려준다. 창 위에 서 있으면 그 윗변이 바닥이고 양 끝이 벽이다.
     ///
     /// 창이 움직였으면 따라 움직인다. 딛고 있던 윗변이 없어졌으면(창을 닫았거나, 최소화했거나, 선 자리가
-    /// 다른 창에 가려졌으면) 그 자리에서 바닥까지 떨어지기 시작한다.
-    fn footing<'a>(&mut self, motions: &Motions, around: &Surroundings<'a>) -> Surroundings<'a> {
-        let Some((window, origin)) = self.on else { return *around };
+    /// 다른 창에 가려졌으면) 그 자리에서 바닥까지 떨어지기 시작한다. 창을 흔들면 놓친 것처럼 떨어진다.
+    fn footing<'a>(&mut self, dt: f64, motions: &Motions, around: &Surroundings<'a>) -> Surroundings<'a> {
+        let Some((window, origin)) = self.on else {
+            self.shake = Shake::default();
+            return *around;
+        };
         if !self.is_standing() {
             return *around;
         }
@@ -876,7 +924,30 @@ impl Actor {
         self.x += dx;
         self.y = perch.y;
         self.on = Some((window, perch.origin));
+        if self.shake.feed(dt, (dx, dy), SHAKE_LEG * self.scale) && self.mode != Mode::Vanish {
+            self.shaken_off(motions);
+            return *around;
+        }
         Surroundings { floor: perch.y, left: perch.left, right: perch.right, ledge: true, ..*around }
+    }
+
+    /// 흔들리는 창에서 놓친다. 그 자리에 잠깐 떠 있다가(hang_to_fall) 창들을 지나쳐 바닥까지 떨어진다.
+    fn shaken_off(&mut self, motions: &Motions) {
+        self.on = None;
+        self.through = true;
+        self.mode = Mode::Release;
+        self.motion = motions.hang_to_fall;
+        self.t = 0.0;
+        self.vy = 0.0;
+        self.vx = 0.0;
+        self.leap = None;
+        self.riding = 0.0;
+        self.shake = Shake::default();
+        self.walk = None;
+        self.turn_to = None;
+        self.pending = None;
+        self.showcase = false;
+        self.sit_left = 0;
     }
 
     /// 장이 바뀌지 않아도 자리를 자주 고쳐야 하는가. 떨어지는 중이거나 끌려가는 중이면 그렇다.
@@ -1054,8 +1125,10 @@ impl Actor {
                 }
                 if self.y >= around.floor {
                     self.touch_down(motions, around.floor, None);
-                } else if let (Mode::Release, Some(perch)) = (self.mode, self.perch_at_feet(around)) {
-                    // 창 윗변 가까이에 놓았다. 떨어뜨리지 않고 그 위에 올려놓는다.
+                } else if let (Mode::Release, false, Some(perch)) =
+                    (self.mode, self.through, self.perch_at_feet(around))
+                {
+                    // 창 윗변 가까이에 놓았다. 떨어뜨리지 않고 그 위에 올려놓는다. 흔들려 놓친 것이면 그대로 떨어진다.
                     self.touch_down(motions, perch.y, Some(perch));
                 } else {
                     self.follow_when_over(motions);
@@ -2126,6 +2199,84 @@ mod tests {
         run(&mut actor, &motions, &among(&moved), 1.0);
         assert!(!actor.moves_smoothly());
         assert_eq!((actor.mode(), actor.position()), (Mode::Ground, (1100.0, 550.0)));
+    }
+
+    /// `WINDOW`를 `(dx, dy)`만큼 옮긴 것.
+    fn shifted(dx: f64, dy: f64) -> Perch {
+        Perch {
+            y: WINDOW.y + dy,
+            left: WINDOW.left + dx,
+            right: WINDOW.right + dx,
+            origin: WINDOW.origin + dx,
+            ..WINDOW
+        }
+    }
+
+    /// 창을 `seconds`초 동안 걸음마다 `at(흐른 시간)`의 자리로 옮기며 시간을 흘린다. 아래에는 `LOWER`가 있다.
+    /// 그동안 거친 동작을 돌려준다.
+    fn move_window(
+        actor: &mut Actor,
+        motions: &Motions,
+        seconds: f64,
+        at: impl Fn(f64) -> (f64, f64),
+    ) -> Vec<MotionId> {
+        let steps = (seconds / STEP).round() as usize;
+        let mut seen = vec![actor.motion()];
+        for i in 1..=steps {
+            let (dx, dy) = at(i as f64 * STEP);
+            let perches = [shifted(dx, dy), LOWER];
+            actor.update(STEP, motions, &among(&perches));
+            if seen.last() != Some(&actor.motion()) {
+                seen.push(actor.motion());
+            }
+        }
+        seen
+    }
+
+    #[test]
+    fn shaking_the_window_shakes_the_character_off() {
+        let motions = sample();
+        for (name, start, wave) in [
+            ("쉬는 중에 좌우로", None, (60.0, 0.0)),
+            ("걸터앉은 중에 좌우로", Some(Whim::Sit), (60.0, 0.0)),
+            ("쉬는 중에 위아래로", None, (0.0, 40.0)),
+        ] {
+            let mut actor = standing_on(&motions, WINDOW, 1000.0, 5);
+            actor.set_habits(Habits { roam: false, whim_rate: 0.0 });
+            if let Some(whim) = start {
+                actor.start(whim, &motions);
+            }
+            run(&mut actor, &motions, &among(&[WINDOW, LOWER]), 1.0);
+            assert_eq!(actor.support(), Some(7), "{name}");
+            // 0.4초에 한 번 왔다 갔다 한다. 1.2초면 방향을 여섯 번 바꾼다.
+            let swing = |t: f64| (t * std::f64::consts::TAU / 0.4).sin();
+            let shaken = move_window(&mut actor, &motions, 1.2, |t| (wave.0 * swing(t), wave.1 * swing(t)));
+            assert!(shaken.contains(&motions.hang_to_fall), "{name}: {shaken:?}");
+            assert_eq!(actor.support(), None, "{name}");
+            // 아래에 다른 창이 있어도 지나쳐 바닥까지 떨어진다.
+            let seen = run(&mut actor, &motions, &among(&[WINDOW, LOWER]), 5.0);
+            assert!(names(&seen).contains(&"fall") && names(&seen).contains(&"land"), "{name}: {seen:?}");
+            assert_eq!(
+                (actor.mode(), actor.support(), actor.position().1),
+                (Mode::Ground, None, AROUND.floor),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn moving_the_window_around_is_not_shaking() {
+        let motions = sample();
+        let mut actor = standing_on(&motions, WINDOW, 1000.0, 5);
+        actor.set_habits(Habits { roam: false, whim_rate: 0.0 });
+        run(&mut actor, &motions, &among(&[WINDOW, LOWER]), 1.0);
+        // 오른쪽으로 300 옮겼다가 다시 왼쪽으로 되돌린다. 방향을 한 번 바꾼다.
+        move_window(&mut actor, &motions, 2.0, |t| (300.0 * (1.0 - (t - 1.0).abs()), 0.0));
+        // 끌고 가다 손이 떨려 조금씩 오간다. 한 번에 움직인 거리가 짧다.
+        move_window(&mut actor, &motions, 1.0, |t| (8.0 * (t * std::f64::consts::TAU / 0.2).sin(), 0.0));
+        // 천천히 왔다 갔다 한다. 방향을 바꾸는 사이가 길다.
+        move_window(&mut actor, &motions, 6.0, |t| (200.0 * (t * std::f64::consts::TAU / 3.0).sin(), 0.0));
+        assert_eq!((actor.mode(), actor.support()), (Mode::Ground, Some(7)));
     }
 
     #[test]
