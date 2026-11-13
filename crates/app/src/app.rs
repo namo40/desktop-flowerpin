@@ -1485,8 +1485,9 @@ impl App {
         self.look.topmost = self.settings.is_on(Key::AlwaysOnTop);
         let look = self.character_look();
         self.characters.iter_mut().for_each(|character| character.set_look(look, now));
+        // 말풍선은 방송 촬영용 창이 열려 있어도 화면에 뜨는 창이다. 설정의 "항상 위"를 그대로 따른다.
         if let Some(bubble) = &self.bubble {
-            bubble.window().set_topmost(look.topmost);
+            bubble.window().set_topmost(self.look.topmost);
         }
         self.apply_habits();
         if !self.live_enabled() {
