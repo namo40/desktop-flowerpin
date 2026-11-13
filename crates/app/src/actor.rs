@@ -499,11 +499,11 @@ impl Actor {
     }
 
     /// 가로 자리 `x`로 걸어가서 멈춘다. 바닥이나 창 위에서 쉬거나 걷고 있을 때만 하고, 그러면 `true`다.
-    /// 이미 그 자리 가까이에 있거나, 할 일을 고른 뒤면 하지 않는다.
-    /// 디딘 곳의 끝까지 가도 닿지 않으면 끝에서 멈춘다.
+    /// 이미 그 자리 가까이에 있거나, 할 일을 고른 뒤거나, 다 같이 할 차례를 기다리는 중이면 하지 않는다.
+    /// 디딘 곳의 끝까지 가도 닿지 않으면 끝에서 멈춘다. 걷는 시간이 다 돼도 멈추지 않고 닿을 때까지 걷는다.
     pub fn come_to(&mut self, x: f64) -> bool {
         let arrive = ARRIVE * self.scale;
-        if self.mode != Mode::Ground || self.leaving || self.pending.is_some() {
+        if self.mode != Mode::Ground || self.leaving || self.pending.is_some() || self.waiting {
             return false;
         }
         if (x - self.x).abs() <= arrive {
@@ -512,8 +512,6 @@ impl Actor {
         self.goal = Some(x);
         self.walk = Some(if x < self.x { Dir::West } else { Dir::East });
         self.turn_to = None;
-        // 닿을 때까지 걷는다. 걷는 시간으로는 멈추지 않는다.
-        self.wait = f64::INFINITY;
         true
     }
 
@@ -1187,6 +1185,7 @@ impl Actor {
         self.mode = Mode::Ground;
         self.motion = motions.idle2;
         self.walk = None;
+        self.goal = None;
         self.turn_to = None;
         self.pending = None;
         self.showcase = false;
@@ -1480,9 +1479,9 @@ impl Actor {
                     self.turn_to = Some(dir.opposite());
                     self.wait = self.rng.range(TURN_PAUSE);
                 }
-            } else if self.wait <= 0.0 {
+            } else if self.goal.is_none() && self.wait <= 0.0 {
+                // 걷는 시간이 다 됐다. 가려는 자리가 있으면 닿을 때까지 걷는다.
                 self.walk = None;
-                self.goal = None;
                 if self.rng.chance(TURN_CHANCE) {
                     self.turn_to = Some(dir.opposite());
                     self.wait = self.rng.range(TURN_PAUSE);
@@ -1494,7 +1493,7 @@ impl Actor {
             if self.wait <= 0.0 {
                 self.turn_to = None;
                 if self.habits.roam && !self.at_edge(dir, around) {
-                    self.walk = Some(dir);
+                    (self.walk, self.goal) = (Some(dir), None);
                     self.wait = self.rng.range(WALK);
                 } else {
                     self.wait = self.rng.range(REST);
@@ -1514,7 +1513,8 @@ impl Actor {
                 if self.at_edge(dir, around) {
                     dir = dir.opposite();
                 }
-                self.walk = Some(dir);
+                // 혼자 걷기 시작한다. 커서를 따라가다 끊긴 자리(남은 목표)로 걸음이 짧게 끝나지 않게 한다.
+                (self.walk, self.goal) = (Some(dir), None);
                 self.wait = self.rng.range(WALK);
             } else {
                 self.wait = self.rng.range(REST);
@@ -2959,5 +2959,29 @@ mod tests {
         assert!(!faller.is_waiting());
         assert!(sleeper.grab(&motions, (1000.0, 900.0)));
         assert!(!sleeper.is_waiting());
+    }
+
+    #[test]
+    fn a_walk_to_the_cursor_that_was_cut_short_leaves_nothing_behind() {
+        let motions = sample();
+        // 커서 쪽으로 걷다가 다 같이 하려고 멈춰 섰고, 차례가 오기 전에 그만뒀다. 그 뒤에도 다시 돌아다닌다.
+        let mut walker = Actor::stand(&motions, 1000.0, AROUND.floor, 1.0, 5);
+        walker.set_habits(Habits { whim_rate: 0.0, ..Habits::default() });
+        assert!(walker.come_to(1600.0));
+        run(&mut walker, &motions, &AROUND, 0.5);
+        assert!(walker.halt(&motions));
+        run(&mut walker, &motions, &AROUND, 0.5);
+        // 기다리는 동안에는 커서 쪽으로 가지 않는다.
+        assert!(walker.is_waiting() && !walker.come_to(1800.0));
+        walker.stop_waiting();
+        let seen = run(&mut walker, &motions, &AROUND, 10.0);
+        assert!(names(&seen).iter().any(|name| name.starts_with("walk")), "{seen:?}");
+        // 걷다가 다른 행동으로 끊기면 가려던 자리는 잊는다. 다음에 혼자 걸을 때 그 자리에서 멈추지 않는다.
+        let mut poked = Actor::stand(&motions, 1000.0, AROUND.floor, 1.0, 5);
+        assert!(poked.come_to(1600.0));
+        run(&mut poked, &motions, &AROUND, 0.3);
+        poked.start(Whim::Stretch, &motions);
+        run(&mut poked, &motions, &AROUND, 6.0);
+        assert_eq!((poked.mode(), poked.goal), (Mode::Ground, None));
     }
 }

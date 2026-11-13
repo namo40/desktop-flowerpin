@@ -675,7 +675,8 @@ impl App {
     }
 
     /// 같이 하기를 따져 볼 꽃핀들. 꽃핀 번호 차례다. `eager`면 메뉴나 단추로 시킨 것이라, 잡혀 있거나 돌아가는
-    /// 꽃핀만 빼고 모두 할 수 있는 것으로 친다([`App::can_join`]). 아니면 쉬거나 걷는 꽃핀만이다.
+    /// 꽃핀만 빼고 모두 할 수 있는 것으로 친다([`App::can_join`]). 아니면 쉬거나 걷는 꽃핀만이고, "다 같이" 할
+    /// 차례를 기다리며 서 있는 꽃핀은 뺀다.
     fn members_for(&self, eager: bool) -> Vec<Member> {
         let dragged = match self.pointer {
             Pointer::Dragging { hwnd } => Some(hwnd),
@@ -691,7 +692,11 @@ impl App {
                 free: if eager {
                     self.can_join(character)
                 } else {
-                    actor.mode() == Mode::Ground && !actor.is_leaving() && hwnd != self.held && hwnd != dragged
+                    actor.mode() == Mode::Ground
+                        && !actor.is_leaving()
+                        && !actor.is_waiting()
+                        && hwnd != self.held
+                        && hwnd != dragged
                 },
                 scale: character.scale().factor(),
             }
